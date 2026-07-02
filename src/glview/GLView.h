@@ -17,6 +17,7 @@
 
  */
 
+#include <array>
 #include <memory>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -81,6 +82,22 @@ public:
   std::vector<SelectedObject> selected_obj;
   std::vector<SelectedObject> shown_obj;
 
+  // Wireframe marker for an in-model camera(): a pyramid from the eye (apex) to
+  // a rectangle of corners (image plane), plus an "up" point for a roof triangle
+  // marking the up direction. Points are precomputed in world space (Vector3d
+  // has no over-alignment, so it is safe in std::vector). Only the interactive
+  // view populates this, so offscreen snapshots (which share paintGL) draw none.
+  struct CameraFrustum {
+    Eigen::Vector3d apex;
+    std::array<Eigen::Vector3d, 4> corners;  // top-left, top-right, bottom-right, bottom-left
+    Eigen::Vector3d up;
+  };
+  std::vector<CameraFrustum> cameraFrustums;
+  void setCameraFrustums(std::vector<CameraFrustum> frustums)
+  {
+    this->cameraFrustums = std::move(frustums);
+  }
+
 #ifdef ENABLE_OPENCSG
   bool is_opencsg_capable;
   bool has_shaders;
@@ -95,5 +112,6 @@ private:
   void showAxes(const Color4f& col);
   void showSmallaxes(const Color4f& col);
   void showScalemarkers(const Color4f& col);
+  void drawCameraFrustums();
   void decodeMarkerValue(double i, double l, int size_div_sm);
 };

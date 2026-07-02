@@ -222,6 +222,9 @@ void GLView::paintGL()
     showObject(obj, eyedir);
   }
   glDisable(GL_LIGHTING);
+  // Draw camera() frustum markers in world space (only the interactive view
+  // populates cameraFrustums; offscreen snapshots leave it empty).
+  drawCameraFrustums();
   if (showaxes) GLView::showSmallaxes(axescolor);
 
   // Workaround for inconsistent QT behavior related to handling custom OpenGL widgets that
@@ -326,6 +329,40 @@ void GLView::initializeGL()
 #ifdef ENABLE_OPENCSG
   enable_opencsg_shaders();
 #endif
+}
+
+void GLView::drawCameraFrustums()
+{
+  if (this->cameraFrustums.empty()) return;
+
+  glDisable(GL_LIGHTING);
+  glLineWidth(1.5);
+  glColor3f(0.25f, 0.6f, 1.0f);  // light blue
+
+  for (const auto& f : this->cameraFrustums) {
+    const Eigen::Vector3d& apex = f.apex;
+
+    glBegin(GL_LINES);
+    for (const auto& c : f.corners) {  // apex -> corners
+      glVertex3d(apex.x(), apex.y(), apex.z());
+      glVertex3d(c.x(), c.y(), c.z());
+    }
+    for (int i = 0; i < 4; ++i) {  // image-plane rectangle
+      const Eigen::Vector3d& a = f.corners[i];
+      const Eigen::Vector3d& b = f.corners[(i + 1) % 4];
+      glVertex3d(a.x(), a.y(), a.z());
+      glVertex3d(b.x(), b.y(), b.z());
+    }
+    glEnd();
+
+    // "Up" indicator: a roof triangle above the top edge.
+    glBegin(GL_LINE_LOOP);
+    glVertex3d(f.corners[0].x(), f.corners[0].y(), f.corners[0].z());
+    glVertex3d(f.corners[1].x(), f.corners[1].y(), f.corners[1].z());
+    glVertex3d(f.up.x(), f.up.y(), f.up.z());
+    glEnd();
+  }
+  glLineWidth(2);
 }
 
 void GLView::showSmallaxes(const Color4f& col)

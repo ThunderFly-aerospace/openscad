@@ -124,7 +124,9 @@
 #include "gui/ai/AIDock.h"
 #include "gui/CameraViewDock.h"
 #include "core/CameraNode.h"
+#include "glview/GLView.h"
 #include "glview/OffscreenView.h"
+#include "utils/camera_math.h"
 #include "gui/Editor.h"
 #include "gui/Export3mfDialog.h"
 #include "gui/ExportPdfDialog.h"
@@ -3727,13 +3729,46 @@ void MainWindow::setupCameraDock()
 
 void MainWindow::refreshCameras()
 {
+  const auto cameras = this->rootNode ? collectCameras(this->rootNode) : std::vector<CameraInfo>{};
+
+  // Frustum markers in the interactive view are updated on every preview,
+  // regardless of the dock's visibility.
+  std::vector<GLView::CameraFrustum> frustums;
+  double markerLength = 0.15 * this->qglview->cam.zoomValue();
+  if (!(markerLength > 0)) markerLength = 20.0;
+  for (const auto& info : cameras) {
+    if (!info.node) continue;
+    const double fov = info.node->fov >= 0
+                         ? info.node->fov
+                         : camera_math::focalToFovDegrees(info.node->focal, info.node->sensor);
+    const double aspect = info.node->pixel_height > 0
+                            ? static_cast<double>(info.node->pixel_width) / info.node->pixel_height
+                            : 1.0;
+    const double halfHeight = markerLength * std::tan(fov * M_PI / 360.0);
+    const double halfWidth = halfHeight * aspect;
+    const Eigen::Matrix4d m = info.world.matrix();
+    auto pt = [&](double x, double y, double z) {
+      const Eigen::Vector4d p = m * Eigen::Vector4d(x, y, z, 1.0);
+      return Eigen::Vector3d(p.x(), p.y(), p.z());
+    };
+    GLView::CameraFrustum fr;
+    fr.apex = m.block<3, 1>(0, 3);
+    fr.corners = {pt(-halfWidth, halfHeight, -markerLength), pt(halfWidth, halfHeight, -markerLength),
+                  pt(halfWidth, -halfHeight, -markerLength),
+                  pt(-halfWidth, -halfHeight, -markerLength)};
+    fr.up = pt(0.0, 1.5 * halfHeight, -markerLength);
+    frustums.push_back(fr);
+  }
+  this->qglview->setCameraFrustums(std::move(frustums));
+  this->qglview->update();
+
+  // Snapshots are expensive, so only render them while the dock is visible.
   if (!this->cameraDock || !this->cameraDock->isVisible()) return;
   if (!this->rootNode) {
     this->cameraDock->clearSnapshots();
     return;
   }
 
-  const auto cameras = collectCameras(this->rootNode);
   QList<QImage> images;
   QStringList names;
   ViewOptions options;  // OpenCSG previewer, no axes/edges/crosshairs
