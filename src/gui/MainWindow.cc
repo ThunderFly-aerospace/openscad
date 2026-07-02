@@ -3734,10 +3734,12 @@ void MainWindow::refreshCameras()
   // Frustum markers in the interactive view are updated on every preview,
   // regardless of the dock's visibility.
   std::vector<GLView::CameraFrustum> frustums;
-  double markerLength = 0.15 * this->qglview->cam.zoomValue();
-  if (!(markerLength > 0)) markerLength = 20.0;
+  double autoLength = 0.15 * this->qglview->cam.zoomValue();
+  if (!(autoLength > 0)) autoLength = 20.0;
   for (const auto& info : cameras) {
     if (!info.node) continue;
+    // Per-camera marker length in mm, or the zoom-scaled auto length.
+    const double markerLength = info.node->marker > 0 ? info.node->marker : autoLength;
     const double fov = info.node->fov >= 0
                          ? info.node->fov
                          : camera_math::focalToFovDegrees(info.node->focal, info.node->sensor);

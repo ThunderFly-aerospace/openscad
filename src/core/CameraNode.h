@@ -43,6 +43,10 @@ public:
   std::string camera_name;
 
   Projection projection{Projection::PERSPECTIVE};
+
+  // Length (mm, world units) of the wireframe frustum marker in the 3D view.
+  // Negative means "auto" (scaled to the current zoom).
+  double marker{-1.0};
 };
 
 // A camera marker together with its accumulated world transform, produced by

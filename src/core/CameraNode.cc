@@ -51,7 +51,7 @@ static std::shared_ptr<AbstractNode> builtin_camera(const ModuleInstantiation *i
 
   Parameters parameters = Parameters::parse(std::move(arguments), inst->location(), {},
                                             {"focal", "sensor", "fov", "width", "height", "name",
-                                             "projection"});
+                                             "projection", "marker"});
 
   node->focal = parameters.get("focal", node->focal);
   node->sensor = parameters.get("sensor", node->sensor);
@@ -84,6 +84,10 @@ static std::shared_ptr<AbstractNode> builtin_camera(const ModuleInstantiation *i
 
   node->camera_name = parameters.get("name", node->camera_name);
 
+  // marker: explicit frustum length in mm; <= 0 or absent keeps auto (-1).
+  const double marker = parameters.get("marker", -1.0);
+  if (marker > 0) node->marker = marker;
+
   if (parameters["projection"].type() == Value::Type::STRING) {
     const auto p = boost::algorithm::to_lower_copy(parameters["projection"].toString());
     if (p == "ortho" || p == "orthogonal") {
@@ -113,6 +117,9 @@ std::string CameraNode::toString() const
          << (this->projection == Projection::ORTHOGONAL ? "orthogonal" : "perspective") << "\"";
   if (!this->camera_name.empty()) {
     stream << ", name = \"" << this->camera_name << "\"";
+  }
+  if (this->marker > 0) {
+    stream << ", marker = " << this->marker;
   }
   stream << ")";
   return stream.str();
@@ -154,5 +161,6 @@ void register_builtin_camera()
                    "camera(focal = 35, sensor = 24, width = 1920, height = 1080)",
                    "camera(fov = 45, width = 1920, height = 1080)",
                    "camera(..., name = \"front\", projection = \"perspective\")",
+                   "camera(..., marker = 40)  // frustum length in mm (default auto)",
                  });
 }
