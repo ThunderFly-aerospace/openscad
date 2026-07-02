@@ -20,7 +20,27 @@ i její **testy** — bez zelených testů není fáze hotová.
 
 ---
 
-## Fáze 0 — baseline (než sáhneme na kód)  ⛳ dělá se první
+## Stav implementace
+
+- **Fáze 0 (baseline)** — ✅ **HOTOVO**. Build masteru, `ctest` baseline zelený
+  (2721 testů). Pozn.: hrstka `preview-*`/`render-*` image testů je flaky pod
+  softwarovým GL (llvmpipe) při `-j`, v `-j1` projdou — nejde o regresi.
+- **Fáze 1 (kamery)** — ✅ **HOTOVO** (větev `cam_and_drawings`, 5 commitů nad
+  `master`, viz níže). Builtin `camera()`, neviditelná geometrie, sběr kamer,
+  převod matice→pohled, offscreen render snímků (s barvami z `color()`), dok
+  „Cameras" + Save PNG, drátěné frustumy v 3D, `marker=`, skrytí frustumu v F6.
+  Unit + regresní (`dump/echo-camera-node`) testy zelené; ověřeno i vizuálně v
+  GUI.
+  - Commity: `f934423bd` jádro+math+testy · `e58cdc857` engine+dok+F5 ·
+    `a88628d89` frustum · `859caac72` `marker=` · `b359bb7ab` skrytí frustumu v F6.
+  - Volitelné navazující (mimo kroky 1–9): CLI `--export-cameras` (headless
+    dávkový render z kamer + odemkne render regresní test), GUI test doku.
+- **Fáze 2 (výkresy + kvóty)** — 🔶 další na řadě; sdílí infrastrukturu sběru
+  marker-uzlů s kamerami (`dimref`).
+
+---
+
+## Fáze 0 — baseline (než sáhneme na kód)  ✅ HOTOVO
 
 Cíl: mít jistotu, na čem stavíme, a referenci pro „nerozbilo se nic navíc".
 
@@ -38,7 +58,7 @@ Bez úspěšné Fáze 0 nezačínáme psát kód.
 
 ---
 
-## Fáze 1 — kamery v modelu  ✅ rozhodnuto, připraveno k implementaci
+## Fáze 1 — kamery v modelu  ✅ HOTOVO (viz Stav implementace výše)
 
 ### Zadání
 Umístit do modelu jednu či více kamer s parametry (rozlišení, ohnisko).
