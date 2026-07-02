@@ -93,10 +93,14 @@ public:
     Eigen::Vector3d up;
   };
   std::vector<CameraFrustum> cameraFrustums;
+  // Frustums are a preview aid: shown in preview/thrown-together, hidden in the
+  // F6 rendered view (MainWindow toggles this per view mode).
+  bool showCameraFrustums{true};
   void setCameraFrustums(std::vector<CameraFrustum> frustums)
   {
     this->cameraFrustums = std::move(frustums);
   }
+  void setShowCameraFrustums(bool show) { this->showCameraFrustums = show; }
 
 #ifdef ENABLE_OPENCSG
   bool is_opencsg_capable;

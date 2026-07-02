@@ -2662,6 +2662,8 @@ void MainWindow::viewModeRender()
 {
   previewModeGroup->setEnabled(false);
   this->qglview->setRenderer(this->geomRenderer);
+  // Frustum markers are a preview aid; hide them in the rendered (F6) view.
+  this->qglview->setShowCameraFrustums(false);
   this->qglview->updateColorScheme();
   this->qglview->update();
 }
@@ -2682,6 +2684,7 @@ void MainWindow::viewModePreview()
     viewActionPreview->setChecked(true);
     this->qglview->setRenderer(this->previewRenderer ? this->previewRenderer
                                                      : this->thrownTogetherRenderer);
+    this->qglview->setShowCameraFrustums(true);
     this->qglview->updateColorScheme();
     this->qglview->update();
   } else {
@@ -2711,6 +2714,7 @@ void MainWindow::viewModeThrownTogether()
   previewModeGroup->setEnabled(true);
   viewActionThrownTogether->setChecked(true);
   this->qglview->setRenderer(this->thrownTogetherRenderer);
+  this->qglview->setShowCameraFrustums(true);
   this->qglview->updateColorScheme();
   this->qglview->update();
 }

@@ -333,7 +333,7 @@ void GLView::initializeGL()
 
 void GLView::drawCameraFrustums()
 {
-  if (this->cameraFrustums.empty()) return;
+  if (!this->showCameraFrustums || this->cameraFrustums.empty()) return;
 
   glDisable(GL_LIGHTING);
   glLineWidth(1.5);
