@@ -361,6 +361,10 @@ class OffscreenView;
 std::string get_current_iso8601_date_time_utc();
 
 std::unique_ptr<OffscreenView> prepare_preview(Tree& tree, const ViewOptions& options, Camera& camera);
+// Render an offscreen preview from the pose and lens of an in-model camera()
+// marker (see collectCameras / CameraInfo). Colors from color() are preserved.
+std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptions& options,
+                                                     const struct CameraInfo& info);
 bool export_png(const std::shared_ptr<const class Geometry>& root_geom, const ViewOptions& options,
                 Camera& camera, std::ostream& output);
 bool export_png(const OffscreenView& glview, std::ostream& output);

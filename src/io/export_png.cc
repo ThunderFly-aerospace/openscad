@@ -3,6 +3,9 @@
 #include <memory>
 #include <ostream>
 
+#include <algorithm>
+
+#include "core/CameraNode.h"
 #include "core/Tree.h"
 #include "geometry/Geometry.h"
 #include "geometry/linalg.h"
@@ -12,6 +15,7 @@
 #include "glview/RenderSettings.h"
 #include "glview/Renderer.h"
 #include "io/export.h"
+#include "utils/camera_math.h"
 #include "utils/printutils.h"
 
 #ifndef NULLGL
@@ -133,6 +137,86 @@ bool export_png(const OffscreenView& glview, std::ostream& output)
   return true;
 }
 
+namespace {
+
+Camera cameraFromNode(const CameraNode& node)
+{
+  Camera cam;
+  cam.pixel_width = node.pixel_width;
+  cam.pixel_height = node.pixel_height;
+  cam.projection = node.projection == CameraNode::Projection::ORTHOGONAL
+                     ? Camera::ProjectionType::ORTHOGONAL
+                     : Camera::ProjectionType::PERSPECTIVE;
+  // fov is the vertical field of view; the horizontal extent follows from the
+  // pixel aspect ratio in gluPerspective/glOrtho.
+  cam.fov = node.fov >= 0 ? node.fov : camera_math::focalToFovDegrees(node.focal, node.sensor);
+  cam.viewall = false;
+  cam.autocenter = false;
+  return cam;
+}
+
+// Pick a viewer_distance that keeps the scene within the [0.1*d, 100*d] clip
+// planes measured from the eye. The eye world position is preserved regardless.
+double distanceForScene(const Eigen::Vector3d& eye, const BoundingBox& bbox)
+{
+  if (bbox.isEmpty()) return 140.0;
+  const double toCenter = (bbox.center() - eye).norm();
+  const double radius = bbox.diagonal().norm() / 2.0;
+  return std::max({toCenter, 2.0 * radius, 1.0});
+}
+
+}  // namespace
+
+std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptions& options,
+                                                     const CameraInfo& info)
+{
+  if (!info.node) return nullptr;
+  Camera camera = cameraFromNode(*info.node);
+
+  CsgInfo csgInfo = CsgInfo();
+  csgInfo.compile_products(tree);
+
+  std::unique_ptr<OffscreenView> glview;
+  try {
+    glview = std::make_unique<OffscreenView>(camera.pixel_width, camera.pixel_height);
+  } catch (const OffscreenViewException& ex) {
+    LOG("Can't create OffscreenView: %1$s.", ex.what());
+    return nullptr;
+  }
+
+  std::shared_ptr<Renderer> renderer;
+  if (options.previewer == Previewer::OPENCSG) {
+#ifdef ENABLE_OPENCSG
+    renderer = std::make_shared<OpenCSGRenderer>(csgInfo.root_products, csgInfo.highlights_products,
+                                                 csgInfo.background_products);
+#else
+    renderer = std::make_shared<ThrownTogetherRenderer>(
+      csgInfo.root_products, csgInfo.highlights_products, csgInfo.background_products);
+#endif
+  } else {
+    renderer = std::make_shared<ThrownTogetherRenderer>(
+      csgInfo.root_products, csgInfo.highlights_products, csgInfo.background_products);
+  }
+  glview->setRenderer(renderer);
+
+  const BoundingBox bbox = glview->getRenderer()->getBoundingBox();
+  const Eigen::Vector3d eye = info.world.translation();
+  camera.setFromMatrix(info.world, distanceForScene(eye, bbox));
+  glview->setCamera(camera);
+
+#ifdef ENABLE_OPENCSG
+  OpenCSG::setContext(0);
+  OpenCSG::setOption(OpenCSG::OffscreenSetting, OpenCSG::FrameBufferObject);
+#endif
+  glview->setColorScheme(RenderSettings::inst()->colorscheme);
+  glview->setShowAxes(options["axes"]);
+  glview->setShowScaleProportional(options["scales"]);
+  glview->setShowEdges(options["edges"]);
+  glview->setShowCrosshairs(options["crosshairs"]);
+  glview->paintGL();
+  return glview;
+}
+
 #else  // NULLGL
 
 bool export_png(const std::shared_ptr<const Geometry>& root_geom, const ViewOptions& options,
@@ -141,6 +225,11 @@ bool export_png(const std::shared_ptr<const Geometry>& root_geom, const ViewOpti
   return false;
 }
 std::unique_ptr<OffscreenView> prepare_preview(Tree& tree, const ViewOptions& options, Camera& camera)
+{
+  return nullptr;
+}
+std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptions& options,
+                                                     const CameraInfo& info)
 {
   return nullptr;
 }

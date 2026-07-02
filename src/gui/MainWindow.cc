@@ -122,6 +122,9 @@
 #include "gui/ColorList.h"
 #include "gui/Dock.h"
 #include "gui/ai/AIDock.h"
+#include "gui/CameraViewDock.h"
+#include "core/CameraNode.h"
+#include "glview/OffscreenView.h"
 #include "gui/Editor.h"
 #include "gui/Export3mfDialog.h"
 #include "gui/ExportPdfDialog.h"
@@ -296,6 +299,7 @@ MainWindow::MainWindow(const QStringList& filenames) : rubberBandManager(this)
   setupFontList();
   setupColorList();
   setupAIDock();
+  setupCameraDock();
   setupDocks();
 
   setup3DView();
@@ -1871,6 +1875,8 @@ void MainWindow::csgRender()
     const QString filename = QString("frame%1.png").arg(steps, 5, 10, QChar('0'));
     img.save(filename, "PNG");
   }
+
+  refreshCameras();
 
   compileEnded();
 }
@@ -3707,6 +3713,46 @@ void MainWindow::setupAIDock()
   QObject::connect(this->aiDock, &Dock::visibilityChanged, this, &MainWindow::onAIDockVisibilityChanged);
 }
 
+void MainWindow::setupCameraDock()
+{
+  this->cameraDock = new CameraViewDock(this);
+  addDockWidget(Qt::RightDockWidgetArea, this->cameraDock);
+  this->cameraDock->hide();
+
+  // Re-render snapshots when the dock becomes visible (e.g. opened from the menu).
+  QObject::connect(this->cameraDock, &Dock::visibilityChanged, this, [this](bool visible) {
+    if (visible) refreshCameras();
+  });
+}
+
+void MainWindow::refreshCameras()
+{
+  if (!this->cameraDock || !this->cameraDock->isVisible()) return;
+  if (!this->rootNode) {
+    this->cameraDock->clearSnapshots();
+    return;
+  }
+
+  const auto cameras = collectCameras(this->rootNode);
+  QList<QImage> images;
+  QStringList names;
+  ViewOptions options;  // OpenCSG previewer, no axes/edges/crosshairs
+  for (const auto& info : cameras) {
+    QImage image;
+    if (auto glview = render_camera_preview(this->tree, options, info)) {
+      std::ostringstream stream(std::ios::out | std::ios::binary);
+      if (glview->save(stream)) {
+        const std::string data = stream.str();
+        image.loadFromData(reinterpret_cast<const uchar *>(data.data()),
+                           static_cast<int>(data.size()), "PNG");
+      }
+    }
+    images.append(image);
+    names.append(info.node ? QString::fromStdString(info.node->camera_name) : QString());
+  }
+  this->cameraDock->setSnapshots(images, names);
+}
+
 /**
   Set up resources related to the 3d View
  */
@@ -3774,7 +3820,8 @@ void MainWindow::setupDocks()
     {fontListDock, _("&Font List")},
     {colorListDock, _("C&olor List")},
     {viewportControlDock, _("&Viewport-Control")},
-    {aiDock,_("&AI Chat")}
+    {aiDock,_("&AI Chat")},
+    {cameraDock, _("&Cameras")}
   };
   // clang-format off
 

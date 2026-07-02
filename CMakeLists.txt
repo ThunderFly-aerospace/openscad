@@ -1359,6 +1359,7 @@ set(GUI_SOURCES
   src/gui/parameter/ParameterVirtualWidget.cc
   src/gui/parameter/ParameterWidget.cc
   src/gui/ai/AIDock.cc
+  src/gui/CameraViewDock.cc
   src/gui/ai/ChatWidget.cc
   src/gui/ai/ChatInputEdit.cc
   ${INPUT_DRIVER_SOURCES}
@@ -1432,6 +1433,7 @@ set(GUI_HEADERS
     src/gui/parameter/ParameterVirtualWidget.h
     src/gui/parameter/ParameterWidget.h
     src/gui/ai/AIDock.h
+    src/gui/CameraViewDock.h
     src/gui/ai/ChatWidget.h
     src/gui/ai/ChatInputEdit.h
 )
