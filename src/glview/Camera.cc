@@ -1,6 +1,7 @@
 #include "glview/Camera.h"
 #include "geometry/linalg.h"
 #include "glview/RenderSettings.h"
+#include "utils/camera_math.h"
 #include "utils/printutils.h"
 #include "utils/degree_trig.h"
 
@@ -50,6 +51,14 @@ void Camera::setup(std::vector<double> params)
     assert(false && "Gimbal cam needs 7 numbers, Vector camera needs 6");
   }
   locked = true;
+}
+
+void Camera::setFromMatrix(const Transform3d& world, double distance)
+{
+  const auto g = camera_math::gimbalFromMatrix(world.matrix(), distance);
+  object_trans = g.translation;
+  object_rot = g.rotation;
+  viewer_distance = g.distance;
 }
 /*!
    Moves camera so that the given bbox is fully visible.

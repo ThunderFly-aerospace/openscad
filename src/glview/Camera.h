@@ -29,6 +29,10 @@ public:
   enum class ProjectionType { ORTHOGONAL, PERSPECTIVE } projection{ProjectionType::PERSPECTIVE};
   Camera();
   void setup(std::vector<double> params);
+  // Position the (gimbal) camera from a 4x4 world transform of a camera()
+  // marker that looks along local -Z with local +Y up. `distance` only affects
+  // clip planes / orthographic scale; the eye world position is preserved.
+  void setFromMatrix(const Transform3d& world, double distance);
   void gimbalDefaultTranslate();
   void setProjection(ProjectionType type);
   void zoom(int delta, bool relative);

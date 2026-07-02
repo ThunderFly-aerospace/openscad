@@ -1006,6 +1006,7 @@ set(CORE_SOURCES
   src/core/Builtins.cc
   src/core/CSGNode.cc
   src/core/CSGTreeEvaluator.cc
+  src/core/CameraNode.cc
   src/core/CgalAdvNode.cc
   src/core/Children.cc
   src/core/ColorNode.cc
@@ -1118,6 +1119,7 @@ set(CORE_SOURCES
   src/utils/printutils.cc
   src/utils/svg.cc
   src/utils/vector_math.cc
+  src/utils/camera_math.cc
   src/utils/version_check.h
   ${LIB3MF_SOURCES}
   ${PLATFORM_SOURCES}

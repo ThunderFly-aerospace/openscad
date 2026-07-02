@@ -1117,6 +1117,10 @@ add_cmdline_test(echo-cli-view-variables-6         OPENSCAD SUFFIX echo FILES ${
 add_cmdline_test(dump-cli-view-variables-6         OPENSCAD SUFFIX csg FILES ${TEST_SCAD_DIR}/misc/test-view-variables.scad ARGS --camera 10,20,30,40,50,60)
 add_cmdline_test(preview-cli-view-variables-6      OPENSCAD SUFFIX png FILES ${TEST_SCAD_DIR}/misc/test-view-variables.scad ARGS --camera 10,20,30,40,50,60)
 
+# camera() marker node: must parse and dump as an empty node (no geometry).
+add_cmdline_test(dump-camera-node          OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/camera-node.scad)
+add_cmdline_test(echo-camera-node          OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/camera-node.scad)
+
 set(CAMERA_TEST           "${TEST_SCAD_DIR}/3D/misc/camera-tests.scad")
 set(CAMERA_TEST_OFFCENTER "${TEST_SCAD_DIR}/3D/misc/camera-tests-offcenter.scad")
 set(CAMERA_TEST_VP        "${TEST_SCAD_DIR}/3D/misc/camera-vp.scad")
