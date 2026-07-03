@@ -225,6 +225,7 @@ void GLView::paintGL()
   // Draw camera() frustum markers in world space (only the interactive view
   // populates cameraFrustums; offscreen snapshots leave it empty).
   drawCameraFrustums();
+  drawDimrefMarkers();
   if (showaxes) GLView::showSmallaxes(axescolor);
 
   // Workaround for inconsistent QT behavior related to handling custom OpenGL widgets that
@@ -362,6 +363,43 @@ void GLView::drawCameraFrustums()
     glVertex3d(f.up.x(), f.up.y(), f.up.z());
     glEnd();
   }
+  glLineWidth(2);
+}
+
+void GLView::drawDimrefMarkers()
+{
+  if (!this->showDimrefMarkers ||
+      (this->dimrefPoints.empty() && this->dimrefLines.empty())) {
+    return;
+  }
+
+  glDisable(GL_LIGHTING);
+
+  // Dimension lines between paired anchors.
+  glLineWidth(1.5);
+  glColor3f(0.85f, 0.2f, 0.2f);  // red
+  glBegin(GL_LINES);
+  for (const auto& [a, b] : this->dimrefLines) {
+    glVertex3d(a.x(), a.y(), a.z());
+    glVertex3d(b.x(), b.y(), b.z());
+  }
+  glEnd();
+
+  // A small 3D cross at each anchor, sized relative to the current zoom.
+  double s = 0.02 * this->cam.zoomValue();
+  if (!(s > 0)) s = 1.0;
+  glLineWidth(2.0);
+  glColor3f(0.15f, 0.45f, 0.95f);  // blue
+  glBegin(GL_LINES);
+  for (const auto& p : this->dimrefPoints) {
+    glVertex3d(p.x() - s, p.y(), p.z());
+    glVertex3d(p.x() + s, p.y(), p.z());
+    glVertex3d(p.x(), p.y() - s, p.z());
+    glVertex3d(p.x(), p.y() + s, p.z());
+    glVertex3d(p.x(), p.y(), p.z() - s);
+    glVertex3d(p.x(), p.y(), p.z() + s);
+  }
+  glEnd();
   glLineWidth(2);
 }
 

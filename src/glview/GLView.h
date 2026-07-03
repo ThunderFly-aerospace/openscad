@@ -102,6 +102,20 @@ public:
   }
   void setShowCameraFrustums(bool show) { this->showCameraFrustums = show; }
 
+  // In-model dimref() anchors shown in the 3D view: a small cross per anchor
+  // plus the dimension lines between paired anchors. Like frustums, these are a
+  // preview aid, hidden in the F6 rendered view.
+  std::vector<Eigen::Vector3d> dimrefPoints;
+  std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> dimrefLines;
+  bool showDimrefMarkers{true};
+  void setDimrefMarkers(std::vector<Eigen::Vector3d> points,
+                        std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> lines)
+  {
+    this->dimrefPoints = std::move(points);
+    this->dimrefLines = std::move(lines);
+  }
+  void setShowDimrefMarkers(bool show) { this->showDimrefMarkers = show; }
+
 #ifdef ENABLE_OPENCSG
   bool is_opencsg_capable;
   bool has_shaders;
@@ -117,5 +131,6 @@ private:
   void showSmallaxes(const Color4f& col);
   void showScalemarkers(const Color4f& col);
   void drawCameraFrustums();
+  void drawDimrefMarkers();
   void decodeMarkerValue(double i, double l, int size_div_sm);
 };

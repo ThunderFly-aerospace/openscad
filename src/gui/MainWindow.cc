@@ -2667,8 +2667,9 @@ void MainWindow::viewModeRender()
 {
   previewModeGroup->setEnabled(false);
   this->qglview->setRenderer(this->geomRenderer);
-  // Frustum markers are a preview aid; hide them in the rendered (F6) view.
+  // Frustum/dimref markers are a preview aid; hide them in the rendered (F6) view.
   this->qglview->setShowCameraFrustums(false);
+  this->qglview->setShowDimrefMarkers(false);
   this->qglview->updateColorScheme();
   this->qglview->update();
 }
@@ -2690,6 +2691,7 @@ void MainWindow::viewModePreview()
     this->qglview->setRenderer(this->previewRenderer ? this->previewRenderer
                                                      : this->thrownTogetherRenderer);
     this->qglview->setShowCameraFrustums(true);
+    this->qglview->setShowDimrefMarkers(true);
     this->qglview->updateColorScheme();
     this->qglview->update();
   } else {
@@ -2720,6 +2722,7 @@ void MainWindow::viewModeThrownTogether()
   viewActionThrownTogether->setChecked(true);
   this->qglview->setRenderer(this->thrownTogetherRenderer);
   this->qglview->setShowCameraFrustums(true);
+  this->qglview->setShowDimrefMarkers(true);
   this->qglview->updateColorScheme();
   this->qglview->update();
 }
@@ -3934,15 +3937,12 @@ QString normalizeProj(const QString& raw)
 
 void MainWindow::refreshDrawingViews()
 {
-  // Orthographic views are expensive, so only render them while the dock is open.
-  if (!this->drawingDock || !this->drawingDock->isVisible()) return;
-  if (!this->rootNode) {
-    this->drawingDock->clearViews();
-    return;
-  }
+  if (!this->drawingDock) return;
 
   // 1. Collect dimref anchors: world position per anchor, plus kvota groups.
-  const auto dimrefs = collectDimrefs(this->rootNode);
+  // (Done unconditionally so the 3D markers update even when the dock is closed.)
+  const auto dimrefs =
+    this->rootNode ? collectDimrefs(this->rootNode) : std::vector<DimrefInfo>{};
   std::vector<std::pair<QString, Eigen::Vector3d>> anchors;  // label -> world pos
   std::map<std::string, Eigen::Vector3d> byName;             // dimref name -> pos
   std::map<std::string, std::vector<Eigen::Vector3d>> kvotaGroups;
@@ -3998,6 +3998,24 @@ void MainWindow::refreshDrawingViews()
     rd.b = pts[1];
     rd.label = lengthLabel(rd.a, rd.b);
     dims.push_back(rd);
+  }
+
+  // Push dimref markers (anchor crosses + dimension lines) to the 3D view. This
+  // happens on every preview, like camera frustums, regardless of dock state.
+  std::vector<Eigen::Vector3d> markerPoints;
+  markerPoints.reserve(anchors.size());
+  for (const auto& [label, pos] : anchors) markerPoints.push_back(pos);
+  std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> markerLines;
+  markerLines.reserve(dims.size());
+  for (const auto& rd : dims) markerLines.emplace_back(rd.a, rd.b);
+  this->qglview->setDimrefMarkers(std::move(markerPoints), std::move(markerLines));
+  this->qglview->update();
+
+  // Orthographic renders are expensive: only produce them while the dock is open.
+  if (!this->drawingDock->isVisible()) return;
+  if (!this->rootNode) {
+    this->drawingDock->clearViews();
+    return;
   }
 
   // 4. Render each ortho view and project anchors/dims into it.
