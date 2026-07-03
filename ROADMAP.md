@@ -254,13 +254,17 @@ Požadavky autora, seskupené podle náročnosti:
 - **Barevný vs. čárový (černobílý) režim** — přepínač: OpenCSG barvy (dnešní) vs.
   bílý model + černé viditelné hrany (technický výkres). Nový render mód
   v `render_ortho_view` (edges on, neutrální scheme).
-- **Měřítko nákresu** — faktor zmenšení (velké zařízení → menší nákres); ovlivní
-  rám ortho renderu.
 
-**Náročné:**
-- **Export zachovávající velikost** — vektorový výstup nákresu (SVG/PDF) v daném
-  měřítku (model-mm : papír-mm), včetně overlay kót. Projekce hran do 2D vektoru
-  + kreslení Qt PDF/SVG ve fyzické velikosti. (Formát doladit.)
+**Náročné — export v měřítku (SVG + PDF):**
+- Náhled v doku zůstává **responsivní** (přizpůsobí se místu). **Měřítko je
+  vlastnost EXPORTU**, ne doku.
+- Export vektor **SVG i PDF**, jednotky mm, **bez omezení papírem** (digitální,
+  libovolně velké). Geometrie kreslena v měřítku (model-mm : výkres-mm, např.
+  1:2); **popisky/šipky pevné čitelné velikosti** (neškálují s geometrií).
+  Změřením výstupu → reálné rozměry dle měřítka.
+- Impl.: overlay (čáry/šipky/text) už je vektor přes QPainter → přesměrovat na
+  `QSvgGenerator`/`QPdfWriter` (mm device), model na pozadí jako raster ve
+  správném měřítku (nebo čárový režim jako vektor později).
 
 ---
 
