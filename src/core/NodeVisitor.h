@@ -27,6 +27,7 @@ class NodeVisitor : public BaseVisitor,
                     public Visitor<class TransformNode>,
                     public Visitor<class ColorNode>,
                     public Visitor<class CameraNode>,
+                    public Visitor<class DimrefNode>,
                     public Visitor<class OffsetNode>
 {
 public:
@@ -111,6 +112,13 @@ public:
   // camera() is a pose marker without geometry: treat it like an empty group
   // so it stays invisible in preview/render/export and does not break measurement.
   Response visit(State& state, const CameraNode& node) override
+  {
+    return visit(state, (const AbstractNode&)node);
+  }
+  // dimref() is a named anchor marker without geometry: treat it like an empty
+  // group so it stays invisible in preview/render/export and does not break
+  // measurement.
+  Response visit(State& state, const DimrefNode& node) override
   {
     return visit(state, (const AbstractNode&)node);
   }
