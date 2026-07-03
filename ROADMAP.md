@@ -236,6 +236,32 @@ Dojem autora: **B s cukrem může být samo o sobě dost dobré.**
 - **GUI test** (`src/guitests/`, styl `TestMainWindow`) — round-trip: vybrat
   dva dimref → vložit `@dim` → upravit offset/projekci → ověřit text v editoru.
 
+### Fáze 2E — konfigurace doku + editace kót (🔶 naplánováno)
+Požadavky autora, seskupené podle náročnosti:
+
+**Rychlé (per-kóta atributy + přepínače doku):**
+- **Editovatelný label se šablonou + přesnost** — `label` jako text s `%f`
+  (dosadí se spočtená délka), volitelná přesnost: `// @dim … label="šířka %.1f mm"`.
+  (Editace: dialog v doku, nebo přímo `label=` v `@dim` — doladit.)
+- **Šipky dovnitř/ven per kóta** — `arrows=in|out` v `@dim`, přepínač.
+- **Posun labelu (2D)** — `laboff=du,dv`, tažení labelu (zbylo z 2D-2).
+- **Vypnout labely / referenční tečky** — přepínače v doku (čistý náhled „jak to
+  vyexportuje").
+- **Dropdown pro koincidentní body** — klik na místo s víc dimref → menu s výběrem
+  (řeší překryv A/H1 v počátku).
+
+**Střední (režimy doku):**
+- **Barevný vs. čárový (černobílý) režim** — přepínač: OpenCSG barvy (dnešní) vs.
+  bílý model + černé viditelné hrany (technický výkres). Nový render mód
+  v `render_ortho_view` (edges on, neutrální scheme).
+- **Měřítko nákresu** — faktor zmenšení (velké zařízení → menší nákres); ovlivní
+  rám ortho renderu.
+
+**Náročné:**
+- **Export zachovávající velikost** — vektorový výstup nákresu (SVG/PDF) v daném
+  měřítku (model-mm : papír-mm), včetně overlay kót. Projekce hran do 2D vektoru
+  + kreslení Qt PDF/SVG ve fyzické velikosti. (Formát doladit.)
+
 ---
 
 ## Fáze 3 — OBJ export s barvami (`.mtl`)  🔶 naplánováno
