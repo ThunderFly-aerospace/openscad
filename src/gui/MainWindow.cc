@@ -3831,10 +3831,12 @@ void MainWindow::onMaterializeKvotas()
 {
   if (!activeEditor || !this->rootNode) return;
 
-  // Kvota names that have at least two dimref anchors.
-  std::map<std::string, int> kvotaCounts;
+  // Kvota names with the world positions of their (first two) dimref anchors.
+  std::map<std::string, std::vector<Eigen::Vector3d>> kvotaPts;
   for (const auto& d : collectDimrefs(this->rootNode)) {
-    if (d.node && !d.node->kvota_name.empty()) kvotaCounts[d.node->kvota_name]++;
+    if (d.node && !d.node->kvota_name.empty()) {
+      kvotaPts[d.node->kvota_name].push_back(d.world.translation());
+    }
   }
 
   // Kvota names that already have a // @dim kvota=… line.
@@ -3846,10 +3848,22 @@ void MainWindow::onMaterializeKvotas()
     if (m.hasMatch()) already.insert(m.captured(1).toStdString());
   }
 
+  // Pick the ortho view where the two anchors are most separated, so the
+  // materialized dimension is non-degenerate (e.g. a vertical pair -> front).
+  auto bestProj = [](const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
+    const Eigen::Vector3d d = b - a;
+    const double front = std::hypot(d.x(), d.z());  // XZ plane
+    const double side = std::hypot(d.y(), d.z());   // YZ plane
+    const double top = std::hypot(d.x(), d.y());    // XY plane
+    if (front >= side && front >= top) return QString("front");
+    return side >= top ? QString("side") : QString("top");
+  };
+
   QStringList newLines;
-  for (const auto& [kvota, count] : kvotaCounts) {
-    if (count >= 2 && !already.count(kvota)) {
-      newLines << QString("// @dim kvota=%1").arg(QString::fromStdString(kvota));
+  for (const auto& [kvota, pts] : kvotaPts) {
+    if (pts.size() >= 2 && !already.count(kvota)) {
+      newLines << QString("// @dim kvota=%1 proj=%2")
+                    .arg(QString::fromStdString(kvota), bestProj(pts[0], pts[1]));
     }
   }
   if (newLines.isEmpty()) {
@@ -4195,6 +4209,9 @@ void MainWindow::refreshDrawingViews()
         QPointF pa, pb;
         if (projectToImage(rd.a, glview->modelview, glview->projection, pw, ph, pa) &&
             projectToImage(rd.b, glview->modelview, glview->projection, pw, ph, pb)) {
+          // Skip dimensions seen edge-on (endpoints project to nearly the same
+          // point): they collapse to a dot and can't be measured/grabbed.
+          if (std::hypot(pb.x() - pa.x(), pb.y() - pa.y()) < 3.0) continue;
           OrthoDimension od;
           od.a = pa;
           od.b = pb;
