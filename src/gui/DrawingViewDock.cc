@@ -402,6 +402,12 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->showRefsCheck->setToolTip(
     tr("Show the dimref anchor dots and their names (dimension labels stay)."));
 
+  this->lineModeCheck = new QCheckBox(tr("Line drawing (b&&w)"), central);
+  this->lineModeCheck->setChecked(false);
+  this->lineModeCheck->setToolTip(
+    tr("Render a black-and-white line drawing (uniform faces + visible edges) "
+       "instead of the colored model."));
+
   this->materializeButton = new QPushButton(tr("Materialize kvóty"), central);
   this->materializeButton->setToolTip(
     tr("Write a // @dim line for each kvota= pair, making them editable."));
@@ -415,9 +421,16 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   buttonLayout->addWidget(this->materializeButton);
   buttonLayout->addWidget(this->saveButton);
 
+  auto *checkRow = new QWidget(central);
+  auto *checkLayout = new QHBoxLayout(checkRow);
+  checkLayout->setContentsMargins(0, 0, 0, 0);
+  checkLayout->addWidget(this->showRefsCheck);
+  checkLayout->addWidget(this->lineModeCheck);
+  checkLayout->addStretch(1);
+
   layout->addWidget(sheet, 1);
   layout->addWidget(this->placeholder);
-  layout->addWidget(this->showRefsCheck);
+  layout->addWidget(checkRow);
   layout->addWidget(buttonRow);
   setWidget(central);
 
@@ -425,6 +438,12 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   connect(this->materializeButton, &QPushButton::clicked, this,
           &DrawingViewDock::materializeRequested);
   connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
+  connect(this->lineModeCheck, &QCheckBox::toggled, this, &DrawingViewDock::renderModeChanged);
+}
+
+bool DrawingViewDock::lineMode() const
+{
+  return this->lineModeCheck->isChecked();
 }
 
 void DrawingViewDock::setShowAnchors(bool show)

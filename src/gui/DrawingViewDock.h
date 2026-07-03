@@ -126,6 +126,9 @@ public:
 
   void setViews(const QList<OrthoViewData>& views, const QStringList& titles);
   void clearViews();
+  // Black-and-white line-drawing mode (vs. colored). Read by MainWindow when
+  // rendering the ortho views.
+  bool lineMode() const;
 
 signals:
   // Emitted when an anchor is clicked in one of the views (view index + name).
@@ -140,6 +143,8 @@ signals:
   void dimensionDoubleClicked(int id);
   // Emitted when the user clicks "Materialize kvóty".
   void materializeRequested();
+  // Emitted when the colored/line-drawing mode is toggled (needs a re-render).
+  void renderModeChanged();
 
 private slots:
   void saveSheet();
@@ -151,5 +156,6 @@ private:
   QPushButton *saveButton;
   QPushButton *materializeButton;
   QCheckBox *showRefsCheck;
+  QCheckBox *lineModeCheck;
   QList<OrthoViewData> views;
 };

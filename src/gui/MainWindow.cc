@@ -3833,6 +3833,9 @@ void MainWindow::setupDrawingDock()
   // "Materialize kvóty" writes a // @dim kvota=… line for each kvota pair.
   QObject::connect(this->drawingDock, &DrawingViewDock::materializeRequested, this,
                    &MainWindow::onMaterializeKvotas);
+  // Toggling colored/line-drawing mode re-renders the ortho views.
+  QObject::connect(this->drawingDock, &DrawingViewDock::renderModeChanged, this,
+                   &MainWindow::refreshDrawingViews);
 }
 
 namespace {
@@ -4259,7 +4262,8 @@ void MainWindow::refreshDrawingViews()
   for (int vi = 0; vi < static_cast<int>(orthoViews.size()); ++vi) {
     const auto& view = orthoViews[vi];
     OrthoViewData vd;
-    if (auto glview = render_ortho_view(this->tree, options, view.rot, pw, ph)) {
+    if (auto glview = render_ortho_view(this->tree, options, view.rot, pw, ph,
+                                        this->drawingDock->lineMode())) {
       std::ostringstream stream(std::ios::out | std::ios::binary);
       if (glview->save(stream)) {
         const std::string data = stream.str();

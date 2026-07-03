@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "core/CameraNode.h"
+#include "core/CSGNode.h"
 #include "core/Tree.h"
 #include "geometry/Geometry.h"
 #include "geometry/linalg.h"
@@ -243,10 +244,13 @@ std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptio
 
 std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& options,
                                                  const Eigen::Vector3d& object_rot,
-                                                 unsigned int pixel_width, unsigned int pixel_height)
+                                                 unsigned int pixel_width, unsigned int pixel_height,
+                                                 bool lineMode)
 {
   // An orthographic view down a fixed gimbal angle (front/side/top), framing the
-  // whole model. Reuses the preview path so color() colors are preserved.
+  // whole model. In colored mode color() colors are preserved; in lineMode the
+  // colors are stripped (uniform faces) and visible edges are drawn — a plain
+  // technical line drawing.
   Camera camera;
   camera.projection = Camera::ProjectionType::ORTHOGONAL;
   camera.object_rot = object_rot;
@@ -259,7 +263,86 @@ std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& 
   // radius / cos(fov/2), so a larger fov simply zooms out; fov=75 ~= 29% margin.
   // The overlay reads the resulting GL matrices, so projection stays consistent.
   camera.fov = 75.0;
-  return prepare_preview(tree, options, camera);
+
+  CsgInfo csgInfo = CsgInfo();
+  csgInfo.compile_products(tree);
+
+  if (lineMode) {
+    // Drop per-object color() colors so faces render in the scheme's uniform
+    // front color; edges (below) then read as a black-and-white drawing.
+    auto stripColors = [](const std::shared_ptr<CSGProducts>& prods) {
+      if (!prods) return;
+      for (auto& product : prods->products) {
+        for (auto& obj : product.intersections) {
+          if (obj.leaf) obj.leaf->color = Color4f();
+        }
+      }
+    };
+    stripColors(csgInfo.root_products);
+  }
+
+  std::unique_ptr<OffscreenView> glview;
+  try {
+    glview = std::make_unique<OffscreenView>(camera.pixel_width, camera.pixel_height);
+  } catch (const OffscreenViewException& ex) {
+    LOG("Can't create OffscreenView: %1$s.", ex.what());
+    return nullptr;
+  }
+
+  std::shared_ptr<Renderer> renderer;
+#ifdef ENABLE_OPENCSG
+  renderer = std::make_shared<OpenCSGRenderer>(csgInfo.root_products, csgInfo.highlights_products,
+                                               csgInfo.background_products);
+#else
+  renderer = std::make_shared<ThrownTogetherRenderer>(
+    csgInfo.root_products, csgInfo.highlights_products, csgInfo.background_products);
+#endif
+  glview->setRenderer(renderer);
+
+  const BoundingBox bbox = glview->getRenderer()->getBoundingBox();
+  setupCamera(camera, bbox);
+  glview->setCamera(camera);
+
+#ifdef ENABLE_OPENCSG
+  OpenCSG::setContext(0);
+  OpenCSG::setOption(OpenCSG::OffscreenSetting, OpenCSG::FrameBufferObject);
+#endif
+  if (lineMode) {
+    // A plain technical-drawing scheme: white sheet + faces, black edges.
+    // (Colors were stripped above so faces use OPENCSG_FACE_FRONT_COLOR.)
+    // NB: GLView stores the scheme by pointer, so it must outlive the view ->
+    // keep it static (a fixed scheme) to avoid a dangling reference.
+    static const ColorScheme tech = [] {
+      const Color4f white(1.0f, 1.0f, 1.0f, 1.0f);
+      const Color4f black(0.0f, 0.0f, 0.0f, 1.0f);
+      const Color4f faceF(0.97f, 0.97f, 0.97f, 1.0f);
+      const Color4f faceB(0.88f, 0.88f, 0.88f, 1.0f);
+      return ColorScheme{
+        {RenderColor::BACKGROUND_COLOR, white},
+        {RenderColor::BACKGROUND_STOP_COLOR, white},
+        {RenderColor::OPENCSG_FACE_FRONT_COLOR, faceF},
+        {RenderColor::OPENCSG_FACE_BACK_COLOR, faceB},
+        {RenderColor::CGAL_FACE_FRONT_COLOR, faceF},
+        {RenderColor::CGAL_FACE_BACK_COLOR, faceB},
+        {RenderColor::CGAL_EDGE_FRONT_COLOR, black},
+        {RenderColor::CGAL_EDGE_BACK_COLOR, black},
+        {RenderColor::CGAL_EDGE_2D_COLOR, black},
+        {RenderColor::AXES_COLOR, Color4f(0.6f, 0.6f, 0.6f, 1.0f)},
+        {RenderColor::CROSSHAIR_COLOR, black},
+      };
+    }();
+    glview->setColorScheme(tech);
+  } else {
+    glview->setColorScheme(RenderSettings::inst()->colorscheme);
+  }
+  glview->setShowAxes(options["axes"]);
+  glview->setShowScaleProportional(options["scales"]);
+  glview->setShowEdges(lineMode || options["edges"]);
+  // The offscreen view doesn't initialize the edge shader on its own; drawing
+  // edges with a null shader would crash, so set it up before painting.
+  if (lineMode || options["edges"]) glview->setupShader();
+  glview->paintGL();
+  return glview;
 }
 
 #else  // NULLGL
@@ -280,7 +363,8 @@ std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptio
 }
 std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& options,
                                                  const Eigen::Vector3d& object_rot,
-                                                 unsigned int pixel_width, unsigned int pixel_height)
+                                                 unsigned int pixel_width, unsigned int pixel_height,
+                                                 bool lineMode)
 {
   return nullptr;
 }

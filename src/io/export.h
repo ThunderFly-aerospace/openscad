@@ -370,7 +370,8 @@ std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptio
 // fixed gimbal rotation (Euler XYZ degrees). Used by the Drawing dock.
 std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& options,
                                                  const Eigen::Vector3d& object_rot,
-                                                 unsigned int pixel_width, unsigned int pixel_height);
+                                                 unsigned int pixel_width, unsigned int pixel_height,
+                                                 bool lineMode = false);
 bool export_png(const std::shared_ptr<const class Geometry>& root_geom, const ViewOptions& options,
                 Camera& camera, std::ostream& output);
 bool export_png(const OffscreenView& glview, std::ostream& output);
