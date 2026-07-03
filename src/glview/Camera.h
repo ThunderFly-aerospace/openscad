@@ -75,4 +75,12 @@ public:
 
   // Perspective settings
   double viewer_distance;
+
+  // Optional explicit near/far clip planes (world units). When
+  // clip_far > clip_near > 0 they override the default 0.1*dist..100*dist for
+  // the PERSPECTIVE projection. Used by offscreen camera snapshots, where the
+  // camera can sit close to (or inside) the model and the default near plane
+  // would clip geometry in front of the camera.
+  double clip_near{-1.0};
+  double clip_far{-1.0};
 };

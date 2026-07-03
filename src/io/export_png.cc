@@ -202,6 +202,21 @@ std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptio
   const BoundingBox bbox = glview->getRenderer()->getBoundingBox();
   const Eigen::Vector3d eye = info.world.translation();
   camera.setFromMatrix(info.world, distanceForScene(eye, bbox));
+
+  // Set near/far from the actual scene so geometry right in front of (or around)
+  // the camera is not clipped by the default 0.1*dist near plane. The eye and
+  // view direction are already fixed by setFromMatrix; near/far only bound depth.
+  if (!bbox.isEmpty()) {
+    const double toCenter = (bbox.center() - eye).norm();
+    const double radius = bbox.diagonal().norm() / 2.0;
+    const double farthest = toCenter + radius;
+    // Nearest scene point ahead of the eye; if the camera is inside/at the model
+    // (nearest <= 0) fall back to a small fraction of the extent to keep the
+    // near plane positive and the far/near ratio finite for depth precision.
+    const double nearest = toCenter - radius;
+    camera.clip_near = std::max(nearest, farthest * 1e-3);
+    camera.clip_far = farthest * 1.05 + 1e-3;
+  }
   glview->setCamera(camera);
 
 #ifdef ENABLE_OPENCSG

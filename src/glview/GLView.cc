@@ -128,7 +128,12 @@ void GLView::setupCamera()
   auto dist = cam.zoomValue();
   switch (this->cam.projection) {
   case Camera::ProjectionType::PERSPECTIVE: {
-    gluPerspective(cam.fov, aspectratio, 0.1 * dist, 100 * dist);
+    // Explicit near/far (from the scene bbox) override the distance-based
+    // default, so a camera close to/inside the model doesn't clip its front.
+    const bool explicitClip = cam.clip_far > cam.clip_near && cam.clip_near > 0;
+    const double nearP = explicitClip ? cam.clip_near : 0.1 * dist;
+    const double farP = explicitClip ? cam.clip_far : 100 * dist;
+    gluPerspective(cam.fov, aspectratio, nearP, farP);
     break;
   }
   default:
