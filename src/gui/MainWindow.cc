@@ -3937,10 +3937,11 @@ namespace {
 struct ResolvedDim {
   Eigen::Vector3d a;
   Eigen::Vector3d b;
-  QString proj;        // "front" | "side" | "top" | "" (all)
-  QString label;
-  double offsetMm{0};  // dimension line offset from the anchor line, model units
-  int sourceLine{-1};  // 0-based editor line of the // @dim (for write-back)
+  QString proj;         // "front" | "side" | "top" | "" (all)
+  QString label;        // final label text (template already substituted)
+  double offsetMm{0};   // dimension line offset from the anchor line, model units
+  bool arrowsOut{false};  // arrowheads outside the extension lines (for tight dims)
+  int sourceLine{-1};   // 0-based editor line of the // @dim (for write-back)
 };
 
 // gluProject-style world -> image pixel (top-left origin). modelview/projection
@@ -3998,23 +3999,46 @@ void MainWindow::refreshDrawingViews()
     if (!d.node->kvota_name.empty()) kvotaGroups[d.node->kvota_name].push_back(pos);
   }
 
-  auto lengthLabel = [](const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
-    return QString::number((b - a).norm(), 'g', 4);
+  // Format a length with an optional fixed precision (prec>=0), else general.
+  auto formatLen = [](double len, int prec) {
+    return prec >= 0 ? QString::number(len, 'f', prec) : QString::number(len, 'g', 4);
+  };
+  // Build the final label: substitute %f in a template with the formatted length,
+  // or use the computed length when no template is given.
+  auto makeLabel = [&](const QString& tmpl, double len, int prec) {
+    const QString num = formatLen(len, prec);
+    if (tmpl.isEmpty()) return num;
+    if (tmpl.contains("%f")) return QString(tmpl).replace("%f", num);
+    return tmpl;  // literal text, no value
   };
 
   std::vector<ResolvedDim> dims;
 
   // 2. Explicit // @dim lines from the source. Two forms:
-  //      // @dim A B     [proj=] [offset=] [label=]   (endpoints by anchor name)
-  //      // @dim kvota=N  [proj=] [offset=] [label=]   (endpoints from a kvota pair)
+  //      // @dim A B     [proj=] [offset=] [label=…] [prec=N] [arrows=in|out]
+  //      // @dim kvota=N  [proj=] [offset=] [label=…] [prec=N] [arrows=in|out]
+  //   label may be quoted to hold spaces/%f: label="šířka %f mm"
   const QString source = activeEditor ? activeEditor->toPlainText() : QString();
   static const QRegularExpression dimRe(R"(^\s*//\s*@dim\s+(.*\S)\s*$)");
+  static const QRegularExpression quotedLabelRe(R"RX(label="([^"]*)")RX");
   std::set<QString> materializedKvotas;  // kvota names already written as @dim
   const QStringList sourceLines = source.split('\n');
   for (int li = 0; li < sourceLines.size(); ++li) {
     const auto m = dimRe.match(sourceLines.at(li));
     if (!m.hasMatch()) continue;
-    QStringList toks = m.captured(1).split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+
+    // Pull out a quoted label first so its spaces don't break tokenizing.
+    QString rest = m.captured(1);
+    QString labelTemplate;
+    bool haveLabel = false;
+    const auto lm = quotedLabelRe.match(rest);
+    if (lm.hasMatch()) {
+      labelTemplate = lm.captured(1);
+      haveLabel = true;
+      rest = rest.left(lm.capturedStart()) + rest.mid(lm.capturedEnd());
+    }
+
+    QStringList toks = rest.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
     if (toks.isEmpty()) continue;
 
     ResolvedDim rd;
@@ -4037,14 +4061,18 @@ void MainWindow::refreshDrawingViews()
       rd.b = itb->second;
       firstOpt = 2;
     }
+
+    int prec = -1;
     for (int t = firstOpt; t < toks.size(); ++t) {
       const QString& tok = toks[t];
       if (tok.startsWith("proj=")) rd.proj = normalizeProj(tok.mid(5));
-      else if (tok.startsWith("label=")) rd.label = tok.mid(6);
       else if (tok.startsWith("offset=")) rd.offsetMm = tok.mid(7).toDouble();
-      else if (rd.label.isEmpty()) rd.label = tok;  // bare token = manual label
+      else if (tok.startsWith("prec=")) prec = tok.mid(5).toInt();
+      else if (tok.startsWith("arrows=")) rd.arrowsOut = (tok.mid(7).toLower() == "out");
+      else if (tok.startsWith("label=")) { labelTemplate = tok.mid(6); haveLabel = true; }
+      else if (!haveLabel) { labelTemplate = tok; haveLabel = true; }  // bare token
     }
-    if (rd.label.isEmpty()) rd.label = lengthLabel(rd.a, rd.b);
+    rd.label = makeLabel(haveLabel ? labelTemplate : QString(), (rd.b - rd.a).norm(), prec);
     dims.push_back(rd);
   }
 
@@ -4056,7 +4084,7 @@ void MainWindow::refreshDrawingViews()
     ResolvedDim rd;
     rd.a = pts[0];
     rd.b = pts[1];
-    rd.label = lengthLabel(rd.a, rd.b);
+    rd.label = makeLabel(QString(), (rd.b - rd.a).norm(), -1);
     dims.push_back(rd);  // id stays -1: in-memory, not draggable until materialized
   }
 
@@ -4134,6 +4162,7 @@ void MainWindow::refreshDrawingViews()
           od.b = pb;
           od.label = rd.label;
           od.offsetPx = rd.offsetMm * pxPerMm;
+          od.arrowsOut = rd.arrowsOut;
           od.id = rd.sourceLine;  // -1 for kvota= dims (not draggable)
           vd.dims.append(od);
         }

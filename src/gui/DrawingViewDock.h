@@ -32,6 +32,7 @@ struct OrthoDimension {
   QPointF b;
   QString label;
   double offsetPx{0.0};
+  bool arrowsOut{false};  // arrowheads outside the extension lines
   int id{-1};
 };
 

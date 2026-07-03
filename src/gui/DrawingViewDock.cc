@@ -142,8 +142,17 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
         painter.drawPolygon(head);
         painter.setPen(dimPen);
       };
-      arrow(a2, dir);
-      arrow(b2, -dir);
+      if (dim.arrowsOut) {
+        // Arrowheads outside the endpoints pointing inward (for tight dims);
+        // extend the dimension line a little past each end so they have a stem.
+        painter.drawLine(a2, a2 - dir * (s * 1.5));
+        painter.drawLine(b2, b2 + dir * (s * 1.5));
+        arrow(a2, -dir);
+        arrow(b2, dir);
+      } else {
+        arrow(a2, dir);
+        arrow(b2, -dir);
+      }
     }
 
     // Label at the midpoint of the dimension line.
