@@ -169,6 +169,11 @@ private:
   // camera dock (only when it is visible). Called after each preview.
   void refreshCameras();
   void refreshDrawingViews();
+  void onDrawingAnchorClicked(int viewIndex, const QString& name);
+
+  // Interactive dimension creation: the first anchor clicked in the drawing
+  // dock, pending the second. Empty = no pending pick.
+  QString pendingDimAnchor;
 
 protected:
   void closeEvent(QCloseEvent *event) override;

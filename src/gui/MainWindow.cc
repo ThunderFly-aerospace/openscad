@@ -3809,6 +3809,50 @@ void MainWindow::setupDrawingDock()
   QObject::connect(this->drawingDock, &Dock::visibilityChanged, this, [this](bool visible) {
     if (visible) refreshDrawingViews();
   });
+  // Clicking two anchors in a view creates a dimension in the source.
+  QObject::connect(this->drawingDock, &DrawingViewDock::anchorClicked, this,
+                   &MainWindow::onDrawingAnchorClicked);
+}
+
+void MainWindow::onDrawingAnchorClicked(int viewIndex, const QString& name)
+{
+  if (name.isEmpty()) return;
+
+  // First click: remember the anchor and wait for the second.
+  if (this->pendingDimAnchor.isEmpty()) {
+    this->pendingDimAnchor = name;
+    this->statusBar()->showMessage(
+      tr("Dimension: first point \"%1\" — click the second anchor.").arg(name), 4000);
+    return;
+  }
+  // Clicking the same anchor again cancels the pending pick.
+  if (name == this->pendingDimAnchor) {
+    this->pendingDimAnchor.clear();
+    this->statusBar()->showMessage(tr("Dimension cancelled."), 2000);
+    return;
+  }
+
+  const QString first = this->pendingDimAnchor;
+  this->pendingDimAnchor.clear();
+
+  static const char *const keys[3] = {"front", "side", "top"};
+  const QString proj = keys[std::clamp(viewIndex, 0, 2)];
+  const QString dimLine = QString("// @dim %1 %2 proj=%3").arg(first, name, proj);
+
+  // Append the // @dim line at the end of the document (the "list of pairs").
+  if (!activeEditor) return;
+  const QString text = activeEditor->toPlainText();
+  const QStringList lines = text.split('\n');
+  const int lastLine = lines.size() - 1;
+  const int lastCol = lines.isEmpty() ? 0 : lines.last().length();
+  activeEditor->setCursorPosition(lastLine, lastCol);
+  QString insertText;
+  if (!lines.isEmpty() && !lines.last().isEmpty()) insertText += "\n";
+  insertText += dimLine + "\n";
+  activeEditor->insertOrReplaceText(insertText);
+
+  this->statusBar()->showMessage(
+    tr("Added dimension %1 ↔ %2. Press F5 to update.").arg(first, name), 4000);
 }
 
 namespace {
