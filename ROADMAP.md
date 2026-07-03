@@ -255,20 +255,20 @@ Požadavky autora, seskupené podle náročnosti:
   projekce. Zapisuje tytéž `@dim` tokeny; ruční editace v kódu zůstává.
 
 **Střední (režimy doku):**
-- **Barevný vs. čárový (černobílý) režim** — přepínač: OpenCSG barvy (dnešní) vs.
-  bílý model + černé viditelné hrany (technický výkres). Nový render mód
-  v `render_ortho_view` (edges on, neutrální scheme).
+- **✅ Barevný vs. čárový (černobílý) režim** (`fcb9db24b`) — checkbox „Line
+  drawing (b&w)": barvy `color()` potlačeny (bílé plochy přes technické
+  color-scheme) + viditelné hrany. `render_ortho_view` je teď soběstačný.
+  Pozn.: opraven dangling pointer (GLView drží color-scheme přes pointer →
+  scheme musí být statické) + inicializace edge shaderu offscreen.
 
-**Náročné — export v měřítku (SVG + PDF):**
-- Náhled v doku zůstává **responsivní** (přizpůsobí se místu). **Měřítko je
-  vlastnost EXPORTU**, ne doku.
-- Export vektor **SVG i PDF**, jednotky mm, **bez omezení papírem** (digitální,
-  libovolně velké). Geometrie kreslena v měřítku (model-mm : výkres-mm, např.
-  1:2); **popisky/šipky pevné čitelné velikosti** (neškálují s geometrií).
-  Změřením výstupu → reálné rozměry dle měřítka.
-- Impl.: overlay (čáry/šipky/text) už je vektor přes QPainter → přesměrovat na
-  `QSvgGenerator`/`QPdfWriter` (mm device), model na pozadí jako raster ve
-  správném měřítku (nebo čárový režim jako vektor později).
+**✅ Export v měřítku (SVG + PDF)** (`286bc3e67`):
+- Náhled v doku zůstává responsivní; měřítko je vlastnost exportu. Spinbox
+  „Scale 1:N" + tlačítko „Export SVG/PDF…".
+- Výstup vektor **SVG i PDF**, jednotky **mm**, bez omezení papírem. Geometrie
+  v měřítku (model-mm : výkres-mm), **popisky/šipky pevné pt velikosti** (pravý
+  vektorový `<text>`, čitelné při jakémkoli měřítku). Model jako vložený raster
+  ve správné mm velikosti, overlay (čáry/šipky/text) vektor přes QPainter na
+  `QSvgGenerator`/`QPdfWriter`. Ověřeno: SVG 504×1513 mm + PDF %PDF-1.4.
 
 ---
 
