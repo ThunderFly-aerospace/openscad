@@ -39,11 +39,14 @@ i její **testy** — bez zelených testů není fáze hotová.
   cukr**, zatím jen **délková kvóta dvou bodů** (interaktivní vkládání kotev
   klikáním „C" i průměr/úhel = později). Sdílí sběr marker-uzlů s kamerami
   (`dimref` ~ `collectDimrefs`).
-- **Fáze 3 (OBJ export s barvami / `.mtl`)** — 🔶 naplánováno. Malé uzavřené
-  vylepšení: `export_obj.cc` dnes barvy zahazuje; dopsat `.mtl`, aby Blender
-  načetl per-region barvy nativně jako materiály. (3MF už barvy exportuje a
-  Blender ≥ 4.1 ho čte nativně — to je hotová cesta; OBJ+MTL je robustní
-  textová alternativa.)
+- **Fáze 3 (OBJ export s barvami / `.mtl`)** — ✅ **HOTOVO** (commit `dfd3a8b86`).
+  `export_obj.cc` seskupí facy podle barvy → sesterský `.mtl`
+  (`newmtl`/`Kd`/`d`), odkaz `mtllib`. Bezbarvý model + stdout zůstávají
+  **bit-identické**. Regresní test `export-obj_color-export` zelený.
+  **Ověřeno v Blenderu 4.3.2** (headless import): OBJ+MTL → 1 mesh, 3 materiály
+  se správnými barvami včetně průhlednosti (α=0.5). 3MF cesta funguje na
+  oficiálních buildech blender.org ≥ 4.1 (Debianní `blender` dfsg balík 3MF
+  addon nemá zabalený).
 
 ---
 
