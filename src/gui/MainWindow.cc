@@ -74,6 +74,7 @@
 #include <QDataStream>
 #include <QDebug>
 #include <QString>
+#include <QRegularExpression>
 #include <algorithm>
 #include <boost/range/adaptor/reversed.hpp>
 #include <boost/version.hpp>
@@ -125,6 +126,7 @@
 #include "gui/CameraViewDock.h"
 #include "gui/DrawingViewDock.h"
 #include "core/CameraNode.h"
+#include "core/DimrefNode.h"
 #include "glview/GLView.h"
 #include "glview/OffscreenView.h"
 #include "utils/camera_math.h"
@@ -3809,6 +3811,51 @@ void MainWindow::setupDrawingDock()
   });
 }
 
+namespace {
+
+// A dimension resolved to two world-space endpoints, plus which projection it
+// belongs to (empty = all views) and its label text.
+struct ResolvedDim {
+  Eigen::Vector3d a;
+  Eigen::Vector3d b;
+  QString proj;   // "front" | "side" | "top" | "" (all)
+  QString label;
+};
+
+// gluProject-style world -> image pixel (top-left origin). modelview/projection
+// are column-major GLdouble[16] as returned by glGetDoublev.
+bool projectToImage(const Eigen::Vector3d& world, const GLdouble *mv, const GLdouble *pr,
+                    int w, int h, QPointF& out)
+{
+  auto mul = [](const GLdouble *m, const double v[4], double r[4]) {
+    for (int i = 0; i < 4; ++i)
+      r[i] = m[i] * v[0] + m[i + 4] * v[1] + m[i + 8] * v[2] + m[i + 12] * v[3];
+  };
+  const double in[4] = {world.x(), world.y(), world.z(), 1.0};
+  double eye[4], clip[4];
+  mul(mv, in, eye);
+  mul(pr, eye, clip);
+  if (std::abs(clip[3]) < 1e-9) return false;
+  const double nx = clip[0] / clip[3];
+  const double ny = clip[1] / clip[3];
+  const double winx = (nx * 0.5 + 0.5) * w;
+  const double winy = (ny * 0.5 + 0.5) * h;
+  out = QPointF(winx, h - winy);  // GL y is bottom-up, image y is top-down
+  return true;
+}
+
+// Normalize a projection token (english or czech) to front|side|top, or "".
+QString normalizeProj(const QString& raw)
+{
+  const QString p = raw.trimmed().toLower();
+  if (p == "front" || p == "narys" || p == "nárys") return "front";
+  if (p == "side" || p == "bokorys") return "side";
+  if (p == "top" || p == "pudorys" || p == "půdorys") return "top";
+  return "";
+}
+
+}  // namespace
+
 void MainWindow::refreshDrawingViews()
 {
   // Orthographic views are expensive, so only render them while the dock is open.
@@ -3818,34 +3865,106 @@ void MainWindow::refreshDrawingViews()
     return;
   }
 
-  // Gimbal angles (Euler XYZ degrees) matching the View > Front/Left/Top actions.
-  struct OrthoView {
-    const char *title;
-    Eigen::Vector3d rot;
-  };
-  const std::vector<OrthoView> views = {
-    {"Front (nárys)", {0, 0, 0}},
-    {"Side (bokorys)", {0, 0, 90}},
-    {"Top (půdorys)", {90, 0, 0}},
+  // 1. Collect dimref anchors: world position per anchor, plus kvota groups.
+  const auto dimrefs = collectDimrefs(this->rootNode);
+  std::vector<std::pair<QString, Eigen::Vector3d>> anchors;  // label -> world pos
+  std::map<std::string, Eigen::Vector3d> byName;             // dimref name -> pos
+  std::map<std::string, std::vector<Eigen::Vector3d>> kvotaGroups;
+  for (const auto& d : dimrefs) {
+    if (!d.node) continue;
+    const Eigen::Vector3d pos = d.world.translation();
+    QString label = QString::fromStdString(d.node->dimref_name);
+    if (label.isEmpty()) label = QString::fromStdString(d.node->kvota_name);
+    anchors.emplace_back(label, pos);
+    if (!d.node->dimref_name.empty()) byName[d.node->dimref_name] = pos;
+    if (!d.node->kvota_name.empty()) kvotaGroups[d.node->kvota_name].push_back(pos);
+  }
+
+  auto lengthLabel = [](const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
+    return QString::number((b - a).norm(), 'g', 4);
   };
 
-  QList<QImage> images;
+  std::vector<ResolvedDim> dims;
+
+  // 2. Explicit // @dim A B [proj=...] [label=...] lines from the source.
+  const QString source = activeEditor ? activeEditor->toPlainText() : QString();
+  static const QRegularExpression dimRe(
+    R"(^\s*//\s*@dim\s+(\S+)\s+(\S+)\s*(.*)$)");
+  for (const QString& line : source.split('\n')) {
+    const auto m = dimRe.match(line);
+    if (!m.hasMatch()) continue;
+    const std::string a = m.captured(1).toStdString();
+    const std::string b = m.captured(2).toStdString();
+    const auto ita = byName.find(a);
+    const auto itb = byName.find(b);
+    if (ita == byName.end() || itb == byName.end()) continue;  // unknown anchor
+    ResolvedDim rd;
+    rd.a = ita->second;
+    rd.b = itb->second;
+    for (const QString& tok : m.captured(3).split(QRegularExpression("\\s+"),
+                                                  Qt::SkipEmptyParts)) {
+      if (tok.startsWith("proj=")) rd.proj = normalizeProj(tok.mid(5));
+      else if (tok.startsWith("label=")) rd.label = tok.mid(6);
+      else if (rd.label.isEmpty()) rd.label = tok;  // bare token = manual label
+    }
+    if (rd.label.isEmpty()) rd.label = lengthLabel(rd.a, rd.b);
+    dims.push_back(rd);
+  }
+
+  // 3. kvota= sugar: two dimrefs sharing a kvota name auto-form a dimension.
+  for (const auto& [kvota, pts] : kvotaGroups) {
+    if (pts.size() < 2) continue;
+    ResolvedDim rd;
+    rd.a = pts[0];
+    rd.b = pts[1];
+    rd.label = lengthLabel(rd.a, rd.b);
+    dims.push_back(rd);
+  }
+
+  // 4. Render each ortho view and project anchors/dims into it.
+  struct OrthoView {
+    const char *title;
+    QString key;
+    Eigen::Vector3d rot;
+  };
+  const std::vector<OrthoView> orthoViews = {
+    {"Front (nárys)", "front", {0, 0, 0}},
+    {"Side (bokorys)", "side", {0, 0, 90}},
+    {"Top (půdorys)", "top", {90, 0, 0}},
+  };
+  const int pw = 600, ph = 600;
+
+  QList<OrthoViewData> viewData;
   QStringList titles;
   ViewOptions options;  // OpenCSG previewer, no axes/edges/crosshairs
-  for (const auto& view : views) {
-    QImage image;
-    if (auto glview = render_ortho_view(this->tree, options, view.rot, 600, 600)) {
+  for (const auto& view : orthoViews) {
+    OrthoViewData vd;
+    if (auto glview = render_ortho_view(this->tree, options, view.rot, pw, ph)) {
       std::ostringstream stream(std::ios::out | std::ios::binary);
       if (glview->save(stream)) {
         const std::string data = stream.str();
-        image.loadFromData(reinterpret_cast<const uchar *>(data.data()),
-                           static_cast<int>(data.size()), "PNG");
+        vd.image.loadFromData(reinterpret_cast<const uchar *>(data.data()),
+                              static_cast<int>(data.size()), "PNG");
+      }
+      for (const auto& [label, pos] : anchors) {
+        QPointF p;
+        if (projectToImage(pos, glview->modelview, glview->projection, pw, ph, p)) {
+          vd.anchors.append({p, label});
+        }
+      }
+      for (const auto& rd : dims) {
+        if (!rd.proj.isEmpty() && rd.proj != view.key) continue;
+        QPointF pa, pb;
+        if (projectToImage(rd.a, glview->modelview, glview->projection, pw, ph, pa) &&
+            projectToImage(rd.b, glview->modelview, glview->projection, pw, ph, pb)) {
+          vd.dims.append({pa, pb, rd.label});
+        }
       }
     }
-    images.append(image);
+    viewData.append(vd);
     titles.append(QString::fromUtf8(view.title));
   }
-  this->drawingDock->setViews(images, titles);
+  this->drawingDock->setViews(viewData, titles);
 }
 
 /**
