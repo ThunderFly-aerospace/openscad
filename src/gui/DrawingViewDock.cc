@@ -9,6 +9,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
@@ -247,17 +248,26 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
   // Otherwise: report an anchor click (used to create dimensions). Hidden
   // reference points are not clickable.
   if (!this->showAnchors) return;
-  double best = 12.0;
-  QString hit;
+  const double radius = 12.0;
+  QStringList hits;  // distinct anchor names within the hit radius
   for (const auto& anchor : this->data.anchors) {
     const QPointF p = mapToWidget(anchor.pos);
-    const double d = std::hypot(p.x() - click.x(), p.y() - click.y());
-    if (d < best) {
-      best = d;
-      hit = anchor.name;
+    if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= radius &&
+        !hits.contains(anchor.name)) {
+      hits << anchor.name;
     }
   }
-  if (!hit.isEmpty()) emit anchorClicked(hit);
+  if (hits.isEmpty()) return;
+  if (hits.size() == 1) {
+    emit anchorClicked(hits.first());
+    return;
+  }
+  // Several reference points coincide here: let the user pick which one.
+  QMenu menu(this);
+  for (const QString& name : hits) menu.addAction(name);
+  if (QAction *chosen = menu.exec(event->globalPosition().toPoint())) {
+    emit anchorClicked(chosen->text());
+  }
 }
 
 void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
