@@ -254,7 +254,16 @@ bool exportFileByName(const std::shared_ptr<const Geometry>& root_geom, const st
     bool onerror = false;
     fstream.exceptions(std::ios::badbit | std::ios::failbit);
     try {
-      exportFile(root_geom, fstream, exportInfo);
+      if (exportInfo.format == FileFormat::OBJ) {
+        // OBJ is a two-file format when colors are present: the exporter writes
+        // a companion .mtl next to the .obj (and references it via mtllib). Pass
+        // the derived .mtl path so it can be created only when needed.
+        std::filesystem::path mtlPath(path);
+        mtlPath.replace_extension("mtl");
+        export_obj(root_geom, fstream, mtlPath.string());
+      } else {
+        exportFile(root_geom, fstream, exportInfo);
+      }
     } catch (std::ios::failure&) {
       onerror = true;
     }

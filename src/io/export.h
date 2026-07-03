@@ -311,7 +311,8 @@ bool exportFileStdOut(const std::shared_ptr<const class Geometry>& root_geom,
 void export_stl(const std::shared_ptr<const Geometry>& geom, std::ostream& output, bool binary = true);
 void export_3mf(const std::shared_ptr<const Geometry>& geom, std::ostream& output,
                 const ExportInfo& exportInfo);
-void export_obj(const std::shared_ptr<const Geometry>& geom, std::ostream& output);
+void export_obj(const std::shared_ptr<const Geometry>& geom, std::ostream& output,
+                const std::string& mtl_path = "");
 void export_off(const std::shared_ptr<const Geometry>& geom, std::ostream& output);
 void export_wrl(const std::shared_ptr<const Geometry>& geom, std::ostream& output);
 void export_amf(const std::shared_ptr<const Geometry>& geom, std::ostream& output);
