@@ -293,6 +293,31 @@ doplnit option do `CommandLine` a do `do_export`/cmdline cesty v `openscad.cc`
   (konec-na-konec na jedné čáře) nebo od společné základny (running). Zobrazovací
   režim nad uspořádaným seznamem dimref v jednom směru.
 
+**Robustnost — unikátní jména dimref:**
+- Když `dimref` padne do **for-cyklu**, vznikne víc uzlů se **stejným jménem** na
+  různých pozicích. `byName[jméno]=pos` se přepíše → `@dim A B` tiše vezme
+  **poslední** „A", a klik na konkrétní „A" spojí špatnou instanci. **Pravidlo:
+  jména musí být unikátní.** Idiom: `dimref(str("hole", i))` → `hole0..holeN`
+  (navíc umožní kótovat jednotlivé instance). **Tooling:** `collectDimrefs` bude
+  **hlásit varování** při duplicitním jménu na víc pozicích. (Ne auto-suffix —
+  nešel by napsat do `@dim` a nebyl by stabilní.)
+
+**Sémantika měření — 4 režimy (relativně k projekci):**
+Autor to trefil líp než světové osy: měření je vztažené k **projekční rovině**.
+`@dim` dostane `measure=`:
+  - `measure=direct` (default) — **pravá 3D vzdálenost** `|b-a|`, nezávislá na
+    pohledu, čára mezi body (aligned). *(dnešní chování)*
+  - `measure=planar` — **vzdálenost v projekční rovině** `|proj(b)-proj(a)|`
+    (ignoruje hloubku daného pohledu).
+  - `measure=h` — **horizontální** složka v pohledu (vodorovná kóta).
+  - `measure=v` — **vertikální** složka v pohledu (svislá kóta).
+- **2/3/4 jsou vázané na `proj=`** (h/v mapují na světové osy dle pohledu: nárys
+  h=X v=Z, půdorys h=X v=Y, bokorys h=Y v=Z). Platí `h² + v² = planar²`.
+- Řeší „vzdálenost dvou ploch" (dva body na protilehlých stěnách kvádru, mezi
+  nimi hrana není): zvol pohled + `h`/`v` kolmé ke stěnám → odstup stěn (ne šikmá
+  3D vzdálenost). `h`/`v`/`planar` se kreslí **osově zarovnané** s vynášecími
+  čárami z bodů na kótovací čáru, jak je ve výkresech zvykem.
+
 ### 4C — vektorové projekce (technický výkres)
 Finální geometrie jsou polygony → projekce hran do 2D je **přesný vektor**.
 Cíl = čistý, kompaktní vektorový výkres (ne obří SVG). **Nekreslit plochy**
