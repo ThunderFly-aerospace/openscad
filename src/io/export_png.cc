@@ -203,19 +203,28 @@ std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptio
   const Eigen::Vector3d eye = info.world.translation();
   camera.setFromMatrix(info.world, distanceForScene(eye, bbox));
 
-  // Set near/far from the actual scene so geometry right in front of (or around)
-  // the camera is not clipped by the default 0.1*dist near plane. The eye and
-  // view direction are already fixed by setFromMatrix; near/far only bound depth.
+  // Set near/far from the scene so geometry in front of (or around) the camera
+  // is not clipped by the default 0.1*dist near plane. Eye and view direction
+  // are already fixed by setFromMatrix; near/far only bound depth.
   if (!bbox.isEmpty()) {
     const double toCenter = (bbox.center() - eye).norm();
     const double radius = bbox.diagonal().norm() / 2.0;
     const double farthest = toCenter + radius;
-    // Nearest scene point ahead of the eye; if the camera is inside/at the model
-    // (nearest <= 0) fall back to a small fraction of the extent to keep the
-    // near plane positive and the far/near ratio finite for depth precision.
-    const double nearest = toCenter - radius;
-    camera.clip_near = std::max(nearest, farthest * 1e-3);
-    camera.clip_far = farthest * 1.05 + 1e-3;
+    double nearC;
+    if (info.node->marker > 0) {
+      // The camera often sits inside a lens body (a slightly oversized cylinder
+      // for collision clearance). Put the near ("projection") plane at the
+      // marker/frustum end so that lens body is clipped and only the scene
+      // beyond it is captured. Fully controllable via camera(marker=…).
+      nearC = info.node->marker;
+    } else {
+      // No marker: clip at the nearest scene point; if the camera is inside/at
+      // the model (nearest <= 0) fall back to a small fraction of the extent to
+      // keep the near plane positive and the far/near ratio finite.
+      nearC = std::max(toCenter - radius, farthest * 1e-3);
+    }
+    camera.clip_near = std::max(nearC, farthest * 1e-4);
+    camera.clip_far = std::max(farthest * 1.05 + 1e-3, camera.clip_near * 1.001);
   }
   glview->setCamera(camera);
 
