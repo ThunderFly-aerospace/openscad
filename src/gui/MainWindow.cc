@@ -3819,6 +3819,9 @@ void MainWindow::setupDrawingDock()
   // Dragging a dimension line changes its offset= and writes it back on release.
   QObject::connect(this->drawingDock, &DrawingViewDock::dimensionOffsetChanged, this,
                    &MainWindow::onDimensionOffsetChanged);
+  // Dragging a label writes laboff= back on release.
+  QObject::connect(this->drawingDock, &DrawingViewDock::labelOffsetChanged, this,
+                   &MainWindow::onLabelOffsetChanged);
   // "Materialize kvóty" writes a // @dim kvota=… line for each kvota pair.
   QObject::connect(this->drawingDock, &DrawingViewDock::materializeRequested, this,
                    &MainWindow::onMaterializeKvotas);
@@ -3862,6 +3865,22 @@ void MainWindow::onMaterializeKvotas()
     tr("Materialized %1 kvota dimension(s). Press F5 to update.").arg(newLines.size()), 4000);
 }
 
+namespace {
+// Replace or append a `key=value` token on one editor line (whole-word key).
+QString setLineToken(QString line, const QString& key, const QString& value)
+{
+  const QString token = key + "=" + value;
+  const QRegularExpression re("\\b" + QRegularExpression::escape(key) + "=\\S+");
+  if (re.match(line).hasMatch()) {
+    line.replace(re, token);
+  } else {
+    if (!line.endsWith(' ')) line += ' ';
+    line += token;
+  }
+  return line;
+}
+}  // namespace
+
 void MainWindow::onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished)
 {
   // Only persist on release; live drag already updates the overlay in the dock.
@@ -3875,17 +3894,27 @@ void MainWindow::onDimensionOffsetChanged(int viewIndex, int id, double offsetPx
 
   QStringList lines = activeEditor->toPlainText().split('\n');
   if (id >= lines.size()) return;
-  QString line = lines.at(id);
+  lines[id] = setLineToken(lines.at(id), "offset", QString::number(offsetMm, 'g', 4));
+  activeEditor->setPlainText(lines.join('\n'));
+}
 
-  const QString token = QString("offset=%1").arg(offsetMm, 0, 'g', 4);
-  static const QRegularExpression offRe(R"(\boffset=\S+)");
-  if (offRe.match(line).hasMatch()) {
-    line.replace(offRe, token);
-  } else {
-    if (!line.endsWith(' ')) line += ' ';
-    line += token;
-  }
-  lines[id] = line;
+void MainWindow::onLabelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx,
+                                      bool finished)
+{
+  if (!finished || id < 0 || !activeEditor) return;
+
+  const double pxPerMm =
+    (viewIndex >= 0 && viewIndex < 3 && this->viewPxPerMm[viewIndex] > 1e-9)
+      ? this->viewPxPerMm[viewIndex]
+      : 1.0;
+  const double alongMm = alongPx / pxPerMm;
+  const double perpMm = perpPx / pxPerMm;
+
+  QStringList lines = activeEditor->toPlainText().split('\n');
+  if (id >= lines.size()) return;
+  const QString value =
+    QString("%1,%2").arg(alongMm, 0, 'g', 4).arg(perpMm, 0, 'g', 4);
+  lines[id] = setLineToken(lines.at(id), "laboff", value);
   activeEditor->setPlainText(lines.join('\n'));
 }
 
@@ -3941,6 +3970,8 @@ struct ResolvedDim {
   QString label;        // final label text (template already substituted)
   double offsetMm{0};   // dimension line offset from the anchor line, model units
   bool arrowsOut{false};  // arrowheads outside the extension lines (for tight dims)
+  double labAlongMm{0};  // label offset along the dimension line, model units
+  double labPerpMm{0};   // label offset perpendicular to the dimension line
   int sourceLine{-1};   // 0-based editor line of the // @dim (for write-back)
 };
 
@@ -4069,6 +4100,13 @@ void MainWindow::refreshDrawingViews()
       else if (tok.startsWith("offset=")) rd.offsetMm = tok.mid(7).toDouble();
       else if (tok.startsWith("prec=")) prec = tok.mid(5).toInt();
       else if (tok.startsWith("arrows=")) rd.arrowsOut = (tok.mid(7).toLower() == "out");
+      else if (tok.startsWith("laboff=")) {
+        const QStringList parts = tok.mid(7).split(',');
+        if (parts.size() == 2) {
+          rd.labAlongMm = parts[0].toDouble();
+          rd.labPerpMm = parts[1].toDouble();
+        }
+      }
       else if (tok.startsWith("label=")) { labelTemplate = tok.mid(6); haveLabel = true; }
       else if (!haveLabel) { labelTemplate = tok; haveLabel = true; }  // bare token
     }
@@ -4163,6 +4201,8 @@ void MainWindow::refreshDrawingViews()
           od.label = rd.label;
           od.offsetPx = rd.offsetMm * pxPerMm;
           od.arrowsOut = rd.arrowsOut;
+          od.labAlongPx = rd.labAlongMm * pxPerMm;
+          od.labPerpPx = rd.labPerpMm * pxPerMm;
           od.id = rd.sourceLine;  // -1 for kvota= dims (not draggable)
           vd.dims.append(od);
         }

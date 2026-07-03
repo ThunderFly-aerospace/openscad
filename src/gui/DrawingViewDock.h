@@ -33,6 +33,10 @@ struct OrthoDimension {
   QString label;
   double offsetPx{0.0};
   bool arrowsOut{false};  // arrowheads outside the extension lines
+  // Label position offset from the dimension-line midpoint, in image px, in the
+  // dimension's own frame (along the line, and perpendicular to it).
+  double labAlongPx{0.0};
+  double labPerpPx{0.0};
   int id{-1};
 };
 
@@ -65,6 +69,9 @@ signals:
   // Emitted while dragging a dimension line and once more on release, with the
   // dimension id and its new perpendicular offset in image pixels.
   void dimensionOffsetChanged(int id, double offsetPx, bool finished);
+  // Emitted while dragging a dimension's label, with the new label offset in the
+  // dimension's (along, perp) frame in image pixels.
+  void labelOffsetChanged(int id, double alongPx, double perpPx, bool finished);
 
 protected:
   void paintEvent(QPaintEvent *event) override;
@@ -78,13 +85,18 @@ private:
   QPointF mapToImage(const QPointF& widgetPt) const;
   // Unit perpendicular (image space) of dimension i, pointing along +offset.
   QPointF dimPerp(const OrthoDimension& d) const;
+  // Label anchor point (image space): midpoint of the offset dimension line plus
+  // the label's own along/perp offset.
+  QPointF dimLabelPos(const OrthoDimension& d) const;
 
   OrthoViewData data;
   // Fit transform (recomputed each paint): widget = image * scale + offset.
   double fitScale{1.0};
   QPointF fitOffset;
-  // Index into data.dims currently being dragged, or -1.
+  // Index into data.dims currently being dragged (line), or -1.
   int draggingDim{-1};
+  // Index into data.dims whose label is being dragged, or -1.
+  int draggingLabel{-1};
 };
 
 /*!
@@ -110,6 +122,9 @@ signals:
   // Emitted when a dimension's offset is dragged (view index, dim id, offset px,
   // finished=true on mouse release).
   void dimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
+  // Emitted when a dimension's label is dragged (view index, dim id, along/perp
+  // px in the dimension's frame, finished=true on release).
+  void labelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx, bool finished);
   // Emitted when the user clicks "Materialize kvóty".
   void materializeRequested();
 

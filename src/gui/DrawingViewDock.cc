@@ -47,6 +47,7 @@ void OrthoViewWidget::setData(const OrthoViewData& newData)
 {
   this->data = newData;
   this->draggingDim = -1;
+  this->draggingLabel = -1;
   update();
 }
 
@@ -54,6 +55,7 @@ void OrthoViewWidget::clear()
 {
   this->data = OrthoViewData{};
   this->draggingDim = -1;
+  this->draggingLabel = -1;
   update();
 }
 
@@ -77,6 +79,19 @@ QPointF OrthoViewWidget::dimPerp(const OrthoDimension& d) const
   if (len < 1e-9) return QPointF(0, -1);
   dir /= len;
   return QPointF(dir.y(), -dir.x());  // rotate -90°
+}
+
+QPointF OrthoViewWidget::dimLabelPos(const OrthoDimension& d) const
+{
+  // Image-space label anchor: midpoint of the offset dimension line, plus the
+  // label's own offset along the line and perpendicular to it.
+  const QPointF perp = dimPerp(d);
+  QPointF dir = d.b - d.a;
+  const double len = std::hypot(dir.x(), dir.y());
+  if (len > 1e-9) dir /= len;
+  else dir = QPointF(1, 0);
+  const QPointF mid = (d.a + d.b) / 2.0 + perp * d.offsetPx;
+  return mid + dir * d.labAlongPx + perp * d.labPerpPx;
 }
 
 void OrthoViewWidget::paintEvent(QPaintEvent *)
@@ -155,12 +170,12 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
       }
     }
 
-    // Label at the midpoint of the dimension line.
-    const QPointF mid = (a2 + b2) / 2.0;
+    // Label at its own position (dimension midpoint plus label offset).
+    const QPointF labelCenter = mapToWidget(dimLabelPos(dim));
     const QString label = dim.label;
     const QRectF textRect = painter.fontMetrics().boundingRect(label).adjusted(-3, -2, 3, 2);
-    QRectF box(mid.x() - textRect.width() / 2.0, mid.y() - textRect.height() / 2.0,
-               textRect.width(), textRect.height());
+    QRectF box(labelCenter.x() - textRect.width() / 2.0,
+               labelCenter.y() - textRect.height() / 2.0, textRect.width(), textRect.height());
     // Keep the label inside the widget so it never clips at the view border.
     const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
     const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
@@ -186,7 +201,20 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
   if (this->data.image.isNull()) return;
   const QPointF click = event->position();
 
-  // First: start dragging a dimension line if the click is near one (editable
+  // First: start dragging a label if the click is on one (editable dims only).
+  const QFontMetrics fm = fontMetrics();
+  for (int i = 0; i < this->data.dims.size(); ++i) {
+    const auto& dim = this->data.dims.at(i);
+    if (dim.id < 0) continue;
+    QRectF box = fm.boundingRect(dim.label).adjusted(-3, -2, 3, 2);
+    box.moveCenter(mapToWidget(dimLabelPos(dim)));
+    if (box.contains(click)) {
+      this->draggingLabel = i;
+      return;
+    }
+  }
+
+  // Next: start dragging a dimension line if the click is near one (editable
   // dimensions only, i.e. those with a source id).
   double bestLine = 8.0;
   int hitDim = -1;
@@ -224,6 +252,24 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
 
 void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
 {
+  // Label drag: decompose the mouse position (relative to the dimension-line
+  // midpoint) into the along/perp frame of the dimension.
+  if (this->draggingLabel >= 0 && this->draggingLabel < this->data.dims.size()) {
+    OrthoDimension& dim = this->data.dims[this->draggingLabel];
+    const QPointF perp = dimPerp(dim);
+    QPointF dir = dim.b - dim.a;
+    const double len = std::hypot(dir.x(), dir.y());
+    if (len > 1e-9) dir /= len;
+    else dir = QPointF(1, 0);
+    const QPointF base = (dim.a + dim.b) / 2.0 + perp * dim.offsetPx;
+    const QPointF rel = mapToImage(event->position()) - base;
+    dim.labAlongPx = rel.x() * dir.x() + rel.y() * dir.y();
+    dim.labPerpPx = rel.x() * perp.x() + rel.y() * perp.y();
+    update();
+    emit labelOffsetChanged(dim.id, dim.labAlongPx, dim.labPerpPx, false);
+    return;
+  }
+
   if (this->draggingDim < 0 || this->draggingDim >= this->data.dims.size()) return;
   OrthoDimension& dim = this->data.dims[this->draggingDim];
   const QPointF perp = dimPerp(dim);
@@ -237,6 +283,12 @@ void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
 
 void OrthoViewWidget::mouseReleaseEvent(QMouseEvent *)
 {
+  if (this->draggingLabel >= 0 && this->draggingLabel < this->data.dims.size()) {
+    const OrthoDimension& dim = this->data.dims[this->draggingLabel];
+    emit labelOffsetChanged(dim.id, dim.labAlongPx, dim.labPerpPx, true);
+    this->draggingLabel = -1;
+    return;
+  }
   if (this->draggingDim < 0 || this->draggingDim >= this->data.dims.size()) return;
   const OrthoDimension& dim = this->data.dims[this->draggingDim];
   emit dimensionOffsetChanged(dim.id, dim.offsetPx, true);
@@ -282,6 +334,10 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
     connect(view, &OrthoViewWidget::dimensionOffsetChanged, this,
             [this, i](int id, double offsetPx, bool finished) {
               emit dimensionOffsetChanged(i, id, offsetPx, finished);
+            });
+    connect(view, &OrthoViewWidget::labelOffsetChanged, this,
+            [this, i](int id, double alongPx, double perpPx, bool finished) {
+              emit labelOffsetChanged(i, id, alongPx, perpPx, finished);
             });
   }
   grid->setRowStretch(0, 1);
