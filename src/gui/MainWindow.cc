@@ -32,6 +32,11 @@
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QLineEdit>
+#include <QSpinBox>
 #include <QDockWidget>
 #include <QDropEvent>
 #include <QElapsedTimer>
@@ -3822,9 +3827,102 @@ void MainWindow::setupDrawingDock()
   // Dragging a label writes laboff= back on release.
   QObject::connect(this->drawingDock, &DrawingViewDock::labelOffsetChanged, this,
                    &MainWindow::onLabelOffsetChanged);
+  // Double-click a dimension to edit its label/precision/arrows/projection.
+  QObject::connect(this->drawingDock, &DrawingViewDock::dimensionDoubleClicked, this,
+                   &MainWindow::onDimensionDoubleClicked);
   // "Materialize kvóty" writes a // @dim kvota=… line for each kvota pair.
   QObject::connect(this->drawingDock, &DrawingViewDock::materializeRequested, this,
                    &MainWindow::onMaterializeKvotas);
+}
+
+namespace {
+// Replace or append a `key=value` token on one editor line (whole-word key).
+QString setLineToken(QString line, const QString& key, const QString& value)
+{
+  const QString token = key + "=" + value;
+  const QRegularExpression re("\\b" + QRegularExpression::escape(key) + "=\\S+");
+  if (re.match(line).hasMatch()) {
+    line.replace(re, token);
+  } else {
+    if (!line.endsWith(' ')) line += ' ';
+    line += token;
+  }
+  return line;
+}
+}  // namespace
+
+void MainWindow::onDimensionDoubleClicked(int id)
+{
+  if (id < 0 || !activeEditor) return;
+  QStringList lines = activeEditor->toPlainText().split('\n');
+  if (id >= lines.size()) return;
+  QString line = lines.at(id);
+
+  // Read current attribute values from the @dim line.
+  auto tokenValue = [&](const QString& re) {
+    const auto m = QRegularExpression(re).match(line);
+    return m.hasMatch() ? m.captured(1) : QString();
+  };
+  QString curLabel = tokenValue(R"RX(label="([^"]*)")RX");
+  if (curLabel.isEmpty()) curLabel = tokenValue(R"(\blabel=(\S+))");
+  const QString curPrec = tokenValue(R"(\bprec=(\d+))");
+  const QString curArrows = tokenValue(R"(\barrows=(\w+))");
+  const QString curProj = tokenValue(R"(\bproj=(\w+))");
+
+  // Build the edit dialog.
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Edit dimension"));
+  auto *form = new QFormLayout(&dialog);
+
+  auto *labelEdit = new QLineEdit(curLabel, &dialog);
+  labelEdit->setPlaceholderText(tr("%f = measured length, e.g. \"width %f mm\""));
+  form->addRow(tr("Label"), labelEdit);
+
+  auto *precSpin = new QSpinBox(&dialog);
+  precSpin->setRange(-1, 6);
+  precSpin->setSpecialValueText(tr("auto"));
+  precSpin->setValue(curPrec.isEmpty() ? -1 : curPrec.toInt());
+  form->addRow(tr("Precision"), precSpin);
+
+  auto *arrowsBox = new QComboBox(&dialog);
+  arrowsBox->addItems({"in", "out"});
+  arrowsBox->setCurrentText(curArrows == "out" ? "out" : "in");
+  form->addRow(tr("Arrows"), arrowsBox);
+
+  auto *projBox = new QComboBox(&dialog);
+  projBox->addItems({tr("(all)"), "front", "side", "top"});
+  projBox->setCurrentText(curProj.isEmpty() ? tr("(all)") : curProj);
+  form->addRow(tr("Projection"), projBox);
+
+  auto *buttons =
+    new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  form->addRow(buttons);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  if (dialog.exec() != QDialog::Accepted) return;
+
+  // Rewrite the tokens. Label may contain spaces -> always quote it.
+  line.remove(QRegularExpression(R"RX(\s*label="[^"]*")RX"));
+  line.remove(QRegularExpression(R"(\s*\blabel=\S+)"));
+  const QString labelText = labelEdit->text().trimmed();
+  if (!labelText.isEmpty()) line += " label=\"" + labelText + "\"";
+
+  if (precSpin->value() >= 0) {
+    line = setLineToken(line, "prec", QString::number(precSpin->value()));
+  } else {
+    line.remove(QRegularExpression(R"(\s*\bprec=\S+)"));
+  }
+  line = setLineToken(line, "arrows", arrowsBox->currentText());
+
+  line.remove(QRegularExpression(R"(\s*\bproj=\S+)"));
+  if (projBox->currentIndex() > 0) {
+    line += " proj=" + projBox->currentText();
+  }
+
+  lines[id] = line;
+  activeEditor->setPlainText(lines.join('\n'));
+  this->statusBar()->showMessage(tr("Dimension updated. Press F5 to refresh."), 3000);
 }
 
 void MainWindow::onMaterializeKvotas()
@@ -3878,22 +3976,6 @@ void MainWindow::onMaterializeKvotas()
   this->statusBar()->showMessage(
     tr("Materialized %1 kvota dimension(s). Press F5 to update.").arg(newLines.size()), 4000);
 }
-
-namespace {
-// Replace or append a `key=value` token on one editor line (whole-word key).
-QString setLineToken(QString line, const QString& key, const QString& value)
-{
-  const QString token = key + "=" + value;
-  const QRegularExpression re("\\b" + QRegularExpression::escape(key) + "=\\S+");
-  if (re.match(line).hasMatch()) {
-    line.replace(re, token);
-  } else {
-    if (!line.endsWith(' ')) line += ' ';
-    line += token;
-  }
-  return line;
-}
-}  // namespace
 
 void MainWindow::onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished)
 {

@@ -301,6 +301,33 @@ void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
   emit dimensionOffsetChanged(dim.id, dim.offsetPx, false);
 }
 
+int OrthoViewWidget::dimAt(const QPointF& pt) const
+{
+  const QFontMetrics fm = fontMetrics();
+  // Label box first, then the dimension line.
+  for (int i = 0; i < this->data.dims.size(); ++i) {
+    const auto& dim = this->data.dims.at(i);
+    if (dim.id < 0) continue;
+    QRectF box = fm.boundingRect(dim.label).adjusted(-3, -2, 3, 2);
+    box.moveCenter(mapToWidget(dimLabelPos(dim)));
+    if (box.contains(pt)) return i;
+  }
+  for (int i = 0; i < this->data.dims.size(); ++i) {
+    const auto& dim = this->data.dims.at(i);
+    if (dim.id < 0) continue;
+    const QPointF off = dimPerp(dim) * (dim.offsetPx * this->fitScale);
+    if (distToSegment(pt, mapToWidget(dim.a) + off, mapToWidget(dim.b) + off) < 8.0) return i;
+  }
+  return -1;
+}
+
+void OrthoViewWidget::mouseDoubleClickEvent(QMouseEvent *event)
+{
+  if (this->data.image.isNull()) return;
+  const int i = dimAt(event->position());
+  if (i >= 0) emit dimensionDoubleClicked(this->data.dims.at(i).id);
+}
+
 void OrthoViewWidget::mouseReleaseEvent(QMouseEvent *)
 {
   if (this->draggingLabel >= 0 && this->draggingLabel < this->data.dims.size()) {
@@ -359,6 +386,8 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
             [this, i](int id, double alongPx, double perpPx, bool finished) {
               emit labelOffsetChanged(i, id, alongPx, perpPx, finished);
             });
+    connect(view, &OrthoViewWidget::dimensionDoubleClicked, this,
+            &DrawingViewDock::dimensionDoubleClicked);
   }
   grid->setRowStretch(0, 1);
   grid->setRowStretch(1, 1);

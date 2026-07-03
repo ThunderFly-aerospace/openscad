@@ -172,6 +172,7 @@ private:
   void onDrawingAnchorClicked(int viewIndex, const QString& name);
   void onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
   void onLabelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx, bool finished);
+  void onDimensionDoubleClicked(int id);
   void onMaterializeKvotas();
 
   // Interactive dimension creation: the first anchor clicked in the drawing

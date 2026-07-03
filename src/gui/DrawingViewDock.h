@@ -74,12 +74,19 @@ signals:
   // Emitted while dragging a dimension's label, with the new label offset in the
   // dimension's (along, perp) frame in image pixels.
   void labelOffsetChanged(int id, double alongPx, double perpPx, bool finished);
+  // Emitted on double-click of a dimension line or label (its source id).
+  void dimensionDoubleClicked(int id);
 
 protected:
   void paintEvent(QPaintEvent *event) override;
   void mousePressEvent(QMouseEvent *event) override;
   void mouseMoveEvent(QMouseEvent *event) override;
   void mouseReleaseEvent(QMouseEvent *event) override;
+  void mouseDoubleClickEvent(QMouseEvent *event) override;
+
+private:
+  // Index of the editable dimension under a widget point (label or line), or -1.
+  int dimAt(const QPointF& widgetPt) const;
 
 private:
   // Maps a render-image pixel point to a widget point using the current fit.
@@ -129,6 +136,8 @@ signals:
   // Emitted when a dimension's label is dragged (view index, dim id, along/perp
   // px in the dimension's frame, finished=true on release).
   void labelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx, bool finished);
+  // Emitted on double-click of a dimension (its source id) to open its editor.
+  void dimensionDoubleClicked(int id);
   // Emitted when the user clicks "Materialize kvóty".
   void materializeRequested();
 
