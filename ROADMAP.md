@@ -35,8 +35,10 @@ i její **testy** — bez zelených testů není fáze hotová.
     `a88628d89` frustum · `859caac72` `marker=` · `b359bb7ab` skrytí frustumu v F6.
   - Volitelné navazující (mimo kroky 1–9): CLI `--export-cameras` (headless
     dávkový render z kamer + odemkne render regresní test), GUI test doku.
-- **Fáze 2 (výkresy + kvóty)** — 🔶 směr odsouhlasen, detaily doladit; sdílí
-  infrastrukturu sběru marker-uzlů s kamerami (`dimref`).
+- **Fáze 2 (výkresy + kvóty)** — 🔶 návrh dořešen; rozsah = **A + B + `kvota=`
+  cukr**, zatím jen **délková kvóta dvou bodů** (interaktivní vkládání kotev
+  klikáním „C" i průměr/úhel = později). Sdílí sběr marker-uzlů s kamerami
+  (`dimref` ~ `collectDimrefs`).
 - **Fáze 3 (OBJ export s barvami / `.mtl`)** — 🔶 naplánováno. Malé uzavřené
   vylepšení: `export_obj.cc` dnes barvy zahazuje; dopsat `.mtl`, aby Blender
   načetl per-region barvy nativně jako materiály. (3MF už barvy exportuje a
@@ -140,67 +142,81 @@ nepřečte). Jinak kamera nic nedělá a je neviditelná v exportu/renderu.
 
 ---
 
-## Fáze 2 — technické výkresy a kvóty  🔶 směr odsouhlasen, detaily doladit
+## Fáze 2 — technické výkresy a kvóty  🔶 návrh dořešen (rozsah B + cukr)
 
 ### Zadání
-Nárys / bokorys / půdorys (ortografické pohledy) + **kreslení kvót** klikáním.
-Kvóty se musí zapsat do `.scad` **co nejblíž objektu, ze kterého vznikly**, a
-**aktualizovat se se změnou zdrojáku**. Dnes autor používá FreeCAD openscad
-branch, kde po vytvoření modelu už nejde editovat — to je hlavní bolest.
+Nárys / bokorys / půdorys (ortografické pohledy) + **délkové kvóty mezi dvěma
+body**. Kvóty žijí v `.scad` a **aktualizují se se změnou zdrojáku**. Dnes autor
+používá FreeCAD openscad branch, kde po vytvoření modelu už nejde editovat — to
+je hlavní bolest.
 
-### Datový model (návrh autora + zjednodušení)
-- **Kotevní bod** = jeden konec kvóty, definovaný v kódu **u objektu**,
-  u jehož stěny/hrany/rohu má viset.
-- **Kvóta** = dvojice kotevních bodů; někde je **seznam dvojic**.
-- **Zjednodušení:** kotevní bod ať je **stejný typ neviditelného marker-uzlu
-  jako kamera** (např. `dimref("A")`). Když je zapsán ve stejném
-  `translate()/rotate()` jako objekt, **pohne se s objektem automaticky**
-  (sdílená transformace). World-pozice se sbírá **stejným kódem jako kamery**
-  → proto stavíme kamery první.
-- **Hodnota kvóty se počítá až při renderu** = vzdálenost world-pozic dvou
-  bodů → aktualizuje se sama. Popisek buď spočítaný, nebo ručně přepsaný.
-- **Seznam dvojic** = komentáře, např. `// @dim A B popisek offset dir`.
+**Rozsah pro teď:** implementujeme **A + B (+ cukr)**. Zatím **jen délková kvóta
+dvou bodů**. Interaktivní vkládání nových kotev klikáním do holého povrchu (C)
+**zatím neděláme** (viz níže). Průměr/poloměr/úhel apod. = **pozdější rozšíření**.
+Dojem autora: **B s cukrem může být samo o sobě dost dobré.**
 
-### Hranice automatiky (klíčové k doladění)
+### Datový model (ROZHODNUTO)
+- **`dimref("jmeno")`** = pojmenovaný **neviditelný marker-uzel** (stejný typ
+  jako kamera). Zapsaný ve stejném `translate()/rotate()` jako objekt se s ním
+  **hýbe automaticky** (sdílená transformace). World-pozice se sbírá **stejným
+  kódem jako kamery** (obdoba `collectCameras` → `collectDimrefs`).
+- **Kvóta se odkazuje na DVA pojmenované `dimref`** (ne „stejný název = pár"):
+  `// @dim A B popisek proj=… offset=… dir=…`. Důvody: jedna kotva jde
+  **znovupoužít** ve víc kótách i ve víc projekcích; veškerá **prezentace**
+  (popisek, offset, směr, **projekce**) je na jednom editovatelném místě.
+- **Projekce je pole kvóty** (`proj=front|side|top`), ne kotvy — kvóta se typicky
+  kreslí **jen v jedné** projekci.
+- **Hodnota se počítá až při renderu** = vzdálenost world-pozic dvou bodů →
+  aktualizuje se sama. Popisek buď spočítaný, nebo ručně přepsaný.
+- **Sběr kvót je na JEDNOM místě** (jeden collector), který vrací kvóty ze
+  **dvou zdrojů**: (a) explicitní `@dim` řádky, (b) `kvota=` cukr (níže). Díky
+  tomu je cukr jen další větev — přidatelný bez přepisu overlay/editoru.
+
+### `kvota=` cukr (additivní, plánováno hned v B)
+- Zkratka pro **minimum psaní bez klikání**: `dimref(kvota="sirka")` na dvou
+  uzlech → collector **automaticky** vyrobí kvótu `sirka` mezi nimi (interní
+  názvy dimref si dogeneruje). Rozloží se (desugar) na základní model.
+- **Vznik** přes zkratku (defaultní prezentace); **doladění** offsetu/projekce
+  v doku dopíše explicitní `// @dim sirka …` (nebo parametry) jako override.
+- Je to vědomě „stejný `kvota=` → pár" — jako **cukr** to vadí nemůže: kdo
+  potřebuje sdílet kotvu do víc kót, sáhne po explicitním `@dim`.
+
+### Vykreslení + výběr (jádro B — proč je snadné)
+- Kvóta = **2D overlay** v doku výkresu: projekce world-bodů do aktuálního ortho
+  pohledu, šipky + text v Qt. **Žádný zápis do geometrie.**
+- **Výběr existujících `dimref` v 2D je snadné:** world-pozice známe (collector)
+  → dopředná projekce do 2D → nakreslit **klikací puntík s názvem** → klik dvou
+  puntíků sestaví kvótu (zápis `@dim`). Je to jen dopředná projekce **známých**
+  bodů — žádná re-detekce geometrie. Alternativa: výběr jmen ze seznamu.
+- Drobnosti (ne blokery): překryv projekcí (dva dimref na stejné 2D místo →
+  řešit v jiné projekci / seznamem), popisky puntíků pro jednoznačnost.
+
+### Hranice automatiky
 - Posun/rotace objektu → bod jede s ním zadarmo. ✅
-- Změna **velikosti** objektu (bod na pohybující se stěně) → funguje jen
-  když je bod vyjádřený **stejnou proměnnou** jako rozměr
-  (`translate([w,0,0]) dimref("A")`). **Automatická re-detekce geometrického
-  prvku po libovolné editaci obecně NEJDE** — trackujeme přes transformace a
-  proměnné, ne přes re-detekci geometrie.
+- Změna **velikosti** objektu (bod na pohybující se stěně) → funguje jen když je
+  bod vyjádřený **stejnou proměnnou** jako rozměr (`translate([w,0,0])
+  dimref("A")`). **Automatická re-detekce geometrického prvku po libovolné
+  editaci obecně NEJDE** — trackujeme přes transformace a proměnné, ne přes
+  re-detekci geometrie.
 
-### Round-trip (editace)
-- *Vytvoření:* klik dvou prvků ve výkresu (přes stávající měřicí picking) →
-  GUI vloží dva `dimref(...)` poblíž objektů + řádku `// @dim A B ...`.
-- *Úprava odsazení/pozice popisku:* tažením → GUI přepíše parametry řádky
-  `// @dim ...`.
-- *Posun objektu v kódu:* nic — markery jedou s ním, hodnota se přepočítá.
-
-### Otevřené otázky k doladění (než začneme)
-- Jak přesně `dimref` vložit „na správné místo se souřadnicí relativní k
-  objektu" — nejtěžší UX část.
-- Formát a umístění seznamu `// @dim` (u objektu vs. dedikovaný blok).
-- Vykreslení kvót: 2D overlay v doku výkresu (projekce world-bodů do
-  aktuálního ortografického pohledu; šipky + text v Qt), bez zápisu do
-  geometrie.
-- Hidden-line / silueta pro „opravdový" technický výkres — pravděpodobně až
-  pozdější fáze.
-
-### Hrubé kroky (A/B/C)
-- **A:** dok „Výkres" s ortografickými pohledy (nárys/bokorys/půdorys,
-  reuse ortho kamery). Jen prohlížení.
-- **B:** čtení `// @dim` + `dimref` markerů, přepočet hodnot z geometrie,
-  2D overlay kvót v pohledu.
-- **C:** interaktivní tvorba kvót (klik prvků → zápis do zdroje) + stabilní
-  ukotvení a heuristiky umístění.
+### Kroky (A/B; C zatím NE)
+- **A:** dok „Výkres" s ortografickými pohledy (nárys/bokorys/půdorys, reuse
+  ortho kamery z Fáze 1). Jen prohlížení.
+- **B:** `dimref` uzel + `collectDimrefs`; čtení `// @dim` (+ `kvota=` cukr);
+  přepočet délky z world-pozic; **2D overlay kvót**; **výběr dimref v 2D** →
+  zápis/úprava `@dim`; formulářový/klikací editor kvót v doku.
+- **C — ZATÍM NEIMPLEMENTUJEME:** interaktivní vkládání **nových** `dimref`
+  klikáním do holého povrchu (odvození „kam do zdrojáku + lokální souřadnice“).
+  To je nejtěžší UX část; kotvy proto zatím **píše uživatel ručně** ve 3D kódu.
+  Necháváme na později, až bude B v provozu.
 
 ### Testy (součást fáze)
-- **Unit (Catch2)** — přepočet hodnoty kvóty z geometrie, sběr `dimref`
-  (sdílí kód s kamerami), parsování `// @dim`.
-- **Regresní `dump`/`echo`** — `dimref` je prázdný uzel, nerozbije CSG strom.
-- **GUI test** (`src/guitests/`, styl `TestMainWindow`) — round-trip:
-  vložit `dimref`/`@dim` → upravit → ověřit text v editoru. Vzor pro picking
-  konců kvót: `src/gui/Measurement_test.cc`.
+- **Unit (Catch2)** — přepočet délky kvóty z world-pozic; `collectDimrefs`
+  (sdílí kód s kamerami); parsování `// @dim` i `kvota=` desugar.
+- **Regresní `dump`/`echo`** — `dimref` je prázdný uzel, nerozbije CSG strom
+  (vzor: `dump/echo-camera-node`).
+- **GUI test** (`src/guitests/`, styl `TestMainWindow`) — round-trip: vybrat
+  dva dimref → vložit `@dim` → upravit offset/projekci → ověřit text v editoru.
 
 ---
 
@@ -265,5 +281,8 @@ Blender je z STL nepřečte. Zjištěno (viz níže „Jak jsou barvy uložené"
 | Objektiv | ohnisko + senzor |
 | Obnova snímků | auto po F5, jen když je dok vidět |
 | Marker kamery v 3D | ano, drátěný frustum |
-| Ukotvení kvót | marker-uzly (`dimref`) + seznam `// @dim`, přepočet z geometrie |
+| Ukotvení kvót | pojmenované `dimref` + kvóta odkazuje na dva; `// @dim A B …` |
+| Zápis kvót bez klikání | `kvota=` cukr (auto-pár) + výběr dimref v 2D náhledu |
+| Rozsah Fáze 2 | A + B + cukr; jen délková kvóta; C (klikání kotev) a průměr = později |
+| Projekce kvóty | pole kvóty (`proj=…`), typicky jen jedna projekce |
 | Barevný export | 3MF (hotová cesta, Blender ≥ 4.1 nativně) + dopsat OBJ `.mtl` |
