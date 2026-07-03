@@ -48,6 +48,12 @@ i její **testy** — bez zelených testů není fáze hotová.
     projekcí world→pixel přes GL matice renderu.
   - **2B-3** (`21ae9d742`): klik dvou bodů v pohledu → zápis `// @dim` (projekce
     dle pohledu). Vše ověřeno vizuálně v GUI.
+  - **2C-1/2** (`d6bb8dce8`): odsazené kóty — `offset=` v `@dim` (mm v rovině
+    pohledu), vynášecí čáry + šipky; **tahatelné myší** v 2D → po puštění se
+    `offset=` zapíše zpět do zdroje. Ortho render s okrajem (fov=75) + clamp
+    labelu, ať odsazené kóty nezmizí za okrajem.
+  - **2C-3** (`e8a19803a`): dimref body (modré křížky) + čáry kót (červené) i
+    v **hlavním 3D pohledu** (jako frustumy kamer; skryté v F6).
 - **Fáze 3 (OBJ export s barvami / `.mtl`)** — ✅ **HOTOVO** (commit `dfd3a8b86`).
   `export_obj.cc` seskupí facy podle barvy → sesterský `.mtl`
   (`newmtl`/`Kd`/`d`), odkaz `mtllib`. Bezbarvý model + stdout zůstávají
