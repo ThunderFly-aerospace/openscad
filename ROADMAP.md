@@ -35,8 +35,13 @@ i její **testy** — bez zelených testů není fáze hotová.
     `a88628d89` frustum · `859caac72` `marker=` · `b359bb7ab` skrytí frustumu v F6.
   - Volitelné navazující (mimo kroky 1–9): CLI `--export-cameras` (headless
     dávkový render z kamer + odemkne render regresní test), GUI test doku.
-- **Fáze 2 (výkresy + kvóty)** — 🔶 další na řadě; sdílí infrastrukturu sběru
-  marker-uzlů s kamerami (`dimref`).
+- **Fáze 2 (výkresy + kvóty)** — 🔶 směr odsouhlasen, detaily doladit; sdílí
+  infrastrukturu sběru marker-uzlů s kamerami (`dimref`).
+- **Fáze 3 (OBJ export s barvami / `.mtl`)** — 🔶 naplánováno. Malé uzavřené
+  vylepšení: `export_obj.cc` dnes barvy zahazuje; dopsat `.mtl`, aby Blender
+  načetl per-region barvy nativně jako materiály. (3MF už barvy exportuje a
+  Blender ≥ 4.1 ho čte nativně — to je hotová cesta; OBJ+MTL je robustní
+  textová alternativa.)
 
 ---
 
@@ -199,6 +204,57 @@ branch, kde po vytvoření modelu už nejde editovat — to je hlavní bolest.
 
 ---
 
+## Fáze 3 — OBJ export s barvami (`.mtl`)  🔶 naplánováno
+
+### Motivace
+Při vývoji chybí spolehlivý **barevný export do Blenderu**. STL barvy ztrácí,
+Blender je z STL nepřečte. Zjištěno (viz níže „Jak jsou barvy uložené"):
+- **3MF už barvy exportuje** (per-trojúhelník, `basematerials`/color group) a
+  **Blender ≥ 4.1 ho importuje nativně** → to je hotová, doporučená cesta.
+- **OBJ** má data, ale `export_obj.cc` je **zahazuje** — nepíše `.mtl`. Blender
+  přitom OBJ+MTL nativně čte. Proto: dopsat `.mtl` do OBJ exportu jako robustní
+  textovou alternativu (1 Blender materiál na 1 OpenSCAD barvu).
+
+### Jak jsou barvy uložené (podklad)
+- Barva je **per-region** — `color()` obarví celý podstrom
+  (`GeometryEvaluator.cc:488` `setColor`); Manifold ji trackuje per source-object
+  přes „original ID" (`ManifoldGeometry.h:81`), CSG operace ji přenášejí.
+- Při exportu se zploští na **per-face**: `PolySet` má paletu `colors` +
+  `color_indices` (jeden index na face) — `PolySet.h:26-27`.
+- **Žádné per-vertex barvy, žádné UV, žádná textura** — model = sada plochých
+  barevných oblastí. → **Textura je špatný nástroj** (vyžadovala by UV unwrap a
+  rastrovala by ostré hranice); správná reprezentace = per-face / materiál.
+
+### Rozhodnutí
+- Cíl = **rozšířit stávající `src/io/export_obj.cc`** o generování `.mtl`
+  (žádný nový formát, žádný zásah do geometrie).
+- 1 `newmtl` na 1 barvu palety; facy seskupené podle `color_index` s `usemtl`.
+
+### Kroky implementace
+1. **`.mtl` obsah:** z `PolySet` paletu `colors` → `newmtl color_N` s `Kd r g b`;
+   u průhledných z alfy `d`/`Tr`. Facy s `color_index == -1` → default materiál.
+2. **`.obj` napojení:** na začátek `mtllib <basename>.mtl`; facy **seřadit /
+   seskupit podle `color_index`**, před každou skupinu vypsat `usemtl color_N`.
+3. **Kam `.mtl`:** vedle `.obj` (název odvodit z výstupní cesty). Ošetřit zápis
+   na **stdout** (bez cesty) — buď `.mtl` vynechat + varovat, nebo dohodnutý
+   název; doladit při implementaci.
+4. **Zpětná kompatibilita:** bezbarvý model musí dát **bitově stejný `.obj`**
+   jako dnes (žádné `mtllib`/`usemtl`, pokud `color_indices` prázdné) — jinak
+   zčervenají stávající golden soubory.
+
+### Testy (součást fáze)
+- **Regresní `export-obj`** (stávající) — bezbarvý model beze změny (viz krok 4).
+- **Nový regresní** — `.scad` s `color()` → ověřit vygenerovaný `.obj`
+  (`mtllib`/`usemtl`) i `.mtl` (`newmtl`/`Kd`). Zlaté soubory
+  `TEST_GENERATE=1` → ručně ověřit → zelené.
+- Unit není nutný (čistě serializace).
+
+### Rizika
+- Minimální — nový výstup, geometrie netknutá. Hlavní pozor: (4) bit-stabilita
+  bezbarvého OBJ a (3) chování při stdout.
+
+---
+
 ## Stav rozhodnutí
 | Téma | Rozhodnutí |
 |---|---|
@@ -210,3 +266,4 @@ branch, kde po vytvoření modelu už nejde editovat — to je hlavní bolest.
 | Obnova snímků | auto po F5, jen když je dok vidět |
 | Marker kamery v 3D | ano, drátěný frustum |
 | Ukotvení kvót | marker-uzly (`dimref`) + seznam `// @dim`, přepočet z geometrie |
+| Barevný export | 3MF (hotová cesta, Blender ≥ 4.1 nativně) + dopsat OBJ `.mtl` |
