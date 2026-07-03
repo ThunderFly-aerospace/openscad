@@ -293,14 +293,26 @@ doplnit option do `CommandLine` a do `do_export`/cmdline cesty v `openscad.cc`
   (konec-na-konec na jedné čáře) nebo od společné základny (running). Zobrazovací
   režim nad uspořádaným seznamem dimref v jednom směru.
 
-**Robustnost — unikátní jména dimref:**
-- Když `dimref` padne do **for-cyklu**, vznikne víc uzlů se **stejným jménem** na
-  různých pozicích. `byName[jméno]=pos` se přepíše → `@dim A B` tiše vezme
-  **poslední** „A", a klik na konkrétní „A" spojí špatnou instanci. **Pravidlo:
-  jména musí být unikátní.** Idiom: `dimref(str("hole", i))` → `hole0..holeN`
-  (navíc umožní kótovat jednotlivé instance). **Tooling:** `collectDimrefs` bude
-  **hlásit varování** při duplicitním jménu na víc pozicích. (Ne auto-suffix —
-  nešel by napsat do `@dim` a nebyl by stabilní.)
+**Robustnost — duplicitní jména dimref (cyklus + modul):**
+- `dimref` ve **for-cyklu** (typicky v hloubi modulu, který se cyklí nahoře) →
+  víc uzlů se **stejným jménem** na různých pozicích. `byName[jméno]=pos` se
+  přepíše → `@dim A B` tiše vezme **poslední**, klik spojí špatnou instanci.
+  `str("A", i)` NEfunguje, když dimref **nevidí** proměnnou cyklu (je v modulu).
+- **Identita vs. reference:** každá instance MÁ jednoznačnou identitu (`idx`,
+  world-pozice); kolize je jen v ploché textové referenci `@dim A B`.
+- **Řešení (rozhodnuto): auto-kvalifikace kotev podle POZICE.** Kolektor bere
+  každou instanci jako samostatnou kotvu = **jméno + world-pozice**. Kóta se
+  tvoří **klikem** na konkrétní puntík (známe přesnou instanci) → `@dim` uloží
+  `A@[x,y,z]`; při refresh se vezme stejnojmenná kotva **nejbližší hintu**;
+  přepíše se při novém kliku. **Stabilní** vůči přidání/ubrání jiných instancí
+  (klíč = pozice, ne pořadí). Sekvenční čísla (`A·1`, `A·2`) jen jako **popisek**
+  v UI pro čitelnost, NE uložená reference (posunuly by se při změně počtu).
+- Alternativy pro speciální případy: **id-parametr** modulu
+  (`widget(id=i){ dimref(str("A",id)); }`) když modul píšeš = nejstabilnější;
+  **radiální/průměrová** kóta v cyklu žádné jméno nepotřebuje — dimref se
+  **auto-vykreslí na každé instanci** (řada děr → okótuj každou).
+- **Tooling:** `collectDimrefs` **hlásí varování** při duplicitním jménu na víc
+  pozicích (viditelné upozornění místo tichého chybného chování).
 
 **Sémantika měření — 4 režimy (relativně k projekci):**
 Autor to trefil líp než světové osy: měření je vztažené k **projekční rovině**.
