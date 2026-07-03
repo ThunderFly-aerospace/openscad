@@ -236,19 +236,21 @@ Dojem autora: **B s cukrem může být samo o sobě dost dobré.**
 - **GUI test** (`src/guitests/`, styl `TestMainWindow`) — round-trip: vybrat
   dva dimref → vložit `@dim` → upravit offset/projekci → ověřit text v editoru.
 
-### Fáze 2E — konfigurace doku + editace kót (🔶 naplánováno)
+### Fáze 2E — konfigurace doku + editace kót (🔶 rozpracováno)
 Požadavky autora, seskupené podle náročnosti:
 
 **Rychlé (per-kóta atributy + přepínače doku):**
-- **Editovatelný label se šablonou + přesnost** — `label` jako text s `%f`
-  (dosadí se spočtená délka), volitelná přesnost: `// @dim … label="šířka %.1f mm"`.
-  (Editace: dialog v doku, nebo přímo `label=` v `@dim` — doladit.)
-- **Šipky dovnitř/ven per kóta** — `arrows=in|out` v `@dim`, přepínač.
-- **Posun labelu (2D)** — `laboff=du,dv`, tažení labelu (zbylo z 2D-2).
-- **Vypnout labely / referenční tečky** — přepínače v doku (čistý náhled „jak to
-  vyexportuje").
-- **Dropdown pro koincidentní body** — klik na místo s víc dimref → menu s výběrem
-  (řeší překryv A/H1 v počátku).
+- **2E-1 ✅** (`dcb1144bb`) **label šablona + přesnost + šipky** — `label="… %f …"`
+  (dosadí délku, `prec=N` přesnost), `arrows=in|out`. Uvozovkovaný label.
+  Ověřeno („šířka 40.0 mm").
+- **2E-3 ✅** (`37740ed4e`) **posun labelu** — `laboff=du,dv`, tažení labelu →
+  zápis zpět. Ověřeno.
+- **2E-2 ✅** (`b620023ac`) **vypnout referenční tečky** — checkbox „Reference
+  points" skryje dimref tečky+jména (labely kót zůstanou). Ověřeno.
+- **2E-4 🔶** dropdown pro koincidentní body — klik na místo s víc dimref → menu
+  s výběrem (řeší překryv A/H1 v počátku).
+- Pozn.: editace atributů jde vždy i přímo v `@dim` řádku; dialog v doku =
+  volitelná nadstavba (později).
 
 **Střední (režimy doku):**
 - **Barevný vs. čárový (černobílý) režim** — přepínač: OpenCSG barvy (dnešní) vs.
