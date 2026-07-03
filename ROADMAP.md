@@ -247,8 +247,8 @@ Požadavky autora, seskupené podle náročnosti:
   zápis zpět. Ověřeno.
 - **2E-2 ✅** (`b620023ac`) **vypnout referenční tečky** — checkbox „Reference
   points" skryje dimref tečky+jména (labely kót zůstanou). Ověřeno.
-- **2E-4 🔶** dropdown pro koincidentní body — klik na místo s víc dimref → menu
-  s výběrem (řeší překryv A/H1 v počátku).
+- **2E-4 ✅** (`cb7d36fc9`) dropdown pro koincidentní body — klik na místo s víc
+  dimref → menu s výběrem (A/H1). Ověřeno.
 - Pozn.: editace atributů jde vždy i přímo v `@dim` řádku; dialog v doku =
   volitelná nadstavba (později).
 
