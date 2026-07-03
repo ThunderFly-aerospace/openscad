@@ -323,6 +323,18 @@ Cíl = čistý, kompaktní vektorový výkres (ne obří SVG). **Nekreslit ploch
 válce je při rozumném `$fn` OK). Jediná výjimka, kde hodnota jde ze zdroje, je
 **poloměrová/průměrová kóta** (4B, `dimref(d=/r=)`).
 
+### 4D — UX doku Výkres
+- **Zoom + pan v pohledech** — kolečko = zoom, tažení = pan v každém ortho
+  pohledu (monitor není nekonečný). Přidat uživatelskou zoom/pan transformaci do
+  `mapToWidget` (fitScale/fitOffset) → overlay, kóty, tažení i klikání se posunou
+  konzistentně. Volitelně „maximalizovat jeden pohled".
+- **Klik → skok do zdrojáku** (jako 3D pravý klik: idx→`getNodeByID`→
+  `modinst->location()`→řádek). Konvence: **pravý klik = skok**, levý = tvorba
+  kóty (aby se nepraly). Dvě úrovně:
+  - Pravý klik na **dimref** → jeho řádek (triviální, máme lokaci uzlu). *(hned)*
+  - Pravý klik na **geometrii** → řádek objektu pod kurzorem. Vyžaduje offscreen
+    **idx-buffer** (druhý pass jako `MouseSelector`) + sampling. *(víc práce)*
+
 ---
 
 ## Fáze 3 — OBJ export s barvami (`.mtl`)  🔶 naplánováno
