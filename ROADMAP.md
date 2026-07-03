@@ -35,14 +35,19 @@ i její **testy** — bez zelených testů není fáze hotová.
     `a88628d89` frustum · `859caac72` `marker=` · `b359bb7ab` skrytí frustumu v F6.
   - Volitelné navazující (mimo kroky 1–9): CLI `--export-cameras` (headless
     dávkový render z kamer + odemkne render regresní test), GUI test doku.
-- **Fáze 2 (výkresy + kvóty)** — 🔶 rozpracováno; rozsah = **A + B + `kvota=`
-  cukr**, zatím jen **délková kvóta dvou bodů** (interaktivní vkládání kotev
-  klikáním „C" i průměr/úhel = později).
-  - **2A — ✅ HOTOVO** (commit `dff6172c8`): dok „Drawing" se třemi ortho
-    pohledy (nárys/bokorys/půdorys), `render_ortho_view` (OpenCSG, barvy
-    zachovány), obnova po F5, Save Sheet. Ověřeno v GUI.
-  - **2B — 🔶 další**: `dimref` uzel + `collectDimrefs`; `// @dim` (+ `kvota=`);
-    přepočet délky; 2D overlay; výběr dimref v 2D → zápis `@dim`.
+- **Fáze 2 (výkresy + kvóty)** — ✅ **HOTOVO** (rozsah A + B + `kvota=` cukr;
+  zatím jen **délková kvóta dvou bodů**; interaktivní vkládání kotev klikáním do
+  holého povrchu „C" i průměr/úhel = pozdější rozšíření).
+  - **2A** (commit `dff6172c8`): dok „Drawing" se třemi ortho pohledy
+    (nárys/bokorys/půdorys), `render_ortho_view` (OpenCSG, barvy zachovány),
+    obnova po F5, Save Sheet.
+  - **2B-1** (`4fa85cb64`): `dimref("name", kvota=…)` uzel + `collectDimrefs`
+    (neviditelný, prázdná geometrie); dump/echo testy.
+  - **2B-2** (`17e2f866a`): parsování `// @dim A B [proj=…] [label=…]` +
+    `kvota=` sugar; přepočet délky z world-pozic; 2D overlay (body + kóty)
+    projekcí world→pixel přes GL matice renderu.
+  - **2B-3** (`21ae9d742`): klik dvou bodů v pohledu → zápis `// @dim` (projekce
+    dle pohledu). Vše ověřeno vizuálně v GUI.
 - **Fáze 3 (OBJ export s barvami / `.mtl`)** — ✅ **HOTOVO** (commit `dfd3a8b86`).
   `export_obj.cc` seskupí facy podle barvy → sesterský `.mtl`
   (`newmtl`/`Kd`/`d`), odkaz `mtllib`. Bezbarvý model + stdout zůstávají
@@ -149,7 +154,7 @@ nepřečte). Jinak kamera nic nedělá a je neviditelná v exportu/renderu.
 
 ---
 
-## Fáze 2 — technické výkresy a kvóty  🔶 návrh dořešen (rozsah B + cukr)
+## Fáze 2 — technické výkresy a kvóty  ✅ HOTOVO (A + B + cukr; viz Stav výše)
 
 ### Zadání
 Nárys / bokorys / půdorys (ortografické pohledy) + **délkové kvóty mezi dvěma
