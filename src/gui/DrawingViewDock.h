@@ -12,6 +12,7 @@
 
 class QLabel;
 class QPushButton;
+class QCheckBox;
 class QResizeEvent;
 class QMouseEvent;
 class QPaintEvent;
@@ -63,6 +64,7 @@ public:
 
   void setData(const OrthoViewData& data);
   void clear();
+  void setShowAnchors(bool show);
 
 signals:
   void anchorClicked(const QString& name);
@@ -97,6 +99,8 @@ private:
   int draggingDim{-1};
   // Index into data.dims whose label is being dragged, or -1.
   int draggingLabel{-1};
+  // Whether to draw reference-point dots and their names.
+  bool showAnchors{true};
 };
 
 /*!
@@ -130,11 +134,13 @@ signals:
 
 private slots:
   void saveSheet();
+  void setShowAnchors(bool show);
 
 private:
   QVector<OrthoViewWidget *> viewWidgets;
   QLabel *placeholder;
   QPushButton *saveButton;
   QPushButton *materializeButton;
+  QCheckBox *showRefsCheck;
   QList<OrthoViewData> views;
 };

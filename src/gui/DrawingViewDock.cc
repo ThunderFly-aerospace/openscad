@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include <QFileDialog>
+#include <QCheckBox>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -56,6 +57,12 @@ void OrthoViewWidget::clear()
   this->data = OrthoViewData{};
   this->draggingDim = -1;
   this->draggingLabel = -1;
+  update();
+}
+
+void OrthoViewWidget::setShowAnchors(bool show)
+{
+  this->showAnchors = show;
   update();
 }
 
@@ -185,7 +192,8 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
     painter.drawText(box, Qt::AlignCenter, label);
   }
 
-  // Anchor dots with names.
+  // Anchor dots with names (reference points) — optional.
+  if (this->showAnchors)
   for (const auto& anchor : this->data.anchors) {
     const QPointF p = mapToWidget(anchor.pos);
     painter.setPen(Qt::NoPen);
@@ -236,7 +244,9 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
     return;
   }
 
-  // Otherwise: report an anchor click (used to create dimensions).
+  // Otherwise: report an anchor click (used to create dimensions). Hidden
+  // reference points are not clickable.
+  if (!this->showAnchors) return;
   double best = 12.0;
   QString hit;
   for (const auto& anchor : this->data.anchors) {
@@ -348,6 +358,11 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->placeholder = new QLabel(tr("Render (F5) to generate orthographic views."), central);
   this->placeholder->setAlignment(Qt::AlignCenter);
 
+  this->showRefsCheck = new QCheckBox(tr("Reference points"), central);
+  this->showRefsCheck->setChecked(true);
+  this->showRefsCheck->setToolTip(
+    tr("Show the dimref anchor dots and their names (dimension labels stay)."));
+
   this->materializeButton = new QPushButton(tr("Materialize kvóty"), central);
   this->materializeButton->setToolTip(
     tr("Write a // @dim line for each kvota= pair, making them editable."));
@@ -363,12 +378,19 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
 
   layout->addWidget(sheet, 1);
   layout->addWidget(this->placeholder);
+  layout->addWidget(this->showRefsCheck);
   layout->addWidget(buttonRow);
   setWidget(central);
 
   connect(this->saveButton, &QPushButton::clicked, this, &DrawingViewDock::saveSheet);
   connect(this->materializeButton, &QPushButton::clicked, this,
           &DrawingViewDock::materializeRequested);
+  connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
+}
+
+void DrawingViewDock::setShowAnchors(bool show)
+{
+  for (auto *view : this->viewWidgets) view->setShowAnchors(show);
 }
 
 DrawingViewDock::~DrawingViewDock() = default;
