@@ -6,6 +6,7 @@
 #include <QFileDialog>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
@@ -282,15 +283,27 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->placeholder = new QLabel(tr("Render (F5) to generate orthographic views."), central);
   this->placeholder->setAlignment(Qt::AlignCenter);
 
+  this->materializeButton = new QPushButton(tr("Materialize kvóty"), central);
+  this->materializeButton->setToolTip(
+    tr("Write a // @dim line for each kvota= pair, making them editable."));
+
   this->saveButton = new QPushButton(tr("Save Sheet…"), central);
   this->saveButton->setEnabled(false);
 
+  auto *buttonRow = new QWidget(central);
+  auto *buttonLayout = new QHBoxLayout(buttonRow);
+  buttonLayout->setContentsMargins(0, 0, 0, 0);
+  buttonLayout->addWidget(this->materializeButton);
+  buttonLayout->addWidget(this->saveButton);
+
   layout->addWidget(sheet, 1);
   layout->addWidget(this->placeholder);
-  layout->addWidget(this->saveButton);
+  layout->addWidget(buttonRow);
   setWidget(central);
 
   connect(this->saveButton, &QPushButton::clicked, this, &DrawingViewDock::saveSheet);
+  connect(this->materializeButton, &QPushButton::clicked, this,
+          &DrawingViewDock::materializeRequested);
 }
 
 DrawingViewDock::~DrawingViewDock() = default;

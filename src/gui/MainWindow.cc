@@ -75,6 +75,7 @@
 #include <QDebug>
 #include <QString>
 #include <QRegularExpression>
+#include <set>
 #include <algorithm>
 #include <boost/range/adaptor/reversed.hpp>
 #include <boost/version.hpp>
@@ -3818,6 +3819,47 @@ void MainWindow::setupDrawingDock()
   // Dragging a dimension line changes its offset= and writes it back on release.
   QObject::connect(this->drawingDock, &DrawingViewDock::dimensionOffsetChanged, this,
                    &MainWindow::onDimensionOffsetChanged);
+  // "Materialize kvóty" writes a // @dim kvota=… line for each kvota pair.
+  QObject::connect(this->drawingDock, &DrawingViewDock::materializeRequested, this,
+                   &MainWindow::onMaterializeKvotas);
+}
+
+void MainWindow::onMaterializeKvotas()
+{
+  if (!activeEditor || !this->rootNode) return;
+
+  // Kvota names that have at least two dimref anchors.
+  std::map<std::string, int> kvotaCounts;
+  for (const auto& d : collectDimrefs(this->rootNode)) {
+    if (d.node && !d.node->kvota_name.empty()) kvotaCounts[d.node->kvota_name]++;
+  }
+
+  // Kvota names that already have a // @dim kvota=… line.
+  const QString text = activeEditor->toPlainText();
+  static const QRegularExpression kvRe(R"(^\s*//\s*@dim\s+kvota=(\S+))");
+  std::set<std::string> already;
+  for (const QString& line : text.split('\n')) {
+    const auto m = kvRe.match(line);
+    if (m.hasMatch()) already.insert(m.captured(1).toStdString());
+  }
+
+  QStringList newLines;
+  for (const auto& [kvota, count] : kvotaCounts) {
+    if (count >= 2 && !already.count(kvota)) {
+      newLines << QString("// @dim kvota=%1").arg(QString::fromStdString(kvota));
+    }
+  }
+  if (newLines.isEmpty()) {
+    this->statusBar()->showMessage(tr("No new kvota dimensions to materialize."), 3000);
+    return;
+  }
+
+  QString appended = text;
+  if (!appended.isEmpty() && !appended.endsWith('\n')) appended += '\n';
+  appended += newLines.join('\n') + '\n';
+  activeEditor->setPlainText(appended);
+  this->statusBar()->showMessage(
+    tr("Materialized %1 kvota dimension(s). Press F5 to update.").arg(newLines.size()), 4000);
 }
 
 void MainWindow::onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished)
@@ -3962,25 +4004,41 @@ void MainWindow::refreshDrawingViews()
 
   std::vector<ResolvedDim> dims;
 
-  // 2. Explicit // @dim A B [proj=...] [label=...] lines from the source.
+  // 2. Explicit // @dim lines from the source. Two forms:
+  //      // @dim A B     [proj=] [offset=] [label=]   (endpoints by anchor name)
+  //      // @dim kvota=N  [proj=] [offset=] [label=]   (endpoints from a kvota pair)
   const QString source = activeEditor ? activeEditor->toPlainText() : QString();
-  static const QRegularExpression dimRe(
-    R"(^\s*//\s*@dim\s+(\S+)\s+(\S+)\s*(.*)$)");
+  static const QRegularExpression dimRe(R"(^\s*//\s*@dim\s+(.*\S)\s*$)");
+  std::set<QString> materializedKvotas;  // kvota names already written as @dim
   const QStringList sourceLines = source.split('\n');
   for (int li = 0; li < sourceLines.size(); ++li) {
     const auto m = dimRe.match(sourceLines.at(li));
     if (!m.hasMatch()) continue;
-    const std::string a = m.captured(1).toStdString();
-    const std::string b = m.captured(2).toStdString();
-    const auto ita = byName.find(a);
-    const auto itb = byName.find(b);
-    if (ita == byName.end() || itb == byName.end()) continue;  // unknown anchor
+    QStringList toks = m.captured(1).split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    if (toks.isEmpty()) continue;
+
     ResolvedDim rd;
-    rd.a = ita->second;
-    rd.b = itb->second;
     rd.sourceLine = li;
-    for (const QString& tok : m.captured(3).split(QRegularExpression("\\s+"),
-                                                  Qt::SkipEmptyParts)) {
+    int firstOpt = 0;  // index of first option token
+    if (toks.first().startsWith("kvota=")) {
+      const QString kv = toks.first().mid(6);
+      const auto it = kvotaGroups.find(kv.toStdString());
+      if (it == kvotaGroups.end() || it->second.size() < 2) continue;
+      rd.a = it->second[0];
+      rd.b = it->second[1];
+      materializedKvotas.insert(kv);
+      firstOpt = 1;
+    } else {
+      if (toks.size() < 2) continue;
+      const auto ita = byName.find(toks[0].toStdString());
+      const auto itb = byName.find(toks[1].toStdString());
+      if (ita == byName.end() || itb == byName.end()) continue;  // unknown anchor
+      rd.a = ita->second;
+      rd.b = itb->second;
+      firstOpt = 2;
+    }
+    for (int t = firstOpt; t < toks.size(); ++t) {
+      const QString& tok = toks[t];
       if (tok.startsWith("proj=")) rd.proj = normalizeProj(tok.mid(5));
       else if (tok.startsWith("label=")) rd.label = tok.mid(6);
       else if (tok.startsWith("offset=")) rd.offsetMm = tok.mid(7).toDouble();
@@ -3990,14 +4048,16 @@ void MainWindow::refreshDrawingViews()
     dims.push_back(rd);
   }
 
-  // 3. kvota= sugar: two dimrefs sharing a kvota name auto-form a dimension.
+  // 3. kvota= sugar: two dimrefs sharing a kvota name auto-form a dimension,
+  //    UNLESS that kvota has already been materialized into an @dim line above.
   for (const auto& [kvota, pts] : kvotaGroups) {
     if (pts.size() < 2) continue;
+    if (materializedKvotas.count(QString::fromStdString(kvota))) continue;
     ResolvedDim rd;
     rd.a = pts[0];
     rd.b = pts[1];
     rd.label = lengthLabel(rd.a, rd.b);
-    dims.push_back(rd);
+    dims.push_back(rd);  // id stays -1: in-memory, not draggable until materialized
   }
 
   // Push dimref markers (anchor crosses + dimension lines) to the 3D view. This

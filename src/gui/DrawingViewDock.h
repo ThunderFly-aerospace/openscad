@@ -109,6 +109,8 @@ signals:
   // Emitted when a dimension's offset is dragged (view index, dim id, offset px,
   // finished=true on mouse release).
   void dimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
+  // Emitted when the user clicks "Materialize kvóty".
+  void materializeRequested();
 
 private slots:
   void saveSheet();
@@ -117,5 +119,6 @@ private:
   QVector<OrthoViewWidget *> viewWidgets;
   QLabel *placeholder;
   QPushButton *saveButton;
+  QPushButton *materializeButton;
   QList<OrthoViewData> views;
 };
