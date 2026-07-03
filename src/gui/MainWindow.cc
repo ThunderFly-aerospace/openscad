@@ -123,6 +123,7 @@
 #include "gui/Dock.h"
 #include "gui/ai/AIDock.h"
 #include "gui/CameraViewDock.h"
+#include "gui/DrawingViewDock.h"
 #include "core/CameraNode.h"
 #include "glview/GLView.h"
 #include "glview/OffscreenView.h"
@@ -302,6 +303,7 @@ MainWindow::MainWindow(const QStringList& filenames) : rubberBandManager(this)
   setupColorList();
   setupAIDock();
   setupCameraDock();
+  setupDrawingDock();
   setupDocks();
 
   setup3DView();
@@ -1879,6 +1881,7 @@ void MainWindow::csgRender()
   }
 
   refreshCameras();
+  refreshDrawingViews();
 
   compileEnded();
 }
@@ -3794,6 +3797,57 @@ void MainWindow::refreshCameras()
   this->cameraDock->setSnapshots(images, names);
 }
 
+void MainWindow::setupDrawingDock()
+{
+  this->drawingDock = new DrawingViewDock(this);
+  addDockWidget(Qt::RightDockWidgetArea, this->drawingDock);
+  this->drawingDock->hide();
+
+  // Re-render the ortho views when the dock becomes visible (e.g. from the menu).
+  QObject::connect(this->drawingDock, &Dock::visibilityChanged, this, [this](bool visible) {
+    if (visible) refreshDrawingViews();
+  });
+}
+
+void MainWindow::refreshDrawingViews()
+{
+  // Orthographic views are expensive, so only render them while the dock is open.
+  if (!this->drawingDock || !this->drawingDock->isVisible()) return;
+  if (!this->rootNode) {
+    this->drawingDock->clearViews();
+    return;
+  }
+
+  // Gimbal angles (Euler XYZ degrees) matching the View > Front/Left/Top actions.
+  struct OrthoView {
+    const char *title;
+    Eigen::Vector3d rot;
+  };
+  const std::vector<OrthoView> views = {
+    {"Front (nárys)", {0, 0, 0}},
+    {"Side (bokorys)", {0, 0, 90}},
+    {"Top (půdorys)", {90, 0, 0}},
+  };
+
+  QList<QImage> images;
+  QStringList titles;
+  ViewOptions options;  // OpenCSG previewer, no axes/edges/crosshairs
+  for (const auto& view : views) {
+    QImage image;
+    if (auto glview = render_ortho_view(this->tree, options, view.rot, 600, 600)) {
+      std::ostringstream stream(std::ios::out | std::ios::binary);
+      if (glview->save(stream)) {
+        const std::string data = stream.str();
+        image.loadFromData(reinterpret_cast<const uchar *>(data.data()),
+                           static_cast<int>(data.size()), "PNG");
+      }
+    }
+    images.append(image);
+    titles.append(QString::fromUtf8(view.title));
+  }
+  this->drawingDock->setViews(images, titles);
+}
+
 /**
   Set up resources related to the 3d View
  */
@@ -3862,7 +3916,8 @@ void MainWindow::setupDocks()
     {colorListDock, _("C&olor List")},
     {viewportControlDock, _("&Viewport-Control")},
     {aiDock,_("&AI Chat")},
-    {cameraDock, _("&Cameras")}
+    {cameraDock, _("&Cameras")},
+    {drawingDock, _("&Drawing")}
   };
   // clang-format off
 

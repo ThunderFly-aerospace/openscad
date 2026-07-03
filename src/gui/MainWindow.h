@@ -54,6 +54,7 @@ class ProgressWidget;
 class ThrownTogetherRenderer;
 class AIDock;
 class CameraViewDock;
+class DrawingViewDock;
 
 #include "RenderStatistic.h"
 #include "core/Tree.h"
@@ -105,6 +106,7 @@ public:
   TabManager *tabManager;
   AIDock *aiDock;
   CameraViewDock *cameraDock;
+  DrawingViewDock *drawingDock;
 
   std::shared_ptr<const Geometry> rootGeom;
   std::shared_ptr<Renderer> geomRenderer;
@@ -162,9 +164,11 @@ private:
   void openRemainingFiles(const QStringList& filenames);
   void setupAIDock();
   void setupCameraDock();
+  void setupDrawingDock();
   // Re-render offscreen snapshots from the model's camera() markers into the
   // camera dock (only when it is visible). Called after each preview.
   void refreshCameras();
+  void refreshDrawingViews();
 
 protected:
   void closeEvent(QCloseEvent *event) override;

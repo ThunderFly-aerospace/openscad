@@ -217,6 +217,22 @@ std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptio
   return glview;
 }
 
+std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& options,
+                                                 const Eigen::Vector3d& object_rot,
+                                                 unsigned int pixel_width, unsigned int pixel_height)
+{
+  // An orthographic view down a fixed gimbal angle (front/side/top), framing the
+  // whole model. Reuses the preview path so color() colors are preserved.
+  Camera camera;
+  camera.projection = Camera::ProjectionType::ORTHOGONAL;
+  camera.object_rot = object_rot;
+  camera.viewall = true;
+  camera.autocenter = true;
+  camera.pixel_width = pixel_width;
+  camera.pixel_height = pixel_height;
+  return prepare_preview(tree, options, camera);
+}
+
 #else  // NULLGL
 
 bool export_png(const std::shared_ptr<const Geometry>& root_geom, const ViewOptions& options,
@@ -230,6 +246,12 @@ std::unique_ptr<OffscreenView> prepare_preview(Tree& tree, const ViewOptions& op
 }
 std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptions& options,
                                                      const CameraInfo& info)
+{
+  return nullptr;
+}
+std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& options,
+                                                 const Eigen::Vector3d& object_rot,
+                                                 unsigned int pixel_width, unsigned int pixel_height)
 {
   return nullptr;
 }
