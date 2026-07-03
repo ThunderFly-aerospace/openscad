@@ -217,16 +217,15 @@ Dojem autora: **B s cukrem může být samo o sobě dost dobré.**
   editaci obecně NEJDE** — trackujeme přes transformace a proměnné, ne přes
   re-detekci geometrie.
 
-### Kroky (A/B; C zatím NE)
+### Kroky (A/B)
 - **A:** dok „Výkres" s ortografickými pohledy (nárys/bokorys/půdorys, reuse
   ortho kamery z Fáze 1). Jen prohlížení.
 - **B:** `dimref` uzel + `collectDimrefs`; čtení `// @dim` (+ `kvota=` cukr);
   přepočet délky z world-pozic; **2D overlay kvót**; **výběr dimref v 2D** →
   zápis/úprava `@dim`; formulářový/klikací editor kvót v doku.
-- **C — ZATÍM NEIMPLEMENTUJEME:** interaktivní vkládání **nových** `dimref`
-  klikáním do holého povrchu (odvození „kam do zdrojáku + lokální souřadnice“).
-  To je nejtěžší UX část; kotvy proto zatím **píše uživatel ručně** ve 3D kódu.
-  Necháváme na později, až bude B v provozu.
+- **„C" (interaktivní vkládání nových `dimref` klikáním do holého povrchu) —
+  ZRUŠENO** (rozhodnutí autora). Kotvy píše uživatel ručně ve 3D kódu; klikáním
+  se jen sestavují kvóty z existujících dimref (to je součást B).
 
 ### Testy (součást fáze)
 - **Unit (Catch2)** — přepočet délky kvóty z world-pozic; `collectDimrefs`
@@ -269,6 +268,40 @@ Požadavky autora, seskupené podle náročnosti:
   vektorový `<text>`, čitelné při jakémkoli měřítku). Model jako vložený raster
   ve správné mm velikosti, overlay (čáry/šipky/text) vektor přes QPainter na
   `QSvgGenerator`/`QPdfWriter`. Ověřeno: SVG 504×1513 mm + PDF %PDF-1.4.
+
+---
+
+## Fáze 4 — navazující (🔶 naplánováno)
+
+### 4A — CLI `--export-cameras <prefix>`
+Headless dávkový render snímků ze všech `camera()` v modelu (autorův reálný
+workflow + odemkne render regresní test). Engine hotový (`render_camera_preview`);
+doplnit option do `CommandLine` a do `do_export`/cmdline cesty v `openscad.cc`
+(pozn.: `CommandLine` má `const&` členy, init na ~2 místech). Výstup PNG
+`<prefix>_<name>.png` per kamera. Otestovat cmdline testem.
+
+### 4B — další typy kót
+- **Poloměr / průměr** — hodnotu NELZE brát z geometrie (válec = N-úhelník dle
+  `$fn`, kružnice ve finální meshi není). Proto **hodnota ze zdroje**:
+  **parametr na `dimref`** — `dimref("A", d=5)` / `r=2.5` (klidně z proměnné,
+  OpenSCAD vyhodnotí). Střed = world-pozice dimref. Display (směr/otočení,
+  projekce, offset, popisek) na `@dim` řádku: `// @dim A kind=diameter proj=top
+  angle=45`. Label „⌀5"/„R2.5". (Ne nový uzel — parametr na dimref = 1 collector.)
+- **Úhel** — nepotřebuje uloženou hodnotu: počítá se ze **tří přesných dimref**
+  (vrchol + 2 konce), `// @dim angle V A B` = úhel ve V mezi VA a VB. Exaktní.
+- **Postupná / řetězená kóta** — layout nad víc délkovými kótami: řetězené
+  (konec-na-konec na jedné čáře) nebo od společné základny (running). Zobrazovací
+  režim nad uspořádaným seznamem dimref v jednom směru.
+
+### 4C — vektorové projekce (technický výkres) — možné, po krocích
+Finální geometrie jsou polygony → projekce do 2D je přesný vektor. Postupně:
+1. **Silueta/obrys přes `projection()`** (vestavěný OpenSCAD 3D→2D) → 2D polygon,
+   export SVG/DXF jako vektor. Nejlevnější reálný krok.
+2. **Drátový model** — projekce všech hran polygonů (vektor, ale bez skrytí →
+   „průhledné").
+3. **Hidden-line removal** — skrytí neviditelných vnitřních hran (netriviální
+   okluzní algoritmus) = velký budoucí kus. Pozn.: fasety (N-úhelník) → obrysy
+   jsou úsečky, ne hladké oblouky (detekce arců je stejně těžká jako u poloměru).
 
 ---
 
