@@ -4283,6 +4283,8 @@ void MainWindow::refreshDrawingViews()
         if (d > 1e-6) pxPerMm = d;
       }
       this->viewPxPerMm[vi] = pxPerMm;
+      vd.pxPerMm = pxPerMm;
+      vd.title = QString::fromUtf8(view.title);
 
       for (const auto& [label, pos] : anchors) {
         QPointF p;

@@ -5,9 +5,14 @@
 
 #include <QFileDialog>
 #include <QCheckBox>
+#include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QMarginsF>
+#include <QPageSize>
+#include <QPdfWriter>
+#include <QSvgGenerator>
 #include <QLabel>
 #include <QMenu>
 #include <QMouseEvent>
@@ -412,6 +417,18 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->materializeButton->setToolTip(
     tr("Write a // @dim line for each kvota= pair, making them editable."));
 
+  this->scaleSpin = new QDoubleSpinBox(central);
+  this->scaleSpin->setPrefix(tr("Scale 1:"));
+  this->scaleSpin->setRange(0.01, 10000.0);
+  this->scaleSpin->setDecimals(2);
+  this->scaleSpin->setValue(1.0);
+  this->scaleSpin->setToolTip(tr("Drawing scale for export (model units : drawing mm)."));
+
+  this->exportButton = new QPushButton(tr("Export SVG/PDF…"), central);
+  this->exportButton->setEnabled(false);
+  this->exportButton->setToolTip(
+    tr("Export the sheet as scaled vector SVG or PDF (labels stay readable)."));
+
   this->saveButton = new QPushButton(tr("Save Sheet…"), central);
   this->saveButton->setEnabled(false);
 
@@ -427,6 +444,8 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   checkLayout->addWidget(this->showRefsCheck);
   checkLayout->addWidget(this->lineModeCheck);
   checkLayout->addStretch(1);
+  checkLayout->addWidget(this->scaleSpin);
+  checkLayout->addWidget(this->exportButton);
 
   layout->addWidget(sheet, 1);
   layout->addWidget(this->placeholder);
@@ -435,6 +454,7 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   setWidget(central);
 
   connect(this->saveButton, &QPushButton::clicked, this, &DrawingViewDock::saveSheet);
+  connect(this->exportButton, &QPushButton::clicked, this, &DrawingViewDock::exportDrawing);
   connect(this->materializeButton, &QPushButton::clicked, this,
           &DrawingViewDock::materializeRequested);
   connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
@@ -475,6 +495,7 @@ void DrawingViewDock::setViews(const QList<OrthoViewData>& newViews, const QStri
     if (!v.image.isNull()) any = true;
   }
   this->saveButton->setEnabled(any);
+  this->exportButton->setEnabled(any);
   this->placeholder->setVisible(!any);
 }
 
@@ -510,4 +531,136 @@ void DrawingViewDock::saveSheet()
   }
   painter.end();
   sheet.save(filename, "PNG");
+}
+
+void DrawingViewDock::exportDrawing()
+{
+  bool any = false;
+  for (const auto& v : this->views) {
+    if (!v.image.isNull()) any = true;
+  }
+  if (!any) return;
+
+  const double denom = this->scaleSpin->value();
+  const double scale = denom > 1e-6 ? 1.0 / denom : 1.0;  // model-mm -> drawing-mm
+
+  const QString filename = QFileDialog::getSaveFileName(
+    this, tr("Export drawing"), "drawing.svg", tr("SVG (*.svg);;PDF (*.pdf)"));
+  if (filename.isEmpty()) return;
+
+  const double dpi = 96.0;
+  const double mmToPx = dpi / 25.4;
+  const double marginMm = 10.0, gapMm = 8.0, titleMm = 5.0;
+  const double fontPt = 9.0;
+
+  // Vertical layout: title + view, stacked. Sizes computed in mm.
+  QVector<double> viewYmm, viewWmm, viewHmm;
+  double sheetWmm = 0.0, sheetHmm = marginMm;
+  for (const auto& v : this->views) {
+    if (v.image.isNull()) {
+      viewYmm << 0; viewWmm << 0; viewHmm << 0;
+      continue;
+    }
+    const double vw = v.image.width() / v.pxPerMm * scale;
+    const double vh = v.image.height() / v.pxPerMm * scale;
+    sheetHmm += titleMm;
+    viewYmm << sheetHmm;
+    viewWmm << vw;
+    viewHmm << vh;
+    sheetHmm += vh + gapMm;
+    sheetWmm = std::max(sheetWmm, vw);
+  }
+  sheetWmm += 2 * marginMm;
+  sheetHmm += marginMm;
+  const int sheetWpx = qRound(sheetWmm * mmToPx);
+  const int sheetHpx = qRound(sheetHmm * mmToPx);
+
+  auto paintSheet = [&](QPainter& p) {
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.fillRect(QRectF(0, 0, sheetWpx, sheetHpx), Qt::white);
+    QFont font = p.font();
+    font.setPointSizeF(fontPt);
+    p.setFont(font);
+
+    for (int i = 0; i < this->views.size(); ++i) {
+      const auto& v = this->views[i];
+      if (v.image.isNull()) continue;
+      const double ox = marginMm * mmToPx;
+      const double oy = viewYmm[i] * mmToPx;
+
+      p.setPen(Qt::black);
+      p.drawText(QPointF(ox, oy - 2.0), v.title);
+      p.drawImage(QRectF(ox, oy, viewWmm[i] * mmToPx, viewHmm[i] * mmToPx), v.image);
+
+      // image-px -> sheet-px (same factor the raster is drawn at)
+      const double k = (1.0 / v.pxPerMm) * scale * mmToPx;
+      auto map = [&](const QPointF& ip) { return QPointF(ox + ip.x() * k, oy + ip.y() * k); };
+
+      QPen dimPen(Qt::black);
+      dimPen.setWidthF(std::max(0.5, 0.3 * mmToPx));
+      for (const auto& d : v.dims) {
+        QPointF dir = d.b - d.a;
+        const double len = std::hypot(dir.x(), dir.y());
+        if (len < 1e-6) continue;
+        dir /= len;
+        const QPointF perp(dir.y(), -dir.x());
+        const QPointF a = map(d.a + perp * d.offsetPx);
+        const QPointF b = map(d.b + perp * d.offsetPx);
+        p.setPen(dimPen);
+        p.drawLine(a, b);
+        if (std::abs(d.offsetPx) > 0.5) {
+          QPen wit(QColor(120, 120, 120));
+          wit.setWidthF(0.5);
+          p.setPen(wit);
+          p.drawLine(map(d.a), a);
+          p.drawLine(map(d.b), b);
+          p.setPen(dimPen);
+        }
+        // Arrowheads (fixed size, in px).
+        QPointF sdir = b - a;
+        const double sl = std::hypot(sdir.x(), sdir.y());
+        if (sl > 1e-6) {
+          sdir /= sl;
+          const QPointF nrm(-sdir.y(), sdir.x());
+          const double s = 3.5 * mmToPx * 0.35;
+          auto arrow = [&](const QPointF& tip, const QPointF& along) {
+            QPolygonF h;
+            h << tip << (tip + along * s + nrm * s * 0.4) << (tip + along * s - nrm * s * 0.4);
+            p.setBrush(Qt::black);
+            p.setPen(Qt::NoPen);
+            p.drawPolygon(h);
+            p.setPen(dimPen);
+          };
+          if (d.arrowsOut) { arrow(a, -sdir); arrow(b, sdir); }
+          else { arrow(a, sdir); arrow(b, -sdir); }
+        }
+        // Label at the offset-line midpoint plus its own offset (fixed font).
+        const QPointF midImg = (d.a + d.b) / 2.0 + perp * d.offsetPx +
+                               dir * d.labAlongPx + perp * d.labPerpPx;
+        const QPointF lp = map(midImg);
+        const QRectF tr = p.fontMetrics().boundingRect(d.label).adjusted(-2, -1, 2, 1);
+        QRectF box(lp.x() - tr.width() / 2, lp.y() - tr.height() / 2, tr.width(), tr.height());
+        p.fillRect(box, QColor(255, 255, 255, 220));
+        p.setPen(QColor(150, 30, 30));
+        p.drawText(box, Qt::AlignCenter, d.label);
+      }
+    }
+  };
+
+  if (filename.endsWith(".pdf", Qt::CaseInsensitive)) {
+    QPdfWriter pdf(filename);
+    pdf.setResolution(static_cast<int>(dpi));
+    pdf.setPageSize(QPageSize(QSizeF(sheetWmm, sheetHmm), QPageSize::Millimeter));
+    pdf.setPageMargins(QMarginsF(0, 0, 0, 0));
+    QPainter p(&pdf);
+    paintSheet(p);
+  } else {
+    QSvgGenerator svg;
+    svg.setFileName(filename);
+    svg.setResolution(static_cast<int>(dpi));
+    svg.setSize(QSize(sheetWpx, sheetHpx));
+    svg.setViewBox(QRect(0, 0, sheetWpx, sheetHpx));
+    QPainter p(&svg);
+    paintSheet(p);
+  }
 }

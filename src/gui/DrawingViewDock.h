@@ -13,6 +13,7 @@
 class QLabel;
 class QPushButton;
 class QCheckBox;
+class QDoubleSpinBox;
 class QResizeEvent;
 class QMouseEvent;
 class QPaintEvent;
@@ -46,6 +47,8 @@ struct OrthoViewData {
   QImage image;
   QList<OrthoAnchor> anchors;
   QList<OrthoDimension> dims;
+  QString title;
+  double pxPerMm{1.0};  // render-image pixels per model unit (for scaled export)
 };
 
 /*!
@@ -148,6 +151,7 @@ signals:
 
 private slots:
   void saveSheet();
+  void exportDrawing();
   void setShowAnchors(bool show);
 
 private:
@@ -155,7 +159,9 @@ private:
   QLabel *placeholder;
   QPushButton *saveButton;
   QPushButton *materializeButton;
+  QPushButton *exportButton;
   QCheckBox *showRefsCheck;
   QCheckBox *lineModeCheck;
+  QDoubleSpinBox *scaleSpin;
   QList<OrthoViewData> views;
 };
