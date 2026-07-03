@@ -35,10 +35,14 @@ i její **testy** — bez zelených testů není fáze hotová.
     `a88628d89` frustum · `859caac72` `marker=` · `b359bb7ab` skrytí frustumu v F6.
   - Volitelné navazující (mimo kroky 1–9): CLI `--export-cameras` (headless
     dávkový render z kamer + odemkne render regresní test), GUI test doku.
-- **Fáze 2 (výkresy + kvóty)** — 🔶 návrh dořešen; rozsah = **A + B + `kvota=`
+- **Fáze 2 (výkresy + kvóty)** — 🔶 rozpracováno; rozsah = **A + B + `kvota=`
   cukr**, zatím jen **délková kvóta dvou bodů** (interaktivní vkládání kotev
-  klikáním „C" i průměr/úhel = později). Sdílí sběr marker-uzlů s kamerami
-  (`dimref` ~ `collectDimrefs`).
+  klikáním „C" i průměr/úhel = později).
+  - **2A — ✅ HOTOVO** (commit `dff6172c8`): dok „Drawing" se třemi ortho
+    pohledy (nárys/bokorys/půdorys), `render_ortho_view` (OpenCSG, barvy
+    zachovány), obnova po F5, Save Sheet. Ověřeno v GUI.
+  - **2B — 🔶 další**: `dimref` uzel + `collectDimrefs`; `// @dim` (+ `kvota=`);
+    přepočet délky; 2D overlay; výběr dimref v 2D → zápis `@dim`.
 - **Fáze 3 (OBJ export s barvami / `.mtl`)** — ✅ **HOTOVO** (commit `dfd3a8b86`).
   `export_obj.cc` seskupí facy podle barvy → sesterský `.mtl`
   (`newmtl`/`Kd`/`d`), odkaz `mtllib`. Bezbarvý model + stdout zůstávají
