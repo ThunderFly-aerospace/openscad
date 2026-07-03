@@ -300,13 +300,17 @@ doplnit option do `CommandLine` a do `do_export`/cmdline cesty v `openscad.cc`
   `str("A", i)` NEfunguje, když dimref **nevidí** proměnnou cyklu (je v modulu).
 - **Identita vs. reference:** každá instance MÁ jednoznačnou identitu (`idx`,
   world-pozice); kolize je jen v ploché textové referenci `@dim A B`.
-- **Řešení (rozhodnuto): auto-kvalifikace kotev podle POZICE.** Kolektor bere
-  každou instanci jako samostatnou kotvu = **jméno + world-pozice**. Kóta se
-  tvoří **klikem** na konkrétní puntík (známe přesnou instanci) → `@dim` uloží
-  `A@[x,y,z]`; při refresh se vezme stejnojmenná kotva **nejbližší hintu**;
-  přepíše se při novém kliku. **Stabilní** vůči přidání/ubrání jiných instancí
-  (klíč = pozice, ne pořadí). Sekvenční čísla (`A·1`, `A·2`) jen jako **popisek**
-  v UI pro čitelnost, NE uložená reference (posunuly by se při změně počtu).
+- **Dvě komplementární stability** (dokonale stabilní ref NEEXISTUJE — instance
+  looped dimref jsou efemérní):
+  - **index** (pořadí ve stromě): odolný vůči **geometrii** (translate/rotate/
+    scale nemění pořadí), rozbije ho **strukturální** změna (rozsah cyklu).
+  - **pozice** (global): odolná vůči **struktuře**, rozbije ji **geometrie**.
+  - Geometrické úpravy jsou mnohem častější → **volíme INDEX**.
+- **Řešení (rozhodnuto): reference = index mezi stejnojmennými** ve stromovém
+  DFS pořadí: `// @dim A#2 B#0`. Kóta se tvoří **klikem** na konkrétní puntík
+  (známe přesnou instanci → zapíšeme její index). **Sebeopravné:** když se cyklus
+  změní a kóta skočí jinam, uživatel **klikne znovu** → přepíše se index
+  („upravím kvoty" = re-klik). Pořadí deterministické z `collectDimrefs`.
 - Alternativy pro speciální případy: **id-parametr** modulu
   (`widget(id=i){ dimref(str("A",id)); }`) když modul píšeš = nejstabilnější;
   **radiální/průměrová** kóta v cyklu žádné jméno nepotřebuje — dimref se
