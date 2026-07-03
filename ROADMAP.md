@@ -293,15 +293,35 @@ doplnit option do `CommandLine` a do `do_export`/cmdline cesty v `openscad.cc`
   (konec-na-konec na jedné čáře) nebo od společné základny (running). Zobrazovací
   režim nad uspořádaným seznamem dimref v jednom směru.
 
-### 4C — vektorové projekce (technický výkres) — možné, po krocích
-Finální geometrie jsou polygony → projekce do 2D je přesný vektor. Postupně:
-1. **Silueta/obrys přes `projection()`** (vestavěný OpenSCAD 3D→2D) → 2D polygon,
-   export SVG/DXF jako vektor. Nejlevnější reálný krok.
-2. **Drátový model** — projekce všech hran polygonů (vektor, ale bez skrytí →
-   „průhledné").
-3. **Hidden-line removal** — skrytí neviditelných vnitřních hran (netriviální
-   okluzní algoritmus) = velký budoucí kus. Pozn.: fasety (N-úhelník) → obrysy
-   jsou úsečky, ne hladké oblouky (detekce arců je stejně těžká jako u poloměru).
+### 4C — vektorové projekce (technický výkres)
+Finální geometrie jsou polygony → projekce hran do 2D je **přesný vektor**.
+Cíl = čistý, kompaktní vektorový výkres (ne obří SVG). **Nekreslit plochy**
+(painter's algorithm = tisíce polygonů, artefakty), kreslit jen správné **hrany**:
+
+**Výběr hran (per pohled):**
+- **Silueta = per-hrana front/back-facing test** (NE `projection()` obrys!):
+  hrana sdílená dvěma fasetami je silueta, když jedna faseta míří ke kameře a
+  druhá od ní (`sign(nA·view) ≠ sign(nB·view)`). Zachytí i **vnitřní pohledově
+  závislé kontury** — např. oblý obrys válce stojícího před kvádrem (kvádr sahá
+  za něj, takže to není vnější obrys, ale hrana se má nakreslit). **Toto je
+  hlavní zdroj siluet**; počítá se pro každý ze tří pohledů zvlášť.
+- **Crease/feature hrany** = ostrý dihedrální zlom mezi sousedními plochami
+  (úhel > prahu). Pohledově nezávislé. Tessellační fasety hladkých ploch (bok
+  válce) NEjsou crease → **automaticky zmizí** (proto čistý výkres). Horní/dolní
+  kružnice válce (bok↔víko) crease jsou → nakreslí se.
+- `projection()` jen jako **bonus** na vnější obrys celé scény, ne hlavní zdroj.
+
+**Viditelnost (hidden-line) přes GPU depth buffer (místo analytického HLR):**
+1. Offscreen render modelu **jen do depth bufferu** (rychlé, skoro to umíme).
+2. Pro každou vybranou hranu jdi po její 2D projekci a **sampluj depth**: kde je
+   hrana nejblíž (hloubka ≈ buffer) → **viditelný úsek** → vektorová čára; za
+   plochou → zahoď. Okluzi řeší GPU.
+
+**Výstup:** kompaktní SVG/DXF — jen viditelné feature+silhouette hrany.
+
+**Oblouky NEŘEŠÍME** — OpenSCAD jede přes úsečky, výkres taky (schodovitá silueta
+válce je při rozumném `$fn` OK). Jediná výjimka, kde hodnota jde ze zdroje, je
+**poloměrová/průměrová kóta** (4B, `dimref(d=/r=)`).
 
 ---
 
