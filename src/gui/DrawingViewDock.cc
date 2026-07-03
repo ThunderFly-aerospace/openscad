@@ -11,6 +11,7 @@
 #include <QPainter>
 #include <QPen>
 #include <QPixmap>
+#include <QPolygonF>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -19,20 +20,39 @@
 // OrthoViewWidget
 // ---------------------------------------------------------------------------
 
+namespace {
+// Distance from point p to segment [a,b].
+double distToSegment(const QPointF& p, const QPointF& a, const QPointF& b)
+{
+  const QPointF ab = b - a;
+  const double len2 = ab.x() * ab.x() + ab.y() * ab.y();
+  double t = 0.0;
+  if (len2 > 1e-9) {
+    t = ((p.x() - a.x()) * ab.x() + (p.y() - a.y()) * ab.y()) / len2;
+    t = std::clamp(t, 0.0, 1.0);
+  }
+  const QPointF proj(a.x() + t * ab.x(), a.y() + t * ab.y());
+  return std::hypot(p.x() - proj.x(), p.y() - proj.y());
+}
+}  // namespace
+
 OrthoViewWidget::OrthoViewWidget(QWidget *parent) : QWidget(parent)
 {
   setMinimumSize(120, 90);
+  setMouseTracking(false);
 }
 
 void OrthoViewWidget::setData(const OrthoViewData& newData)
 {
   this->data = newData;
+  this->draggingDim = -1;
   update();
 }
 
 void OrthoViewWidget::clear()
 {
   this->data = OrthoViewData{};
+  this->draggingDim = -1;
   update();
 }
 
@@ -40,6 +60,22 @@ QPointF OrthoViewWidget::mapToWidget(const QPointF& imgPt) const
 {
   return QPointF(imgPt.x() * this->fitScale + this->fitOffset.x(),
                  imgPt.y() * this->fitScale + this->fitOffset.y());
+}
+
+QPointF OrthoViewWidget::mapToImage(const QPointF& widgetPt) const
+{
+  if (this->fitScale < 1e-9) return QPointF();
+  return QPointF((widgetPt.x() - this->fitOffset.x()) / this->fitScale,
+                 (widgetPt.y() - this->fitOffset.y()) / this->fitScale);
+}
+
+QPointF OrthoViewWidget::dimPerp(const OrthoDimension& d) const
+{
+  QPointF dir = d.b - d.a;
+  const double len = std::hypot(dir.x(), dir.y());
+  if (len < 1e-9) return QPointF(0, -1);
+  dir /= len;
+  return QPointF(dir.y(), -dir.x());  // rotate -90°
 }
 
 void OrthoViewWidget::paintEvent(QPaintEvent *)
@@ -66,33 +102,60 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
 
   painter.setRenderHint(QPainter::Antialiasing, true);
 
-  // Dimension lines.
+  // Dimensions: witness lines from the anchors out to an offset dimension line
+  // with arrowheads, and a length label riding on it.
   QPen dimPen(QColor(20, 20, 20));
   dimPen.setWidthF(1.4);
+  QPen witnessPen(QColor(120, 120, 120));
+  witnessPen.setWidthF(0.8);
   for (const auto& dim : this->data.dims) {
     const QPointF a = mapToWidget(dim.a);
     const QPointF b = mapToWidget(dim.b);
-    painter.setPen(dimPen);
-    painter.drawLine(a, b);
+    const QPointF perp = dimPerp(dim);
+    const QPointF off = perp * (dim.offsetPx * this->fitScale);
+    const QPointF a2 = a + off;
+    const QPointF b2 = b + off;
 
-    // Small perpendicular ticks at both ends.
-    QPointF dir = b - a;
+    // Witness (extension) lines when the dimension is pulled off the object.
+    if (std::abs(dim.offsetPx) > 0.5) {
+      painter.setPen(witnessPen);
+      painter.drawLine(a, a2);
+      painter.drawLine(b, b2);
+    }
+
+    // Dimension line with arrowheads.
+    painter.setPen(dimPen);
+    painter.drawLine(a2, b2);
+    QPointF dir = b2 - a2;
     const double len = std::hypot(dir.x(), dir.y());
     if (len > 1e-6) {
       dir /= len;
-      const QPointF perp(-dir.y(), dir.x());
-      const double t = 5.0;
-      painter.drawLine(a - perp * t, a + perp * t);
-      painter.drawLine(b - perp * t, b + perp * t);
+      const QPointF nrm(-dir.y(), dir.x());
+      const double s = 6.0;
+      auto arrow = [&](const QPointF& tip, const QPointF& along) {
+        QPolygonF head;
+        head << tip << (tip + along * s + nrm * (s * 0.4))
+             << (tip + along * s - nrm * (s * 0.4));
+        painter.setBrush(QColor(20, 20, 20));
+        painter.setPen(Qt::NoPen);
+        painter.drawPolygon(head);
+        painter.setPen(dimPen);
+      };
+      arrow(a2, dir);
+      arrow(b2, -dir);
     }
 
-    // Label at the midpoint, on a light background for readability.
-    const QPointF mid = (a + b) / 2.0;
+    // Label at the midpoint of the dimension line.
+    const QPointF mid = (a2 + b2) / 2.0;
     const QString label = dim.label;
     const QRectF textRect = painter.fontMetrics().boundingRect(label).adjusted(-3, -2, 3, 2);
     QRectF box(mid.x() - textRect.width() / 2.0, mid.y() - textRect.height() / 2.0,
                textRect.width(), textRect.height());
-    painter.fillRect(box, QColor(255, 255, 255, 210));
+    // Keep the label inside the widget so it never clips at the view border.
+    const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
+    const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
+    box.moveTo(bx, by);
+    painter.fillRect(box, QColor(255, 255, 255, 220));
     painter.setPen(QColor(150, 30, 30));
     painter.drawText(box, Qt::AlignCenter, label);
   }
@@ -112,7 +175,31 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
 {
   if (this->data.image.isNull()) return;
   const QPointF click = event->position();
-  double best = 12.0;  // pixel hit radius
+
+  // First: start dragging a dimension line if the click is near one (editable
+  // dimensions only, i.e. those with a source id).
+  double bestLine = 8.0;
+  int hitDim = -1;
+  for (int i = 0; i < this->data.dims.size(); ++i) {
+    const auto& dim = this->data.dims.at(i);
+    if (dim.id < 0) continue;
+    const QPointF perp = dimPerp(dim);
+    const QPointF off = perp * (dim.offsetPx * this->fitScale);
+    const QPointF a2 = mapToWidget(dim.a) + off;
+    const QPointF b2 = mapToWidget(dim.b) + off;
+    const double d = distToSegment(click, a2, b2);
+    if (d < bestLine) {
+      bestLine = d;
+      hitDim = i;
+    }
+  }
+  if (hitDim >= 0) {
+    this->draggingDim = hitDim;
+    return;
+  }
+
+  // Otherwise: report an anchor click (used to create dimensions).
+  double best = 12.0;
   QString hit;
   for (const auto& anchor : this->data.anchors) {
     const QPointF p = mapToWidget(anchor.pos);
@@ -123,6 +210,27 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
     }
   }
   if (!hit.isEmpty()) emit anchorClicked(hit);
+}
+
+void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
+{
+  if (this->draggingDim < 0 || this->draggingDim >= this->data.dims.size()) return;
+  OrthoDimension& dim = this->data.dims[this->draggingDim];
+  const QPointF perp = dimPerp(dim);
+  const QPointF mouseImg = mapToImage(event->position());
+  const QPointF mid = (dim.a + dim.b) / 2.0;
+  const QPointF rel = mouseImg - mid;
+  dim.offsetPx = rel.x() * perp.x() + rel.y() * perp.y();  // project onto perp
+  update();
+  emit dimensionOffsetChanged(dim.id, dim.offsetPx, false);
+}
+
+void OrthoViewWidget::mouseReleaseEvent(QMouseEvent *)
+{
+  if (this->draggingDim < 0 || this->draggingDim >= this->data.dims.size()) return;
+  const OrthoDimension& dim = this->data.dims[this->draggingDim];
+  emit dimensionOffsetChanged(dim.id, dim.offsetPx, true);
+  this->draggingDim = -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +269,10 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
 
     connect(view, &OrthoViewWidget::anchorClicked, this,
             [this, i](const QString& name) { emit anchorClicked(i, name); });
+    connect(view, &OrthoViewWidget::dimensionOffsetChanged, this,
+            [this, i](int id, double offsetPx, bool finished) {
+              emit dimensionOffsetChanged(i, id, offsetPx, finished);
+            });
   }
   grid->setRowStretch(0, 1);
   grid->setRowStretch(1, 1);

@@ -3812,6 +3812,36 @@ void MainWindow::setupDrawingDock()
   // Clicking two anchors in a view creates a dimension in the source.
   QObject::connect(this->drawingDock, &DrawingViewDock::anchorClicked, this,
                    &MainWindow::onDrawingAnchorClicked);
+  // Dragging a dimension line changes its offset= and writes it back on release.
+  QObject::connect(this->drawingDock, &DrawingViewDock::dimensionOffsetChanged, this,
+                   &MainWindow::onDimensionOffsetChanged);
+}
+
+void MainWindow::onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished)
+{
+  // Only persist on release; live drag already updates the overlay in the dock.
+  if (!finished || id < 0 || !activeEditor) return;
+
+  const double pxPerMm =
+    (viewIndex >= 0 && viewIndex < 3 && this->viewPxPerMm[viewIndex] > 1e-9)
+      ? this->viewPxPerMm[viewIndex]
+      : 1.0;
+  const double offsetMm = offsetPx / pxPerMm;
+
+  QStringList lines = activeEditor->toPlainText().split('\n');
+  if (id >= lines.size()) return;
+  QString line = lines.at(id);
+
+  const QString token = QString("offset=%1").arg(offsetMm, 0, 'g', 4);
+  static const QRegularExpression offRe(R"(\boffset=\S+)");
+  if (offRe.match(line).hasMatch()) {
+    line.replace(offRe, token);
+  } else {
+    if (!line.endsWith(' ')) line += ' ';
+    line += token;
+  }
+  lines[id] = line;
+  activeEditor->setPlainText(lines.join('\n'));
 }
 
 void MainWindow::onDrawingAnchorClicked(int viewIndex, const QString& name)
@@ -3862,8 +3892,10 @@ namespace {
 struct ResolvedDim {
   Eigen::Vector3d a;
   Eigen::Vector3d b;
-  QString proj;   // "front" | "side" | "top" | "" (all)
+  QString proj;        // "front" | "side" | "top" | "" (all)
   QString label;
+  double offsetMm{0};  // dimension line offset from the anchor line, model units
+  int sourceLine{-1};  // 0-based editor line of the // @dim (for write-back)
 };
 
 // gluProject-style world -> image pixel (top-left origin). modelview/projection
@@ -3934,8 +3966,9 @@ void MainWindow::refreshDrawingViews()
   const QString source = activeEditor ? activeEditor->toPlainText() : QString();
   static const QRegularExpression dimRe(
     R"(^\s*//\s*@dim\s+(\S+)\s+(\S+)\s*(.*)$)");
-  for (const QString& line : source.split('\n')) {
-    const auto m = dimRe.match(line);
+  const QStringList sourceLines = source.split('\n');
+  for (int li = 0; li < sourceLines.size(); ++li) {
+    const auto m = dimRe.match(sourceLines.at(li));
     if (!m.hasMatch()) continue;
     const std::string a = m.captured(1).toStdString();
     const std::string b = m.captured(2).toStdString();
@@ -3945,10 +3978,12 @@ void MainWindow::refreshDrawingViews()
     ResolvedDim rd;
     rd.a = ita->second;
     rd.b = itb->second;
+    rd.sourceLine = li;
     for (const QString& tok : m.captured(3).split(QRegularExpression("\\s+"),
                                                   Qt::SkipEmptyParts)) {
       if (tok.startsWith("proj=")) rd.proj = normalizeProj(tok.mid(5));
       else if (tok.startsWith("label=")) rd.label = tok.mid(6);
+      else if (tok.startsWith("offset=")) rd.offsetMm = tok.mid(7).toDouble();
       else if (rd.label.isEmpty()) rd.label = tok;  // bare token = manual label
     }
     if (rd.label.isEmpty()) rd.label = lengthLabel(rd.a, rd.b);
@@ -3981,7 +4016,8 @@ void MainWindow::refreshDrawingViews()
   QList<OrthoViewData> viewData;
   QStringList titles;
   ViewOptions options;  // OpenCSG previewer, no axes/edges/crosshairs
-  for (const auto& view : orthoViews) {
+  for (int vi = 0; vi < static_cast<int>(orthoViews.size()); ++vi) {
+    const auto& view = orthoViews[vi];
     OrthoViewData vd;
     if (auto glview = render_ortho_view(this->tree, options, view.rot, pw, ph)) {
       std::ostringstream stream(std::ios::out | std::ios::binary);
@@ -3990,6 +4026,20 @@ void MainWindow::refreshDrawingViews()
         vd.image.loadFromData(reinterpret_cast<const uchar *>(data.data()),
                               static_cast<int>(data.size()), "PNG");
       }
+      // Pixels per model unit in this view: project a unit in-plane vector (the
+      // world direction that maps to screen +x under the view's modelview).
+      double pxPerMm = 1.0;
+      const Eigen::Vector3d base(0, 0, 0);
+      const Eigen::Vector3d inPlane(glview->modelview[0], glview->modelview[4],
+                                    glview->modelview[8]);
+      QPointF q0, q1;
+      if (projectToImage(base, glview->modelview, glview->projection, pw, ph, q0) &&
+          projectToImage(base + inPlane, glview->modelview, glview->projection, pw, ph, q1)) {
+        const double d = std::hypot(q1.x() - q0.x(), q1.y() - q0.y());
+        if (d > 1e-6) pxPerMm = d;
+      }
+      this->viewPxPerMm[vi] = pxPerMm;
+
       for (const auto& [label, pos] : anchors) {
         QPointF p;
         if (projectToImage(pos, glview->modelview, glview->projection, pw, ph, p)) {
@@ -4001,7 +4051,13 @@ void MainWindow::refreshDrawingViews()
         QPointF pa, pb;
         if (projectToImage(rd.a, glview->modelview, glview->projection, pw, ph, pa) &&
             projectToImage(rd.b, glview->modelview, glview->projection, pw, ph, pb)) {
-          vd.dims.append({pa, pb, rd.label});
+          OrthoDimension od;
+          od.a = pa;
+          od.b = pb;
+          od.label = rd.label;
+          od.offsetPx = rd.offsetMm * pxPerMm;
+          od.id = rd.sourceLine;  // -1 for kvota= dims (not draggable)
+          vd.dims.append(od);
         }
       }
     }

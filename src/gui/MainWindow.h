@@ -170,10 +170,13 @@ private:
   void refreshCameras();
   void refreshDrawingViews();
   void onDrawingAnchorClicked(int viewIndex, const QString& name);
+  void onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
 
   // Interactive dimension creation: the first anchor clicked in the drawing
   // dock, pending the second. Empty = no pending pick.
   QString pendingDimAnchor;
+  // Pixels per model unit (mm) in each ortho view, for offset px<->mm mapping.
+  double viewPxPerMm[3]{1.0, 1.0, 1.0};
 
 protected:
   void closeEvent(QCloseEvent *event) override;

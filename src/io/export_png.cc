@@ -230,6 +230,11 @@ std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& 
   camera.autocenter = true;
   camera.pixel_width = pixel_width;
   camera.pixel_height = pixel_height;
+  // Leave margin around the model so dimension overlays pulled off the object
+  // stay inside the frame. For an orthographic viewAll the framed half-height is
+  // radius / cos(fov/2), so a larger fov simply zooms out; fov=75 ~= 29% margin.
+  // The overlay reads the resulting GL matrices, so projection stays consistent.
+  camera.fov = 75.0;
   return prepare_preview(tree, options, camera);
 }
 
