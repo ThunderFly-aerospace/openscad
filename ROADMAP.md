@@ -249,8 +249,10 @@ Požadavky autora, seskupené podle náročnosti:
   points" skryje dimref tečky+jména (labely kót zůstanou). Ověřeno.
 - **2E-4 ✅** (`cb7d36fc9`) dropdown pro koincidentní body — klik na místo s víc
   dimref → menu s výběrem (A/H1). Ověřeno.
-- Pozn.: editace atributů jde vždy i přímo v `@dim` řádku; dialog v doku =
-  volitelná nadstavba (později).
+- Pozn.: editace atributů jde vždy i přímo v `@dim` řádku.
+- **2E-5 🔶 UI editace kóty** — dostupné z projekcí **dvojklikem na kótu nebo
+  její label** → malý dialog: šablona labelu (`%f`), přesnost, šipky in/out,
+  projekce. Zapisuje tytéž `@dim` tokeny; ruční editace v kódu zůstává.
 
 **Střední (režimy doku):**
 - **Barevný vs. čárový (černobílý) režim** — přepínač: OpenCSG barvy (dnešní) vs.
