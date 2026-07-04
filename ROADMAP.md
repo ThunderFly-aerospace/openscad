@@ -62,6 +62,12 @@ i její **testy** — bez zelených testů není fáze hotová.
   se správnými barvami včetně průhlednosti (α=0.5). 3MF cesta funguje na
   oficiálních buildech blender.org ≥ 4.1 (Debianní `blender` dfsg balík 3MF
   addon nemá zabalený).
+- **Fáze 4 (navazující)** — ✅ **HOTOVO** (větev `cam_and_drawings`, commity
+  `Phase 4A/4B/4C/4D`). 4A CLI `--export-cameras`; 4B měřicí režimy +
+  duplicitní kotvy `A#i` + ⌀/R + úhel + chain/running; 4C vektorový výkres
+  (silueta+crease, hidden-line přes CPU depth buffer, SVG+DXF); 4D zoom/pan +
+  pravý klik skok do zdroje. Ověřeno vizuálně v GUI; relevantní regrese
+  (dimref/camera/obj dump-echo) zelené.
 
 ---
 
@@ -271,7 +277,26 @@ Požadavky autora, seskupené podle náročnosti:
 
 ---
 
-## Fáze 4 — navazující (🔶 naplánováno)
+## Fáze 4 — navazující (✅ HOTOVO)
+
+Implementováno na větvi `cam_and_drawings` (commity `Phase 4A/4B/4C/4D`):
+- **4A** — CLI `--export-cameras <prefix>`: headless dávkový render všech
+  `camera()` do `<prefix>_<name>.png` (reuse `render_camera_preview`, zachová
+  barvy `color()`). Samostatná cesta v `openscad.cc`, bez `-o`.
+- **4B** — kóty: `measure=direct|planar|h|v` (4 režimy vůči projekci, `h`/`v`
+  osově zarovnané); index-kvalifikované duplicitní kotvy `A#i` + varování +
+  self-correcting re-klik; **⌀/R** (`dimref(d=/r=)` + `@dim … kind=diameter|
+  radius angle=`); **úhel** (`@dim angle V A B`, exaktní 3D); **chain/running**
+  série kót.
+- **4C** — vektorový výkres: `FeatureEdges` (silueta = per-hrana front/back-
+  facing, crease dle dihedrálu, boundary; welding vrcholů), **hidden-line přes
+  CPU depth buffer**, výstup **SVG i DXF** (tlačítko „Line drawing (vector)…"
+  v doku). Facety hladkých ploch mizí; okluze se řeší z-bufferem.
+- **4D** — UX doku: **zoom (kolečko) + pan (tažení)** per-view přes
+  `userZoom/userPan`; **pravý klik = skok do zdroje** (kóta → `@dim` řádek,
+  dimref kotva → `dimref()` řádek), levý zůstává na tvorbu/tahání kót.
+
+Detailní návrh jednotlivých bodů níže.
 
 ### 4A — CLI `--export-cameras <prefix>`
 Headless dávkový render snímků ze všech `camera()` v modelu (autorův reálný
