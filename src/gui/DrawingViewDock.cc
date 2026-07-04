@@ -268,12 +268,12 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
   // reference points are not clickable.
   if (!this->showAnchors) return;
   const double radius = 12.0;
-  QStringList hits;  // distinct anchor names within the hit radius
+  QStringList hits;  // distinct anchor refs within the hit radius
   for (const auto& anchor : this->data.anchors) {
     const QPointF p = mapToWidget(anchor.pos);
     if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= radius &&
-        !hits.contains(anchor.name)) {
-      hits << anchor.name;
+        !hits.contains(anchor.ref)) {
+      hits << anchor.ref;
     }
   }
   if (hits.isEmpty()) return;
@@ -281,9 +281,10 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
     emit anchorClicked(hits.first());
     return;
   }
-  // Several reference points coincide here: let the user pick which one.
+  // Several reference points coincide here: let the user pick which one (the
+  // menu shows the ref token, e.g. A#0 / A#1, so duplicates are distinguishable).
   QMenu menu(this);
-  for (const QString& name : hits) menu.addAction(name);
+  for (const QString& ref : hits) menu.addAction(ref);
   if (QAction *chosen = menu.exec(event->globalPosition().toPoint())) {
     emit anchorClicked(chosen->text());
   }

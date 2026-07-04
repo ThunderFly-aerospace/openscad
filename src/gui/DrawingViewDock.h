@@ -19,9 +19,14 @@ class QMouseEvent;
 class QPaintEvent;
 
 // A dimref anchor projected into one ortho view, in render-image pixel coords.
+// `name` is shown next to the dot; `ref` is the token emitted when it is
+// clicked to build a dimension — the plain name when unique, or name#index
+// (index = occurrence among same-named dimrefs in tree order) when duplicated,
+// so a dimension pins the exact instance clicked.
 struct OrthoAnchor {
   QPointF pos;
   QString name;
+  QString ref;
 };
 
 // A dimension (kvóta) to draw in one ortho view: two anchor endpoints

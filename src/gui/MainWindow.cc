@@ -4160,18 +4160,58 @@ void MainWindow::refreshDrawingViews()
   // (Done unconditionally so the 3D markers update even when the dock is closed.)
   const auto dimrefs =
     this->rootNode ? collectDimrefs(this->rootNode) : std::vector<DimrefInfo>{};
-  std::vector<std::pair<QString, Eigen::Vector3d>> anchors;  // label -> world pos
-  std::map<std::string, Eigen::Vector3d> byName;             // dimref name -> pos
+  // World positions per dimref name, in tree (DFS) order — index = occurrence, so
+  // a duplicated name can be pinned as name#index (a plain name takes the first).
+  std::map<std::string, std::vector<Eigen::Vector3d>> posByName;
   std::map<std::string, std::vector<Eigen::Vector3d>> kvotaGroups;
+  struct AnchorRec { QString label; QString ref; Eigen::Vector3d pos; };
+  std::vector<AnchorRec> anchorRecs;
   for (const auto& d : dimrefs) {
     if (!d.node) continue;
     const Eigen::Vector3d pos = d.world.translation();
     QString label = QString::fromStdString(d.node->dimref_name);
     if (label.isEmpty()) label = QString::fromStdString(d.node->kvota_name);
-    anchors.emplace_back(label, pos);
-    if (!d.node->dimref_name.empty()) byName[d.node->dimref_name] = pos;
+    QString ref = label;
+    if (!d.node->dimref_name.empty()) {
+      auto& v = posByName[d.node->dimref_name];
+      // ref = name#index; label shows the same when duplicated (see below).
+      ref = label + "#" + QString::number(static_cast<int>(v.size()));
+      v.push_back(pos);
+    }
+    anchorRecs.push_back({label, ref, pos});
     if (!d.node->kvota_name.empty()) kvotaGroups[d.node->kvota_name].push_back(pos);
   }
+
+  // Duplicate names are ambiguous in a plain `@dim A B`. Warn once per name, and
+  // for display/click use the plain name when unique but name#index when not.
+  for (const auto& [name, positions] : posByName) {
+    if (positions.size() > 1) {
+      LOG(message_group::UI_Warning,
+          "dimref name '%1$s' is used %2$d times; a plain @dim reference takes the "
+          "first — qualify as %1$s#index (0..%3$d) to pick another.",
+          name, static_cast<int>(positions.size()), static_cast<int>(positions.size() - 1));
+    }
+  }
+  for (auto& rec : anchorRecs) {
+    const std::string base = rec.ref.left(rec.ref.indexOf('#')).toStdString();
+    const bool duplicated =
+      !base.empty() && posByName.count(base) && posByName[base].size() > 1;
+    if (!duplicated) rec.ref = rec.label;  // unique -> clean, unqualified ref
+    else rec.label = rec.ref;              // duplicated -> show name#index
+  }
+
+  // Resolve an @dim endpoint token ("A" or "A#index") to a world position.
+  // Plain name -> first occurrence; #index -> that occurrence.
+  auto resolveRef = [&](const QString& tok, Eigen::Vector3d& out) -> bool {
+    const int hash = tok.indexOf('#');
+    const QString base = hash >= 0 ? tok.left(hash) : tok;
+    int idx = hash >= 0 ? tok.mid(hash + 1).toInt() : 0;
+    const auto it = posByName.find(base.toStdString());
+    if (it == posByName.end() || idx < 0 || idx >= static_cast<int>(it->second.size()))
+      return false;
+    out = it->second[idx];
+    return true;
+  };
 
   // Format a length with an optional fixed precision (prec>=0), else general.
   auto formatLen = [](double len, int prec) {
@@ -4228,11 +4268,7 @@ void MainWindow::refreshDrawingViews()
       firstOpt = 1;
     } else {
       if (toks.size() < 2) continue;
-      const auto ita = byName.find(toks[0].toStdString());
-      const auto itb = byName.find(toks[1].toStdString());
-      if (ita == byName.end() || itb == byName.end()) continue;  // unknown anchor
-      rd.a = ita->second;
-      rd.b = itb->second;
+      if (!resolveRef(toks[0], rd.a) || !resolveRef(toks[1], rd.b)) continue;  // unknown anchor
       firstOpt = 2;
     }
 
@@ -4274,8 +4310,8 @@ void MainWindow::refreshDrawingViews()
   // Push dimref markers (anchor crosses + dimension lines) to the 3D view. This
   // happens on every preview, like camera frustums, regardless of dock state.
   std::vector<Eigen::Vector3d> markerPoints;
-  markerPoints.reserve(anchors.size());
-  for (const auto& [label, pos] : anchors) markerPoints.push_back(pos);
+  markerPoints.reserve(anchorRecs.size());
+  for (const auto& rec : anchorRecs) markerPoints.push_back(rec.pos);
   std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> markerLines;
   markerLines.reserve(dims.size());
   for (const auto& rd : dims) markerLines.emplace_back(rd.a, rd.b);
@@ -4332,10 +4368,10 @@ void MainWindow::refreshDrawingViews()
       vd.pxPerMm = pxPerMm;
       vd.title = QString::fromUtf8(view.title);
 
-      for (const auto& [label, pos] : anchors) {
+      for (const auto& rec : anchorRecs) {
         QPointF p;
-        if (projectToImage(pos, glview->modelview, glview->projection, pw, ph, p)) {
-          vd.anchors.append({p, label});
+        if (projectToImage(rec.pos, glview->modelview, glview->projection, pw, ph, p)) {
+          vd.anchors.append({p, rec.label, rec.ref});
         }
       }
       for (const auto& rd : dims) {
