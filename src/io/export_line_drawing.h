@@ -5,12 +5,14 @@
 class PolySet;
 
 /*!
-   Write a compact vector line drawing of `ps` to an SVG file at `path`: the
-   three orthographic views (front / side / top) laid out like a technical sheet,
-   each drawn from the mesh's silhouette + crease + boundary edges (see
-   FeatureEdges). Units are millimetres at 1:1. `creaseAngleDeg` is the dihedral
-   threshold above which an edge counts as a feature edge.
+   Write a compact vector line drawing of `ps` to `path`: the three orthographic
+   views (front / side / top) laid out like a technical sheet, drawn from the
+   mesh's silhouette + crease + boundary edges with hidden lines removed (see
+   FeatureEdges and the CPU depth buffer in export_line_drawing.cc). Units are
+   millimetres at 1:1. `creaseAngleDeg` is the dihedral threshold above which an
+   edge counts as a feature edge.
 
-   Returns false if the file can't be written.
+   The output format is chosen from the file extension: ".dxf" writes DXF LINE
+   entities, anything else writes SVG. Returns false if the file can't be written.
  */
-bool exportLineDrawingSvg(const PolySet& ps, double creaseAngleDeg, const std::string& path);
+bool exportLineDrawing(const PolySet& ps, double creaseAngleDeg, const std::string& path);

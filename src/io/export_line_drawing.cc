@@ -1,6 +1,7 @@
 #include "io/export_line_drawing.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -122,7 +123,7 @@ private:
   std::vector<double> buf_;
 };
 
-// Project one view's feature edges to 2D (mm, y-down), removing the parts hidden
+// Project one view's feature edges to 2D (mm, y-up), removing the parts hidden
 // behind the mesh, then shift to the origin and report width/height.
 std::vector<ProjSeg> projectView(const PolySet& ps, const ViewDef& v, double creaseAngle,
                                  double& outW, double& outH)
@@ -134,8 +135,8 @@ std::vector<ProjSeg> projectView(const PolySet& ps, const ViewDef& v, double cre
   double maxx = std::numeric_limits<double>::lowest(), maxy = maxx;
   std::vector<ProjSeg> proj;
   auto emit = [&](const Vector3d& p0, const Vector3d& p1) {
-    const double x0 = p0[v.ax], y0 = -p0[v.ay];
-    const double x1 = p1[v.ax], y1 = -p1[v.ay];
+    const double x0 = p0[v.ax], y0 = p0[v.ay];
+    const double x1 = p1[v.ax], y1 = p1[v.ay];
     proj.push_back({x0, y0, x1, y1});
     minx = std::min({minx, x0, x1}); miny = std::min({miny, y0, y1});
     maxx = std::max({maxx, x0, x1}); maxy = std::max({maxy, y0, y1});
@@ -175,9 +176,18 @@ std::string fmt(double v)
   return s.str();
 }
 
-}  // namespace
+// The three ortho views projected to y-up mm, plus the sheet layout. Views are
+// laid out like a drawing sheet: front top-left, side top-right, top below front.
+struct Sheet {
+  std::vector<std::vector<ProjSeg>> proj;  // per view, y-up, origin at (0,0)
+  std::vector<double> vw, vh;              // per-view size
+  std::vector<double> ox, oy;              // per-view origin on the sheet (y-up)
+  std::vector<const char *> names;
+  double W{0}, H{0};                       // sheet size
+  double labelH{6.0};
+};
 
-bool exportLineDrawingSvg(const PolySet& ps, double creaseAngleDeg, const std::string& path)
+bool buildSheet(const PolySet& ps, double creaseAngleDeg, Sheet& sh)
 {
   const double creaseAngle = creaseAngleDeg * M_PI / 180.0;
   const std::vector<ViewDef> views = {
@@ -186,46 +196,96 @@ bool exportLineDrawingSvg(const PolySet& ps, double creaseAngleDeg, const std::s
     {"Top", 0, 1, 2, -1.0, {0, 0, 1}},      // XY plane, depth -Z (viewer at +Z)
   };
   const int cellCol[3] = {0, 1, 0};
-  const int cellRow[3] = {0, 0, 1};
+  const int cellRow[3] = {0, 0, 1};  // row 0 = upper, row 1 = lower
 
-  std::vector<std::vector<ProjSeg>> proj(views.size());
+  sh.proj.resize(views.size());
+  sh.vw.resize(views.size());
+  sh.vh.resize(views.size());
+  sh.ox.resize(views.size());
+  sh.oy.resize(views.size());
   double cellW = 0, cellH = 0;
-  std::vector<double> vw(views.size()), vh(views.size());
   for (size_t i = 0; i < views.size(); ++i) {
-    proj[i] = projectView(ps, views[i], creaseAngle, vw[i], vh[i]);
-    cellW = std::max(cellW, vw[i]);
-    cellH = std::max(cellH, vh[i]);
+    sh.proj[i] = projectView(ps, views[i], creaseAngle, sh.vw[i], sh.vh[i]);
+    sh.names.push_back(views[i].name);
+    cellW = std::max(cellW, sh.vw[i]);
+    cellH = std::max(cellH, sh.vh[i]);
   }
   if (cellW <= 0 || cellH <= 0) return false;
 
-  const double margin = 10.0, gap = 15.0, labelH = 6.0;  // mm
-  const double sheetW = 2 * margin + 2 * cellW + gap;
-  const double sheetH = 2 * margin + 2 * (cellH + labelH) + gap;
-
-  std::ofstream out(path);
-  if (!out.is_open()) return false;
-
-  out << "<?xml version=\"1.0\" standalone=\"no\"?>\n";
-  out << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << fmt(sheetW) << "mm\" height=\""
-      << fmt(sheetH) << "mm\" viewBox=\"0 0 " << fmt(sheetW) << " " << fmt(sheetH) << "\">\n";
-  out << "<rect x=\"0\" y=\"0\" width=\"" << fmt(sheetW) << "\" height=\"" << fmt(sheetH)
-      << "\" fill=\"white\"/>\n";
-
+  const double margin = 10.0, gap = 15.0;
+  sh.W = 2 * margin + 2 * cellW + gap;
+  sh.H = 2 * margin + 2 * (cellH + sh.labelH) + gap;
   for (size_t i = 0; i < views.size(); ++i) {
     const double cellX = margin + cellCol[i] * (cellW + gap);
-    const double cellY = margin + cellRow[i] * (cellH + labelH + gap);
-    const double ox = cellX + (cellW - vw[i]) / 2.0;
-    const double oy = cellY + labelH + (cellH - vh[i]) / 2.0;
-    out << "<text x=\"" << fmt(cellX) << "\" y=\"" << fmt(cellY + labelH - 1)
-        << "\" font-family=\"sans-serif\" font-size=\"4\" fill=\"black\">" << views[i].name
+    // Upper row (cellRow 0) sits higher on the sheet (larger y, since y is up).
+    const double cellBottom = margin + (1 - cellRow[i]) * (cellH + sh.labelH + gap);
+    sh.ox[i] = cellX + (cellW - sh.vw[i]) / 2.0;
+    sh.oy[i] = cellBottom + (cellH - sh.vh[i]) / 2.0;
+  }
+  return true;
+}
+
+bool writeSvg(const Sheet& sh, const std::string& path)
+{
+  std::ofstream out(path);
+  if (!out.is_open()) return false;
+  // SVG y is down: flip each y-up sheet coordinate to (H - y).
+  auto Y = [&](double y) { return sh.H - y; };
+  out << "<?xml version=\"1.0\" standalone=\"no\"?>\n";
+  out << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << fmt(sh.W) << "mm\" height=\""
+      << fmt(sh.H) << "mm\" viewBox=\"0 0 " << fmt(sh.W) << " " << fmt(sh.H) << "\">\n";
+  out << "<rect x=\"0\" y=\"0\" width=\"" << fmt(sh.W) << "\" height=\"" << fmt(sh.H)
+      << "\" fill=\"white\"/>\n";
+  for (size_t i = 0; i < sh.proj.size(); ++i) {
+    out << "<text x=\"" << fmt(sh.ox[i]) << "\" y=\"" << fmt(Y(sh.oy[i] + sh.vh[i]) - 2)
+        << "\" font-family=\"sans-serif\" font-size=\"4\" fill=\"black\">" << sh.names[i]
         << "</text>\n";
     out << "<g stroke=\"black\" stroke-width=\"0.25\" stroke-linecap=\"round\">\n";
-    for (const auto& s : proj[i]) {
-      out << "<line x1=\"" << fmt(ox + s.x0) << "\" y1=\"" << fmt(oy + s.y0) << "\" x2=\""
-          << fmt(ox + s.x1) << "\" y2=\"" << fmt(oy + s.y1) << "\"/>\n";
+    for (const auto& s : sh.proj[i]) {
+      out << "<line x1=\"" << fmt(sh.ox[i] + s.x0) << "\" y1=\"" << fmt(Y(sh.oy[i] + s.y0))
+          << "\" x2=\"" << fmt(sh.ox[i] + s.x1) << "\" y2=\"" << fmt(Y(sh.oy[i] + s.y1))
+          << "\"/>\n";
     }
     out << "</g>\n";
   }
   out << "</svg>\n";
   return out.good();
+}
+
+bool writeDxf(const Sheet& sh, const std::string& path)
+{
+  std::ofstream out(path);
+  if (!out.is_open()) return false;
+  // DXF uses y-up, so the sheet coordinates go out as-is. One LINE per segment.
+  out << "0\nSECTION\n2\nENTITIES\n";
+  for (size_t i = 0; i < sh.proj.size(); ++i) {
+    for (const auto& s : sh.proj[i]) {
+      out << "0\nLINE\n8\n0\n"
+          << "10\n" << fmt(sh.ox[i] + s.x0) << "\n20\n" << fmt(sh.oy[i] + s.y0) << "\n30\n0\n"
+          << "11\n" << fmt(sh.ox[i] + s.x1) << "\n21\n" << fmt(sh.oy[i] + s.y1) << "\n31\n0\n";
+    }
+    // View label as a TEXT entity above the view.
+    out << "0\nTEXT\n8\n0\n10\n" << fmt(sh.ox[i]) << "\n20\n" << fmt(sh.oy[i] + sh.vh[i] + 2)
+        << "\n30\n0\n40\n4\n1\n" << sh.names[i] << "\n";
+  }
+  out << "0\nENDSEC\n0\nEOF\n";
+  return out.good();
+}
+
+bool endsWithNoCase(const std::string& s, const std::string& suffix)
+{
+  if (s.size() < suffix.size()) return false;
+  for (size_t i = 0; i < suffix.size(); ++i) {
+    if (std::tolower(s[s.size() - suffix.size() + i]) != suffix[i]) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+bool exportLineDrawing(const PolySet& ps, double creaseAngleDeg, const std::string& path)
+{
+  Sheet sh;
+  if (!buildSheet(ps, creaseAngleDeg, sh)) return false;
+  return endsWithNoCase(path, ".dxf") ? writeDxf(sh, path) : writeSvg(sh, path);
 }

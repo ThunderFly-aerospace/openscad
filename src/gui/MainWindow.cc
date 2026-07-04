@@ -4029,11 +4029,12 @@ void MainWindow::onExportLineDrawing()
     return;
   }
 
-  const QString path = QFileDialog::getSaveFileName(this, tr("Export line drawing"),
-                                                    "drawing.svg", tr("SVG files (*.svg)"));
+  const QString path = QFileDialog::getSaveFileName(
+    this, tr("Export line drawing"), "drawing.svg",
+    tr("Vector drawing (*.svg *.dxf)"));
   if (path.isEmpty()) return;
   // 20° dihedral threshold: keeps real edges, drops tessellation facets.
-  if (exportLineDrawingSvg(*ps, 20.0, path.toStdString())) {
+  if (exportLineDrawing(*ps, 20.0, path.toStdString())) {
     this->statusBar()->showMessage(tr("Line drawing exported to %1").arg(path), 4000);
   } else {
     QMessageBox::warning(this, tr("Line drawing"), tr("Failed to write %1").arg(path));
