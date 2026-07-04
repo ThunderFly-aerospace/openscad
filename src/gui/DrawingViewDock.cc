@@ -213,6 +213,51 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
     painter.drawText(box, Qt::AlignCenter, label);
   }
 
+  // Angle dimensions: two rays from the vertex, an arc between them, and a label.
+  for (const auto& ang : this->data.angles) {
+    const QPointF v = mapToWidget(ang.vertex);
+    const QPointF a = mapToWidget(ang.a);
+    const QPointF b = mapToWidget(ang.b);
+    QPointF ua = a - v, ub = b - v;
+    const double la = std::hypot(ua.x(), ua.y());
+    const double lb = std::hypot(ub.x(), ub.y());
+    if (la < 1e-6 || lb < 1e-6) continue;
+    ua /= la;
+    ub /= lb;
+    // Arc radius: a fixed fraction of the shorter ray, clamped to a sane range.
+    const double arcR = std::clamp(std::min(la, lb) * 0.5, 14.0, 42.0);
+
+    painter.setPen(witnessPen);
+    painter.drawLine(v, v + ua * std::max(la, arcR + 6));
+    painter.drawLine(v, v + ub * std::max(lb, arcR + 6));
+
+    // Arc from ray a to ray b (Qt angles: degrees CCW from +x, y up; widget y is
+    // down, so negate). Sweep the short way between the two rays.
+    double angA = std::atan2(-ua.y(), ua.x()) * 180.0 / M_PI;
+    double angB = std::atan2(-ub.y(), ub.x()) * 180.0 / M_PI;
+    double span = angB - angA;
+    while (span <= -180.0) span += 360.0;
+    while (span > 180.0) span -= 360.0;
+    const QRectF arcRect(v.x() - arcR, v.y() - arcR, 2 * arcR, 2 * arcR);
+    painter.setPen(dimPen);
+    painter.drawArc(arcRect, static_cast<int>(angA * 16), static_cast<int>(span * 16));
+
+    // Label along the bisector, just outside the arc.
+    QPointF bis = ua + ub;
+    const double lbis = std::hypot(bis.x(), bis.y());
+    bis = lbis > 1e-6 ? bis / lbis : QPointF(0, -1);
+    const QPointF labelCenter = v + bis * (arcR + 12);
+    const QRectF tr = painter.fontMetrics().boundingRect(ang.label).adjusted(-3, -2, 3, 2);
+    QRectF box(labelCenter.x() - tr.width() / 2.0, labelCenter.y() - tr.height() / 2.0,
+               tr.width(), tr.height());
+    const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
+    const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
+    box.moveTo(bx, by);
+    painter.fillRect(box, QColor(255, 255, 255, 220));
+    painter.setPen(QColor(150, 30, 30));
+    painter.drawText(box, Qt::AlignCenter, ang.label);
+  }
+
   // Anchor dots with names (reference points) — optional.
   if (this->showAnchors)
   for (const auto& anchor : this->data.anchors) {

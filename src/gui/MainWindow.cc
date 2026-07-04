@@ -4076,11 +4076,12 @@ namespace {
 
 // A dimension resolved to two world-space endpoints, plus which projection it
 // belongs to (empty = all views) and its label text.
-enum class DimKind { Length, Diameter, Radius };
+enum class DimKind { Length, Diameter, Radius, Angle };
 
 struct ResolvedDim {
   Eigen::Vector3d a;
   Eigen::Vector3d b;
+  Eigen::Vector3d c{Eigen::Vector3d::Zero()};  // vertex, for angle dims (a,b = ends)
   DimKind kind{DimKind::Length};
   QString proj;         // "front" | "side" | "top" | "" (all)
   QString measure;      // "direct"(default) | "planar" | "h" | "v"
@@ -4275,7 +4276,16 @@ void MainWindow::refreshDrawingViews()
     rd.sourceLine = li;
     int firstOpt = 0;    // index of first option token
     QString radialRef;   // set for radial dims; endpoints computed after options
-    if (toks.first().startsWith("kvota=")) {
+    if (toks.first() == "angle") {
+      // Angle dimension: vertex + two ends (// @dim angle V A B). The value is
+      // the exact 3D angle at V between VA and VB.
+      if (toks.size() < 4) continue;
+      if (!resolveRef(toks[1], rd.c) || !resolveRef(toks[2], rd.a) ||
+          !resolveRef(toks[3], rd.b))
+        continue;
+      rd.kind = DimKind::Angle;
+      firstOpt = 4;
+    } else if (toks.first().startsWith("kvota=")) {
       const QString kv = toks.first().mid(6);
       const auto it = kvotaGroups.find(kv.toStdString());
       if (it == kvotaGroups.end() || it->second.size() < 2) continue;
@@ -4318,7 +4328,13 @@ void MainWindow::refreshDrawingViews()
     }
 
     double dispValue = 0.0;  // number substituted into the label
-    if (!radialRef.isEmpty()) {
+    if (rd.kind == DimKind::Angle) {
+      const Eigen::Vector3d va = rd.a - rd.c;
+      const Eigen::Vector3d vb = rd.b - rd.c;
+      if (va.norm() < 1e-9 || vb.norm() < 1e-9) continue;
+      const double cosang = std::clamp(va.normalized().dot(vb.normalized()), -1.0, 1.0);
+      dispValue = std::acos(cosang) * 180.0 / M_PI;
+    } else if (!radialRef.isEmpty()) {
       Eigen::Vector3d center;
       const DimrefNode *node = resolveNode(radialRef);
       if (!resolveRef(radialRef, center) || !node) continue;
@@ -4349,6 +4365,8 @@ void MainWindow::refreshDrawingViews()
       labelTemplate = QString::fromUtf8("⌀%f"); haveLabel = true;
     } else if (!haveLabel && rd.kind == DimKind::Radius) {
       labelTemplate = "R%f"; haveLabel = true;
+    } else if (!haveLabel && rd.kind == DimKind::Angle) {
+      labelTemplate = QString::fromUtf8("%f°"); haveLabel = true;
     }
     rd.label = makeLabel(haveLabel ? labelTemplate : QString(), dispValue, prec);
     dims.push_back(rd);
@@ -4373,7 +4391,14 @@ void MainWindow::refreshDrawingViews()
   for (const auto& rec : anchorRecs) markerPoints.push_back(rec.pos);
   std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> markerLines;
   markerLines.reserve(dims.size());
-  for (const auto& rd : dims) markerLines.emplace_back(rd.a, rd.b);
+  for (const auto& rd : dims) {
+    if (rd.kind == DimKind::Angle) {  // two rays from the vertex, not a chord
+      markerLines.emplace_back(rd.c, rd.a);
+      markerLines.emplace_back(rd.c, rd.b);
+    } else {
+      markerLines.emplace_back(rd.a, rd.b);
+    }
+  }
   this->qglview->setDimrefMarkers(std::move(markerPoints), std::move(markerLines));
   this->qglview->update();
 
@@ -4435,6 +4460,19 @@ void MainWindow::refreshDrawingViews()
       }
       for (const auto& rd : dims) {
         if (!rd.proj.isEmpty() && rd.proj != view.key) continue;
+        if (rd.kind == DimKind::Angle) {
+          QPointF pv, pa, pb;
+          if (projectToImage(rd.c, glview->modelview, glview->projection, pw, ph, pv) &&
+              projectToImage(rd.a, glview->modelview, glview->projection, pw, ph, pa) &&
+              projectToImage(rd.b, glview->modelview, glview->projection, pw, ph, pb)) {
+            // Skip if a projected ray collapses (vertex/end coincide in this view).
+            if (std::hypot((pa - pv).x(), (pa - pv).y()) < 3.0 ||
+                std::hypot((pb - pv).x(), (pb - pv).y()) < 3.0)
+              continue;
+            vd.angles.append({pv, pa, pb, rd.label});
+          }
+          continue;
+        }
         QPointF pa, pb;
         if (projectToImage(rd.a, glview->modelview, glview->projection, pw, ph, pa) &&
             projectToImage(rd.b, glview->modelview, glview->projection, pw, ph, pb)) {

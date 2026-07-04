@@ -53,11 +53,22 @@ struct OrthoDimension {
   int id{-1};
 };
 
+// An angle dimension in one ortho view: a vertex and its two ray endpoints (all
+// in render-image pixel coords) plus the label. Drawn as two short rays from the
+// vertex, an arc between them, and the angle label near the arc.
+struct OrthoAngle {
+  QPointF vertex;
+  QPointF a;
+  QPointF b;
+  QString label;
+};
+
 // Everything needed to render one ortho view with its overlay.
 struct OrthoViewData {
   QImage image;
   QList<OrthoAnchor> anchors;
   QList<OrthoDimension> dims;
+  QList<OrthoAngle> angles;
   QString title;
   double pxPerMm{1.0};  // render-image pixels per model unit (for scaled export)
 };
