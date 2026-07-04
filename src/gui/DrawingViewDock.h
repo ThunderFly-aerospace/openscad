@@ -30,8 +30,14 @@ struct OrthoAnchor {
 // used to write the offset back to source (source line index; -1 = not editable,
 // e.g. kvota= sugar dimensions).
 struct OrthoDimension {
-  QPointF a;
+  QPointF a;  // true projected anchor points (feature points)
   QPointF b;
+  // Unit measurement direction in image space. The dimension line runs along
+  // this direction; the drawn endpoints are the feet of a and b projected onto
+  // it. For direct/planar it is (b-a) normalized (so the line is aligned with
+  // the anchors); for h/v it is the view's horizontal/vertical axis, giving an
+  // axis-aligned dimension with witness lines dropped from the anchors.
+  QPointF dir{1.0, 0.0};
   QString label;
   double offsetPx{0.0};
   bool arrowsOut{false};  // arrowheads outside the extension lines

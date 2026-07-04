@@ -3871,6 +3871,7 @@ void MainWindow::onDimensionDoubleClicked(int id)
   const QString curPrec = tokenValue(R"(\bprec=(\d+))");
   const QString curArrows = tokenValue(R"(\barrows=(\w+))");
   const QString curProj = tokenValue(R"(\bproj=(\w+))");
+  const QString curMeasure = tokenValue(R"(\bmeasure=(\w+))");
 
   // Build the edit dialog.
   QDialog dialog(this);
@@ -3897,6 +3898,14 @@ void MainWindow::onDimensionDoubleClicked(int id)
   projBox->setCurrentText(curProj.isEmpty() ? tr("(all)") : curProj);
   form->addRow(tr("Projection"), projBox);
 
+  // Measure mode: how the length is taken relative to the projection plane.
+  auto *measureBox = new QComboBox(&dialog);
+  measureBox->addItems({"direct", "planar", "h", "v"});
+  measureBox->setCurrentText(curMeasure.isEmpty() ? "direct" : curMeasure);
+  measureBox->setToolTip(tr("direct = true 3D distance; planar = in the view plane; "
+                            "h/v = horizontal/vertical component in the view"));
+  form->addRow(tr("Measure"), measureBox);
+
   auto *buttons =
     new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
   form->addRow(buttons);
@@ -3921,6 +3930,11 @@ void MainWindow::onDimensionDoubleClicked(int id)
   line.remove(QRegularExpression(R"(\s*\bproj=\S+)"));
   if (projBox->currentIndex() > 0) {
     line += " proj=" + projBox->currentText();
+  }
+
+  line.remove(QRegularExpression(R"(\s*\bmeasure=\S+)"));
+  if (measureBox->currentText() != "direct") {
+    line += " measure=" + measureBox->currentText();
   }
 
   lines[id] = line;
@@ -4066,6 +4080,7 @@ struct ResolvedDim {
   Eigen::Vector3d a;
   Eigen::Vector3d b;
   QString proj;         // "front" | "side" | "top" | "" (all)
+  QString measure;      // "direct"(default) | "planar" | "h" | "v"
   QString label;        // final label text (template already substituted)
   double offsetMm{0};   // dimension line offset from the anchor line, model units
   bool arrowsOut{false};  // arrowheads outside the extension lines (for tight dims)
@@ -4104,6 +4119,35 @@ QString normalizeProj(const QString& raw)
   if (p == "side" || p == "bokorys") return "side";
   if (p == "top" || p == "pudorys" || p == "půdorys") return "top";
   return "";
+}
+
+// World axis indices that map to the horizontal / vertical screen directions of
+// an ortho view: front h=X v=Z, top h=X v=Y, side h=Y v=Z (see refreshDrawingViews
+// orthoViews). Defaults to front when proj is unspecified.
+void measureAxes(const QString& proj, int& hAxis, int& vAxis)
+{
+  if (proj == "top") { hAxis = 0; vAxis = 1; }
+  else if (proj == "side") { hAxis = 1; vAxis = 2; }
+  else { hAxis = 0; vAxis = 2; }  // front (and default)
+}
+
+// Measured length of a dimension per its measure mode, relative to its
+// projection plane. direct = true 3D distance |b-a|; planar = distance in the
+// view plane; h/v = the horizontal/vertical component in the view. Holds
+// h² + v² = planar².
+double dimLength(const Eigen::Vector3d& a, const Eigen::Vector3d& b,
+                 const QString& measure, const QString& proj)
+{
+  const Eigen::Vector3d d = b - a;
+  if (measure.isEmpty() || measure == "direct") return d.norm();
+  int hAxis, vAxis;
+  measureAxes(proj, hAxis, vAxis);
+  const double h = std::abs(d[hAxis]);
+  const double v = std::abs(d[vAxis]);
+  if (measure == "h") return h;
+  if (measure == "v") return v;
+  if (measure == "planar") return std::hypot(h, v);
+  return d.norm();  // unknown token -> direct
 }
 
 }  // namespace
@@ -4145,8 +4189,8 @@ void MainWindow::refreshDrawingViews()
   std::vector<ResolvedDim> dims;
 
   // 2. Explicit // @dim lines from the source. Two forms:
-  //      // @dim A B     [proj=] [offset=] [label=…] [prec=N] [arrows=in|out]
-  //      // @dim kvota=N  [proj=] [offset=] [label=…] [prec=N] [arrows=in|out]
+  //      // @dim A B     [proj=] [measure=] [offset=] [label=…] [prec=N] [arrows=in|out]
+  //      // @dim kvota=N  [proj=] [measure=] [offset=] [label=…] [prec=N] [arrows=in|out]
   //   label may be quoted to hold spaces/%f: label="šířka %f mm"
   const QString source = activeEditor ? activeEditor->toPlainText() : QString();
   static const QRegularExpression dimRe(R"(^\s*//\s*@dim\s+(.*\S)\s*$)");
@@ -4196,6 +4240,7 @@ void MainWindow::refreshDrawingViews()
     for (int t = firstOpt; t < toks.size(); ++t) {
       const QString& tok = toks[t];
       if (tok.startsWith("proj=")) rd.proj = normalizeProj(tok.mid(5));
+      else if (tok.startsWith("measure=")) rd.measure = tok.mid(8).toLower();
       else if (tok.startsWith("offset=")) rd.offsetMm = tok.mid(7).toDouble();
       else if (tok.startsWith("prec=")) prec = tok.mid(5).toInt();
       else if (tok.startsWith("arrows=")) rd.arrowsOut = (tok.mid(7).toLower() == "out");
@@ -4209,7 +4254,8 @@ void MainWindow::refreshDrawingViews()
       else if (tok.startsWith("label=")) { labelTemplate = tok.mid(6); haveLabel = true; }
       else if (!haveLabel) { labelTemplate = tok; haveLabel = true; }  // bare token
     }
-    rd.label = makeLabel(haveLabel ? labelTemplate : QString(), (rd.b - rd.a).norm(), prec);
+    rd.label = makeLabel(haveLabel ? labelTemplate : QString(),
+                         dimLength(rd.a, rd.b, rd.measure, rd.proj), prec);
     dims.push_back(rd);
   }
 
@@ -4297,12 +4343,33 @@ void MainWindow::refreshDrawingViews()
         QPointF pa, pb;
         if (projectToImage(rd.a, glview->modelview, glview->projection, pw, ph, pa) &&
             projectToImage(rd.b, glview->modelview, glview->projection, pw, ph, pb)) {
-          // Skip dimensions seen edge-on (endpoints project to nearly the same
-          // point): they collapse to a dot and can't be measured/grabbed.
-          if (std::hypot(pb.x() - pa.x(), pb.y() - pa.y()) < 3.0) continue;
+          // Measurement direction in image space: for h/v the view's screen axis
+          // (project a small world-axis vector), else the anchor-to-anchor line.
+          QPointF dir = pb - pa;
+          if (rd.measure == "h" || rd.measure == "v") {
+            int hAxis, vAxis;
+            measureAxes(rd.proj.isEmpty() ? view.key : rd.proj, hAxis, vAxis);
+            Eigen::Vector3d axis = Eigen::Vector3d::Zero();
+            axis[rd.measure == "h" ? hAxis : vAxis] = 1.0;
+            const Eigen::Vector3d mid = 0.5 * (rd.a + rd.b);
+            QPointF q0, q1;
+            if (projectToImage(mid, glview->modelview, glview->projection, pw, ph, q0) &&
+                projectToImage(mid + axis, glview->modelview, glview->projection, pw, ph, q1)) {
+              dir = q1 - q0;
+            }
+          }
+          const double dirLen = std::hypot(dir.x(), dir.y());
+          if (dirLen < 1e-6) continue;
+          dir /= dirLen;
+          // Drawn length = component of (b-a) along the measurement direction.
+          // Skip dimensions that collapse to a dot in this view (edge-on, or a
+          // zero h/v component): they can't be shown or grabbed.
+          const QPointF ab = pb - pa;
+          if (std::abs(ab.x() * dir.x() + ab.y() * dir.y()) < 3.0) continue;
           OrthoDimension od;
           od.a = pa;
           od.b = pb;
+          od.dir = dir;
           od.label = rd.label;
           od.offsetPx = rd.offsetMm * pxPerMm;
           od.arrowsOut = rd.arrowsOut;

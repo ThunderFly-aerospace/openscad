@@ -87,23 +87,38 @@ QPointF OrthoViewWidget::mapToImage(const QPointF& widgetPt) const
 
 QPointF OrthoViewWidget::dimPerp(const OrthoDimension& d) const
 {
-  QPointF dir = d.b - d.a;
+  QPointF dir = d.dir;
   const double len = std::hypot(dir.x(), dir.y());
   if (len < 1e-9) return QPointF(0, -1);
   dir /= len;
   return QPointF(dir.y(), -dir.x());  // rotate -90°
 }
 
-QPointF OrthoViewWidget::dimLabelPos(const OrthoDimension& d) const
+// Foot of an image-space point projected onto the (offset) dimension line: the
+// line through midpoint(a,b)+perp*offset running along the measurement
+// direction dir. Used for both drawing and hit-testing so they stay in sync.
+static QPointF dimFoot(const OrthoDimension& d, const QPointF& perp, const QPointF& t)
 {
-  // Image-space label anchor: midpoint of the offset dimension line, plus the
-  // label's own offset along the line and perpendicular to it.
-  const QPointF perp = dimPerp(d);
-  QPointF dir = d.b - d.a;
+  QPointF dir = d.dir;
   const double len = std::hypot(dir.x(), dir.y());
   if (len > 1e-9) dir /= len;
   else dir = QPointF(1, 0);
-  const QPointF mid = (d.a + d.b) / 2.0 + perp * d.offsetPx;
+  const QPointF base = (d.a + d.b) / 2.0 + perp * d.offsetPx;
+  const QPointF rel = t - base;
+  const double s = rel.x() * dir.x() + rel.y() * dir.y();
+  return base + dir * s;
+}
+
+QPointF OrthoViewWidget::dimLabelPos(const OrthoDimension& d) const
+{
+  // Image-space label anchor: midpoint of the dimension line (feet of a and b),
+  // plus the label's own offset along the line and perpendicular to it.
+  const QPointF perp = dimPerp(d);
+  QPointF dir = d.dir;
+  const double len = std::hypot(dir.x(), dir.y());
+  if (len > 1e-9) dir /= len;
+  else dir = QPointF(1, 0);
+  const QPointF mid = (dimFoot(d, perp, d.a) + dimFoot(d, perp, d.b)) / 2.0;
   return mid + dir * d.labAlongPx + perp * d.labPerpPx;
 }
 
@@ -141,16 +156,16 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
     const QPointF a = mapToWidget(dim.a);
     const QPointF b = mapToWidget(dim.b);
     const QPointF perp = dimPerp(dim);
-    const QPointF off = perp * (dim.offsetPx * this->fitScale);
-    const QPointF a2 = a + off;
-    const QPointF b2 = b + off;
+    // Endpoints of the dimension line: feet of the anchors on the offset line
+    // along the measurement direction (image space, then mapped to widget).
+    const QPointF a2 = mapToWidget(dimFoot(dim, perp, dim.a));
+    const QPointF b2 = mapToWidget(dimFoot(dim, perp, dim.b));
 
-    // Witness (extension) lines when the dimension is pulled off the object.
-    if (std::abs(dim.offsetPx) > 0.5) {
-      painter.setPen(witnessPen);
-      painter.drawLine(a, a2);
-      painter.drawLine(b, b2);
-    }
+    // Witness (extension) lines from each anchor to its foot on the dimension
+    // line (skip the degenerate case where the foot coincides with the anchor).
+    painter.setPen(witnessPen);
+    if (std::hypot((a2 - a).x(), (a2 - a).y()) > 0.5) painter.drawLine(a, a2);
+    if (std::hypot((b2 - b).x(), (b2 - b).y()) > 0.5) painter.drawLine(b, b2);
 
     // Dimension line with arrowheads.
     painter.setPen(dimPen);
@@ -236,9 +251,8 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
     const auto& dim = this->data.dims.at(i);
     if (dim.id < 0) continue;
     const QPointF perp = dimPerp(dim);
-    const QPointF off = perp * (dim.offsetPx * this->fitScale);
-    const QPointF a2 = mapToWidget(dim.a) + off;
-    const QPointF b2 = mapToWidget(dim.b) + off;
+    const QPointF a2 = mapToWidget(dimFoot(dim, perp, dim.a));
+    const QPointF b2 = mapToWidget(dimFoot(dim, perp, dim.b));
     const double d = distToSegment(click, a2, b2);
     if (d < bestLine) {
       bestLine = d;
@@ -282,7 +296,7 @@ void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
   if (this->draggingLabel >= 0 && this->draggingLabel < this->data.dims.size()) {
     OrthoDimension& dim = this->data.dims[this->draggingLabel];
     const QPointF perp = dimPerp(dim);
-    QPointF dir = dim.b - dim.a;
+    QPointF dir = dim.dir;
     const double len = std::hypot(dir.x(), dir.y());
     if (len > 1e-9) dir /= len;
     else dir = QPointF(1, 0);
@@ -320,8 +334,9 @@ int OrthoViewWidget::dimAt(const QPointF& pt) const
   for (int i = 0; i < this->data.dims.size(); ++i) {
     const auto& dim = this->data.dims.at(i);
     if (dim.id < 0) continue;
-    const QPointF off = dimPerp(dim) * (dim.offsetPx * this->fitScale);
-    if (distToSegment(pt, mapToWidget(dim.a) + off, mapToWidget(dim.b) + off) < 8.0) return i;
+    const QPointF perp = dimPerp(dim);
+    if (distToSegment(pt, mapToWidget(dimFoot(dim, perp, dim.a)),
+                      mapToWidget(dimFoot(dim, perp, dim.b))) < 8.0) return i;
   }
   return -1;
 }
