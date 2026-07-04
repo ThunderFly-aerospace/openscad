@@ -35,6 +35,12 @@ public:
   std::string dimref_name;
   // Optional auto-pairing dimension name (kvota= sugar). Empty = not set.
   std::string kvota_name;
+  // Optional stored size for radial dimensions (// @dim A kind=diameter|radius).
+  // The final mesh has no true circle (a cylinder is an $fn-gon), so the value
+  // comes from the source here, not from geometry. Negative = unset. May be
+  // given as d= (diameter) or r= (radius); either implies the other.
+  double diameter{-1.0};
+  double radius{-1.0};
 };
 
 // A dimref marker together with its accumulated world transform, produced by

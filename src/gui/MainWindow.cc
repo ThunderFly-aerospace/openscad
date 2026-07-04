@@ -4076,9 +4076,12 @@ namespace {
 
 // A dimension resolved to two world-space endpoints, plus which projection it
 // belongs to (empty = all views) and its label text.
+enum class DimKind { Length, Diameter, Radius };
+
 struct ResolvedDim {
   Eigen::Vector3d a;
   Eigen::Vector3d b;
+  DimKind kind{DimKind::Length};
   QString proj;         // "front" | "side" | "top" | "" (all)
   QString measure;      // "direct"(default) | "planar" | "h" | "v"
   QString label;        // final label text (template already substituted)
@@ -4163,6 +4166,7 @@ void MainWindow::refreshDrawingViews()
   // World positions per dimref name, in tree (DFS) order — index = occurrence, so
   // a duplicated name can be pinned as name#index (a plain name takes the first).
   std::map<std::string, std::vector<Eigen::Vector3d>> posByName;
+  std::map<std::string, std::vector<const DimrefNode *>> nodeByName;  // parallel to posByName
   std::map<std::string, std::vector<Eigen::Vector3d>> kvotaGroups;
   struct AnchorRec { QString label; QString ref; Eigen::Vector3d pos; };
   std::vector<AnchorRec> anchorRecs;
@@ -4177,6 +4181,7 @@ void MainWindow::refreshDrawingViews()
       // ref = name#index; label shows the same when duplicated (see below).
       ref = label + "#" + QString::number(static_cast<int>(v.size()));
       v.push_back(pos);
+      nodeByName[d.node->dimref_name].push_back(d.node);
     }
     anchorRecs.push_back({label, ref, pos});
     if (!d.node->kvota_name.empty()) kvotaGroups[d.node->kvota_name].push_back(pos);
@@ -4212,6 +4217,16 @@ void MainWindow::refreshDrawingViews()
     out = it->second[idx];
     return true;
   };
+  // Resolve an @dim token to the DimrefNode of that occurrence (for d=/r= values).
+  auto resolveNode = [&](const QString& tok) -> const DimrefNode * {
+    const int hash = tok.indexOf('#');
+    const QString base = hash >= 0 ? tok.left(hash) : tok;
+    int idx = hash >= 0 ? tok.mid(hash + 1).toInt() : 0;
+    const auto it = nodeByName.find(base.toStdString());
+    if (it == nodeByName.end() || idx < 0 || idx >= static_cast<int>(it->second.size()))
+      return nullptr;
+    return it->second[idx];
+  };
 
   // Format a length with an optional fixed precision (prec>=0), else general.
   auto formatLen = [](double len, int prec) {
@@ -4228,9 +4243,10 @@ void MainWindow::refreshDrawingViews()
 
   std::vector<ResolvedDim> dims;
 
-  // 2. Explicit // @dim lines from the source. Two forms:
+  // 2. Explicit // @dim lines from the source. Forms:
   //      // @dim A B     [proj=] [measure=] [offset=] [label=…] [prec=N] [arrows=in|out]
   //      // @dim kvota=N  [proj=] [measure=] [offset=] [label=…] [prec=N] [arrows=in|out]
+  //      // @dim A kind=diameter|radius [angle=deg] [proj=]   (value from dimref d=/r=)
   //   label may be quoted to hold spaces/%f: label="šířka %f mm"
   const QString source = activeEditor ? activeEditor->toPlainText() : QString();
   static const QRegularExpression dimRe(R"(^\s*//\s*@dim\s+(.*\S)\s*$)");
@@ -4257,7 +4273,8 @@ void MainWindow::refreshDrawingViews()
 
     ResolvedDim rd;
     rd.sourceLine = li;
-    int firstOpt = 0;  // index of first option token
+    int firstOpt = 0;    // index of first option token
+    QString radialRef;   // set for radial dims; endpoints computed after options
     if (toks.first().startsWith("kvota=")) {
       const QString kv = toks.first().mid(6);
       const auto it = kvotaGroups.find(kv.toStdString());
@@ -4266,17 +4283,26 @@ void MainWindow::refreshDrawingViews()
       rd.b = it->second[1];
       materializedKvotas.insert(kv);
       firstOpt = 1;
-    } else {
-      if (toks.size() < 2) continue;
+    } else if (toks.size() >= 2 && !toks[1].contains('=')) {
+      // Length dimension: two anchors.
       if (!resolveRef(toks[0], rd.a) || !resolveRef(toks[1], rd.b)) continue;  // unknown anchor
       firstOpt = 2;
+    } else {
+      // Radial dimension (// @dim A kind=diameter|radius [angle=] [proj=]): a
+      // single anchor whose dimref carries the size (d=/r=). Resolved below.
+      radialRef = toks[0];
+      firstOpt = 1;
     }
 
     int prec = -1;
+    double angleDeg = 0.0;
+    QString kindTok;
     for (int t = firstOpt; t < toks.size(); ++t) {
       const QString& tok = toks[t];
       if (tok.startsWith("proj=")) rd.proj = normalizeProj(tok.mid(5));
       else if (tok.startsWith("measure=")) rd.measure = tok.mid(8).toLower();
+      else if (tok.startsWith("kind=")) kindTok = tok.mid(5).toLower();
+      else if (tok.startsWith("angle=")) angleDeg = tok.mid(6).toDouble();
       else if (tok.startsWith("offset=")) rd.offsetMm = tok.mid(7).toDouble();
       else if (tok.startsWith("prec=")) prec = tok.mid(5).toInt();
       else if (tok.startsWith("arrows=")) rd.arrowsOut = (tok.mid(7).toLower() == "out");
@@ -4290,8 +4316,41 @@ void MainWindow::refreshDrawingViews()
       else if (tok.startsWith("label=")) { labelTemplate = tok.mid(6); haveLabel = true; }
       else if (!haveLabel) { labelTemplate = tok; haveLabel = true; }  // bare token
     }
-    rd.label = makeLabel(haveLabel ? labelTemplate : QString(),
-                         dimLength(rd.a, rd.b, rd.measure, rd.proj), prec);
+
+    double dispValue = 0.0;  // number substituted into the label
+    if (!radialRef.isEmpty()) {
+      Eigen::Vector3d center;
+      const DimrefNode *node = resolveNode(radialRef);
+      if (!resolveRef(radialRef, center) || !node) continue;
+      // Value from source (the mesh has no true circle); d= and r= imply each other.
+      const double diameter = node->diameter >= 0 ? node->diameter
+                              : (node->radius >= 0 ? node->radius * 2.0 : -1.0);
+      const double radius = node->radius >= 0 ? node->radius
+                            : (node->diameter >= 0 ? node->diameter / 2.0 : -1.0);
+      if (diameter < 0 && radius < 0) continue;  // no size on the dimref
+      const bool wantRadius = (kindTok == "radius" || kindTok == "r");
+      rd.kind = wantRadius ? DimKind::Radius : DimKind::Diameter;
+      dispValue = wantRadius ? radius : diameter;
+      // Draw direction: the view's horizontal axis rotated by angle=, in-plane.
+      int hAxis, vAxis;
+      measureAxes(rd.proj.isEmpty() ? "front" : rd.proj, hAxis, vAxis);
+      Eigen::Vector3d hv = Eigen::Vector3d::Zero(); hv[hAxis] = 1.0;
+      Eigen::Vector3d vv = Eigen::Vector3d::Zero(); vv[vAxis] = 1.0;
+      const double rad = angleDeg * M_PI / 180.0;
+      const Eigen::Vector3d dir = std::cos(rad) * hv + std::sin(rad) * vv;
+      if (wantRadius) { rd.a = center; rd.b = center + dir * radius; }
+      else { rd.a = center - dir * (diameter / 2.0); rd.b = center + dir * (diameter / 2.0); }
+    } else {
+      dispValue = dimLength(rd.a, rd.b, rd.measure, rd.proj);
+    }
+
+    // Radial dims get a ⌀/R prefix by default; a custom label= still wins.
+    if (!haveLabel && rd.kind == DimKind::Diameter) {
+      labelTemplate = QString::fromUtf8("⌀%f"); haveLabel = true;
+    } else if (!haveLabel && rd.kind == DimKind::Radius) {
+      labelTemplate = "R%f"; haveLabel = true;
+    }
+    rd.label = makeLabel(haveLabel ? labelTemplate : QString(), dispValue, prec);
     dims.push_back(rd);
   }
 

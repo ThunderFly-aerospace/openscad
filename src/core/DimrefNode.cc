@@ -46,10 +46,12 @@ static std::shared_ptr<AbstractNode> builtin_dimref(const ModuleInstantiation *i
   auto node = std::make_shared<DimrefNode>(inst);
 
   Parameters parameters =
-    Parameters::parse(std::move(arguments), inst->location(), {"name"}, {"kvota"});
+    Parameters::parse(std::move(arguments), inst->location(), {"name"}, {"kvota", "d", "r"});
 
   node->dimref_name = parameters.get("name", node->dimref_name);
   node->kvota_name = parameters.get("kvota", node->kvota_name);
+  node->diameter = parameters.get("d", node->diameter);
+  node->radius = parameters.get("r", node->radius);
 
   return children.instantiate(node);
 }
@@ -61,6 +63,8 @@ std::string DimrefNode::toString() const
   if (!this->kvota_name.empty()) {
     stream << ", kvota = \"" << this->kvota_name << "\"";
   }
+  if (this->diameter >= 0) stream << ", d = " << this->diameter;
+  if (this->radius >= 0) stream << ", r = " << this->radius;
   stream << ")";
   return stream.str();
 }
@@ -100,5 +104,6 @@ void register_builtin_dimref()
                  {
                    "dimref(name = \"A\")",
                    "dimref(name = \"A\", kvota = \"width\")  // auto-pair by kvota name",
+                   "dimref(name = \"A\", d = 5)  // radial dim value (or r = 2.5)",
                  });
 }
