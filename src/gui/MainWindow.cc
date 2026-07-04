@@ -4248,6 +4248,8 @@ void MainWindow::refreshDrawingViews()
   //      // @dim A B     [proj=] [measure=] [offset=] [label=…] [prec=N] [arrows=in|out]
   //      // @dim kvota=N  [proj=] [measure=] [offset=] [label=…] [prec=N] [arrows=in|out]
   //      // @dim A kind=diameter|radius [angle=deg] [proj=]   (value from dimref d=/r=)
+  //      // @dim angle V A B [proj=] [label=]                 (exact 3D angle at V)
+  //      // @dim chain|running A B C… [proj=] [offset=] [step=]  (dimension series)
   //   label may be quoted to hold spaces/%f: label="šířka %f mm"
   const QString source = activeEditor ? activeEditor->toPlainText() : QString();
   static const QRegularExpression dimRe(R"(^\s*//\s*@dim\s+(.*\S)\s*$)");
@@ -4271,6 +4273,60 @@ void MainWindow::refreshDrawingViews()
 
     QStringList toks = rest.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
     if (toks.isEmpty()) continue;
+
+    // Chain / running: one line lays out a series of length dimensions over an
+    // ordered list of anchors, all in one direction.
+    //   // @dim chain   A B C D   -> consecutive A-B, B-C, C-D on one line
+    //   // @dim running A B C D   -> A-B, A-C, A-D from a common baseline, stacked
+    // Shared options: [proj=] [measure=] [offset=] [step=] [prec=] [label=].
+    if (toks.first() == "chain" || toks.first() == "running") {
+      const bool running = toks.first() == "running";
+      QStringList refs;
+      int t = 1;
+      for (; t < toks.size() && !toks[t].contains('='); ++t) refs << toks[t];
+      if (refs.size() < 2) continue;
+
+      QString proj, measure;
+      double baseOffset = 0.0, step = 10.0;
+      int prec = -1;
+      for (; t < toks.size(); ++t) {
+        const QString& tok = toks[t];
+        if (tok.startsWith("proj=")) proj = normalizeProj(tok.mid(5));
+        else if (tok.startsWith("measure=")) measure = tok.mid(8).toLower();
+        else if (tok.startsWith("offset=")) baseOffset = tok.mid(7).toDouble();
+        else if (tok.startsWith("step=")) step = tok.mid(5).toDouble();
+        else if (tok.startsWith("prec=")) prec = tok.mid(5).toInt();
+        else if (tok.startsWith("label=")) { labelTemplate = tok.mid(6); haveLabel = true; }
+      }
+
+      std::vector<Eigen::Vector3d> pts;
+      bool ok = true;
+      for (const QString& ref : refs) {
+        Eigen::Vector3d p;
+        if (!resolveRef(ref, p)) { ok = false; break; }
+        pts.push_back(p);
+      }
+      if (!ok) continue;
+
+      auto pushSeg = [&](const Eigen::Vector3d& A, const Eigen::Vector3d& B, double off) {
+        ResolvedDim rd;
+        rd.a = A;
+        rd.b = B;
+        rd.proj = proj;
+        rd.measure = measure;
+        rd.offsetMm = off;
+        rd.sourceLine = li;  // whole chain shares the line; drag shifts the base
+        rd.label = makeLabel(haveLabel ? labelTemplate : QString(),
+                             dimLength(A, B, measure, proj), prec);
+        dims.push_back(rd);
+      };
+      if (running) {
+        for (size_t i = 1; i < pts.size(); ++i) pushSeg(pts[0], pts[i], baseOffset + (i - 1) * step);
+      } else {
+        for (size_t i = 0; i + 1 < pts.size(); ++i) pushSeg(pts[i], pts[i + 1], baseOffset);
+      }
+      continue;
+    }
 
     ResolvedDim rd;
     rd.sourceLine = li;
