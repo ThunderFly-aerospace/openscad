@@ -86,6 +86,7 @@
 #include "core/BuiltinContext.h"
 #include "core/Builtins.h"
 #include "core/CSGTreeEvaluator.h"
+#include "core/CameraNode.h"
 #include "core/Context.h"
 #include "core/EvaluationSession.h"
 #include "core/RenderVariables.h"
@@ -539,6 +540,94 @@ int do_export(const CommandLine& cmd, const RenderVariables& render_variables, F
   return 0;
 }
 
+// Headless batch render of every camera() marker in the model to
+// <prefix>_<name>.png (name = camera(name=…) or its index). Reuses the
+// render_camera_preview engine — the same one the GUI "Cameras" dock uses — so
+// the snapshots keep color() colors. Kept as a separate path from the normal
+// export machinery so it cannot alter any existing output.
+int export_cameras(const std::string& rawInput, const ViewOptions& viewOptions,
+                   const std::string& prefix, const fs::path& original_path)
+{
+  const bool is_stdin = rawInput == "-";
+  const std::string displayName = is_stdin ? "<stdin>" : rawInput;
+
+  std::string text;
+  if (is_stdin) {
+    text = std::string((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+  } else {
+    std::ifstream ifs(std::filesystem::u8path(rawInput));
+    if (!ifs.is_open()) {
+      LOG("Can't open input file '%1$s'!\n", rawInput);
+      return 1;
+    }
+    handle_dep(rawInput);
+    text = std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  }
+  text += "\n\x03\n" + commandline_commands;
+
+  SourceFile *root_file = nullptr;
+  if (!parse(root_file, text, displayName, displayName, false)) {
+    delete root_file;  // parse failed
+    root_file = nullptr;
+  }
+  if (!root_file) {
+    LOG("Can't parse file '%1$s'!\n", displayName);
+    return 1;
+  }
+  CommentParser::collectParameters(text.c_str(), root_file);
+  root_file->handleDependencies();
+
+  auto fpath = is_stdin ? fs::current_path() : fs::absolute(fs::path(rawInput));
+  auto fparent = fpath.parent_path();
+  fs::current_path(fparent);
+
+  EvaluationSession session{fparent.string()};
+  ContextHandle<BuiltinContext> builtin_context{Context::create<BuiltinContext>(&session)};
+  RenderVariables render_variables{.preview = true, .time = 0.0, .camera = Camera()};
+  render_variables.applyToContext(builtin_context);
+
+  AbstractNode::resetIndexCounter();
+  std::shared_ptr<const FileContext> file_context;
+  std::shared_ptr<AbstractNode> absolute_root_node =
+    root_file->instantiate(*builtin_context, &file_context);
+
+  // restore CWD after module instantiation finished
+  fs::current_path(original_path);
+
+  std::shared_ptr<const AbstractNode> root_node;
+  const Location *nextLocation = nullptr;
+  if (!(root_node = find_root_tag(absolute_root_node, &nextLocation))) {
+    root_node = absolute_root_node;
+  }
+  Tree tree(root_node, fparent.string());
+
+  const auto cameras = collectCameras(root_node);
+  if (cameras.empty()) {
+    LOG("No camera() markers found in '%1$s'.", displayName);
+    return 0;
+  }
+
+  set_render_color_scheme(arg_colorscheme, true);
+
+  int failures = 0;
+  int index = 0;
+  for (const auto& info : cameras) {
+    const std::string name = (info.node && !info.node->camera_name.empty())
+                               ? info.node->camera_name
+                               : std::to_string(index);
+    const std::string outfile = prefix + "_" + name + ".png";
+    auto glview = render_camera_preview(tree, viewOptions, info);
+    if (!glview || !glview->save(outfile.c_str())) {
+      LOG("Failed to render camera '%1$s'.", name);
+      ++failures;
+    } else {
+      LOG("Exported camera '%1$s' to %2$s", name, outfile);
+    }
+    ++index;
+  }
+  return failures ? 1 : 0;
+}
+
 int cmdline(const CommandLine& cmd)
 {
   FileFormat export_format;
@@ -884,6 +973,8 @@ int openscad_main(int argc, char **argv)
     ("backend", po::value<std::string>(),
       "3D rendering backend to use: 'CGAL' (old/slow) or 'Manifold' (new/fast) [default]")
     ("imgsize", po::value<std::string>(), "=width,height of exported png")
+    ("export-cameras", po::value<std::string>(),
+      "=prefix -headless render of every camera() marker to <prefix>_<name>.png")
     ("render", po::value<std::string>()->implicit_value(""),
       "for full geometry evaluation when exporting png")
     ("preview", po::value<std::string>()->implicit_value(""),
@@ -1126,6 +1217,25 @@ int openscad_main(int argc, char **argv)
 
   AnimateArgs const animate = get_animate(vm);
   const Camera camera = get_camera(vm);
+
+  // --export-cameras: standalone headless batch render of camera() markers.
+  // Handled here (before the normal cmd-line/GUI split) because it produces one
+  // PNG per camera under its own prefix and needs no -o output file.
+  if (vm.count("export-cameras")) {
+    const std::string prefix = vm["export-cameras"].as<std::string>();
+    if (inputFiles.size() != 1) {
+      LOG("--export-cameras requires exactly one input file.");
+      return 1;
+    }
+    parser_init();
+    localization_init();
+    try {
+      rc = export_cameras(inputFiles[0], viewOptions, prefix, original_path);
+    } catch (const HardWarningException&) {
+      rc = 1;
+    }
+    return rc;
+  }
 
   if (animate.frames) {
     for (const auto& filename : output_files) {
