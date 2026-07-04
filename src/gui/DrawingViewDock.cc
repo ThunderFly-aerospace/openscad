@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QPainter>
 #include <QPen>
 #include <QPixmap>
@@ -74,15 +75,17 @@ void OrthoViewWidget::setShowAnchors(bool show)
 
 QPointF OrthoViewWidget::mapToWidget(const QPointF& imgPt) const
 {
-  return QPointF(imgPt.x() * this->fitScale + this->fitOffset.x(),
-                 imgPt.y() * this->fitScale + this->fitOffset.y());
+  const double s = this->fitScale * this->userZoom;
+  return QPointF(imgPt.x() * s + this->fitOffset.x() + this->userPan.x(),
+                 imgPt.y() * s + this->fitOffset.y() + this->userPan.y());
 }
 
 QPointF OrthoViewWidget::mapToImage(const QPointF& widgetPt) const
 {
-  if (this->fitScale < 1e-9) return QPointF();
-  return QPointF((widgetPt.x() - this->fitOffset.x()) / this->fitScale,
-                 (widgetPt.y() - this->fitOffset.y()) / this->fitScale);
+  const double s = this->fitScale * this->userZoom;
+  if (s < 1e-9) return QPointF();
+  return QPointF((widgetPt.x() - this->fitOffset.x() - this->userPan.x()) / s,
+                 (widgetPt.y() - this->fitOffset.y() - this->userPan.y()) / s);
 }
 
 QPointF OrthoViewWidget::dimPerp(const OrthoDimension& d) const
@@ -133,7 +136,8 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
     return;
   }
 
-  // Fit the image into the widget while keeping aspect ratio, centered.
+  // Fit the image into the widget while keeping aspect ratio, centered; the
+  // user's wheel-zoom and drag-pan are applied on top (see mapToWidget).
   const QSize imgSize = this->data.image.size();
   this->fitScale = std::min(static_cast<double>(width()) / imgSize.width(),
                             static_cast<double>(height()) / imgSize.height());
@@ -141,7 +145,8 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
   const double drawH = imgSize.height() * this->fitScale;
   this->fitOffset = QPointF((width() - drawW) / 2.0, (height() - drawH) / 2.0);
 
-  painter.drawImage(QRectF(this->fitOffset.x(), this->fitOffset.y(), drawW, drawH),
+  const QPointF topLeft = mapToWidget(QPointF(0, 0));
+  painter.drawImage(QRectF(topLeft.x(), topLeft.y(), drawW * this->userZoom, drawH * this->userZoom),
                     this->data.image);
 
   painter.setRenderHint(QPainter::Antialiasing, true);
@@ -275,6 +280,26 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
   if (this->data.image.isNull()) return;
   const QPointF click = event->position();
 
+  // Right button: jump to the source of the dimension or dimref under the cursor
+  // (left button stays reserved for creating/dragging dimensions and panning).
+  if (event->button() == Qt::RightButton) {
+    const int di = dimAt(click);
+    if (di >= 0) {
+      emit jumpToSource(this->data.dims.at(di).id);
+      return;
+    }
+    double best = 12.0;
+    int line = -1;
+    for (const auto& anchor : this->data.anchors) {
+      const QPointF p = mapToWidget(anchor.pos);
+      const double d = std::hypot(p.x() - click.x(), p.y() - click.y());
+      if (d <= best && anchor.sourceLine >= 0) { best = d; line = anchor.sourceLine; }
+    }
+    if (line >= 0) emit jumpToSource(line);
+    return;
+  }
+  if (event->button() != Qt::LeftButton) return;
+
   // First: start dragging a label if the click is on one (editable dims only).
   const QFontMetrics fm = fontMetrics();
   for (int i = 0; i < this->data.dims.size(); ++i) {
@@ -309,34 +334,49 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
     return;
   }
 
-  // Otherwise: report an anchor click (used to create dimensions). Hidden
-  // reference points are not clickable.
-  if (!this->showAnchors) return;
-  const double radius = 12.0;
-  QStringList hits;  // distinct anchor refs within the hit radius
-  for (const auto& anchor : this->data.anchors) {
-    const QPointF p = mapToWidget(anchor.pos);
-    if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= radius &&
-        !hits.contains(anchor.ref)) {
-      hits << anchor.ref;
+  // Next: report an anchor click (used to create dimensions). Hidden reference
+  // points are not clickable, so clicking then just pans.
+  if (this->showAnchors) {
+    const double radius = 12.0;
+    QStringList hits;  // distinct anchor refs within the hit radius
+    for (const auto& anchor : this->data.anchors) {
+      const QPointF p = mapToWidget(anchor.pos);
+      if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= radius &&
+          !hits.contains(anchor.ref)) {
+        hits << anchor.ref;
+      }
+    }
+    if (hits.size() == 1) {
+      emit anchorClicked(hits.first());
+      return;
+    }
+    if (hits.size() > 1) {
+      // Several reference points coincide here: let the user pick which one (the
+      // menu shows the ref token, e.g. A#0 / A#1, so duplicates are distinguishable).
+      QMenu menu(this);
+      for (const QString& ref : hits) menu.addAction(ref);
+      if (QAction *chosen = menu.exec(event->globalPosition().toPoint())) {
+        emit anchorClicked(chosen->text());
+      }
+      return;
     }
   }
-  if (hits.isEmpty()) return;
-  if (hits.size() == 1) {
-    emit anchorClicked(hits.first());
-    return;
-  }
-  // Several reference points coincide here: let the user pick which one (the
-  // menu shows the ref token, e.g. A#0 / A#1, so duplicates are distinguishable).
-  QMenu menu(this);
-  for (const QString& ref : hits) menu.addAction(ref);
-  if (QAction *chosen = menu.exec(event->globalPosition().toPoint())) {
-    emit anchorClicked(chosen->text());
-  }
+
+  // Otherwise the click is on empty space: start panning the view.
+  this->panning = true;
+  this->panLast = click;
 }
 
 void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
 {
+  // Pan: translate the view by the mouse delta (widget space).
+  if (this->panning) {
+    this->userPan += event->position() - this->panLast;
+    this->panLast = event->position();
+    update();
+    return;
+  }
+
   // Label drag: decompose the mouse position (relative to the dimension-line
   // midpoint) into the along/perp frame of the dimension.
   if (this->draggingLabel >= 0 && this->draggingLabel < this->data.dims.size()) {
@@ -396,6 +436,10 @@ void OrthoViewWidget::mouseDoubleClickEvent(QMouseEvent *event)
 
 void OrthoViewWidget::mouseReleaseEvent(QMouseEvent *)
 {
+  if (this->panning) {
+    this->panning = false;
+    return;
+  }
   if (this->draggingLabel >= 0 && this->draggingLabel < this->data.dims.size()) {
     const OrthoDimension& dim = this->data.dims[this->draggingLabel];
     emit labelOffsetChanged(dim.id, dim.labAlongPx, dim.labPerpPx, true);
@@ -406,6 +450,21 @@ void OrthoViewWidget::mouseReleaseEvent(QMouseEvent *)
   const OrthoDimension& dim = this->data.dims[this->draggingDim];
   emit dimensionOffsetChanged(dim.id, dim.offsetPx, true);
   this->draggingDim = -1;
+}
+
+void OrthoViewWidget::wheelEvent(QWheelEvent *event)
+{
+  if (this->data.image.isNull()) return;
+  const double steps = event->angleDelta().y() / 120.0;
+  if (steps == 0.0) return;
+  const QPointF cursor = event->position();
+  const QPointF imgAt = mapToImage(cursor);  // image point under the cursor (old zoom)
+  const double factor = std::pow(1.2, steps);
+  this->userZoom = std::clamp(this->userZoom * factor, 0.2, 20.0);
+  // Keep imgAt under the cursor: solve userPan from mapToWidget(imgAt) == cursor.
+  const double s = this->fitScale * this->userZoom;
+  this->userPan = cursor - this->fitOffset - imgAt * s;
+  update();
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +513,7 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
             });
     connect(view, &OrthoViewWidget::dimensionDoubleClicked, this,
             &DrawingViewDock::dimensionDoubleClicked);
+    connect(view, &OrthoViewWidget::jumpToSource, this, &DrawingViewDock::jumpToSource);
   }
   grid->setRowStretch(0, 1);
   grid->setRowStretch(1, 1);

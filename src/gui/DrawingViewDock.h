@@ -27,6 +27,7 @@ struct OrthoAnchor {
   QPointF pos;
   QString name;
   QString ref;
+  int sourceLine{-1};  // 0-based editor line of the dimref() (for jump-to-source)
 };
 
 // A dimension (kvóta) to draw in one ortho view: two anchor endpoints
@@ -101,6 +102,8 @@ signals:
   void labelOffsetChanged(int id, double alongPx, double perpPx, bool finished);
   // Emitted on double-click of a dimension line or label (its source id).
   void dimensionDoubleClicked(int id);
+  // Emitted on right-click of a dimref anchor or dimension: 0-based source line.
+  void jumpToSource(int line);
 
 protected:
   void paintEvent(QPaintEvent *event) override;
@@ -108,6 +111,7 @@ protected:
   void mouseMoveEvent(QMouseEvent *event) override;
   void mouseReleaseEvent(QMouseEvent *event) override;
   void mouseDoubleClickEvent(QMouseEvent *event) override;
+  void wheelEvent(QWheelEvent *event) override;
 
 private:
   // Index of the editable dimension under a widget point (label or line), or -1.
@@ -124,13 +128,20 @@ private:
   QPointF dimLabelPos(const OrthoDimension& d) const;
 
   OrthoViewData data;
-  // Fit transform (recomputed each paint): widget = image * scale + offset.
+  // Fit transform (recomputed each paint): widget = image*(fitScale*userZoom) +
+  // fitOffset + userPan. fitScale/fitOffset fit the image; userZoom/userPan are
+  // the user's wheel-zoom and drag-pan on top.
   double fitScale{1.0};
   QPointF fitOffset;
+  double userZoom{1.0};
+  QPointF userPan;
   // Index into data.dims currently being dragged (line), or -1.
   int draggingDim{-1};
   // Index into data.dims whose label is being dragged, or -1.
   int draggingLabel{-1};
+  // Panning the view with an empty-area left drag.
+  bool panning{false};
+  QPointF panLast;
   // Whether to draw reference-point dots and their names.
   bool showAnchors{true};
 };
@@ -166,6 +177,8 @@ signals:
   void labelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx, bool finished);
   // Emitted on double-click of a dimension (its source id) to open its editor.
   void dimensionDoubleClicked(int id);
+  // Emitted on right-click of a dimref anchor or dimension: 0-based source line.
+  void jumpToSource(int line);
   // Emitted when the user clicks "Materialize kvóty".
   void materializeRequested();
   // Emitted when the colored/line-drawing mode is toggled (needs a re-render).

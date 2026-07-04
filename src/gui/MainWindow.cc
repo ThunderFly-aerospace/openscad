@@ -3830,6 +3830,13 @@ void MainWindow::setupDrawingDock()
   // Double-click a dimension to edit its label/precision/arrows/projection.
   QObject::connect(this->drawingDock, &DrawingViewDock::dimensionDoubleClicked, this,
                    &MainWindow::onDimensionDoubleClicked);
+  // Right-click a dimref/dimension in a view jumps the editor to its source line.
+  QObject::connect(this->drawingDock, &DrawingViewDock::jumpToSource, this, [this](int line) {
+    if (this->activeEditor && line >= 0) {
+      this->jumpToLine(line, 0);
+      this->activeEditor->setFocus();
+    }
+  });
   // "Materialize kvóty" writes a // @dim kvota=… line for each kvota pair.
   QObject::connect(this->drawingDock, &DrawingViewDock::materializeRequested, this,
                    &MainWindow::onMaterializeKvotas);
@@ -4169,7 +4176,7 @@ void MainWindow::refreshDrawingViews()
   std::map<std::string, std::vector<Eigen::Vector3d>> posByName;
   std::map<std::string, std::vector<const DimrefNode *>> nodeByName;  // parallel to posByName
   std::map<std::string, std::vector<Eigen::Vector3d>> kvotaGroups;
-  struct AnchorRec { QString label; QString ref; Eigen::Vector3d pos; };
+  struct AnchorRec { QString label; QString ref; Eigen::Vector3d pos; int sourceLine; };
   std::vector<AnchorRec> anchorRecs;
   for (const auto& d : dimrefs) {
     if (!d.node) continue;
@@ -4184,7 +4191,9 @@ void MainWindow::refreshDrawingViews()
       v.push_back(pos);
       nodeByName[d.node->dimref_name].push_back(d.node);
     }
-    anchorRecs.push_back({label, ref, pos});
+    // 0-based editor line of the dimref() call, for right-click jump-to-source.
+    const int srcLine = d.node->modinst ? d.node->modinst->location().firstLine() - 1 : -1;
+    anchorRecs.push_back({label, ref, pos, srcLine});
     if (!d.node->kvota_name.empty()) kvotaGroups[d.node->kvota_name].push_back(pos);
   }
 
@@ -4511,7 +4520,7 @@ void MainWindow::refreshDrawingViews()
       for (const auto& rec : anchorRecs) {
         QPointF p;
         if (projectToImage(rec.pos, glview->modelview, glview->projection, pw, ph, p)) {
-          vd.anchors.append({p, rec.label, rec.ref});
+          vd.anchors.append({p, rec.label, rec.ref, rec.sourceLine});
         }
       }
       for (const auto& rd : dims) {
