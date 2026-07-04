@@ -117,6 +117,8 @@
 #include "geometry/Geometry.h"
 #include "geometry/GeometryCache.h"
 #include "geometry/GeometryEvaluator.h"
+#include "geometry/PolySet.h"
+#include "geometry/PolySetUtils.h"
 #include "glview/PolySetRenderer.h"
 #include "glview/RenderSettings.h"
 #if not defined(USE_POLYSET_FOR_CGAL)
@@ -160,6 +162,7 @@
 #include "gui/input/InputDriverManager.h"
 #include "io/dxfdim.h"
 #include "io/export.h"
+#include "io/export_line_drawing.h"
 #include "io/fileutils.h"
 #include "openscad.h"
 #include "platform/PlatformUtils.h"
@@ -3840,6 +3843,9 @@ void MainWindow::setupDrawingDock()
   // "Materialize kvóty" writes a // @dim kvota=… line for each kvota pair.
   QObject::connect(this->drawingDock, &DrawingViewDock::materializeRequested, this,
                    &MainWindow::onMaterializeKvotas);
+  // "Line drawing (vector)…" exports a vector SVG of the mesh's feature edges.
+  QObject::connect(this->drawingDock, &DrawingViewDock::lineDrawingRequested, this,
+                   &MainWindow::onExportLineDrawing);
   // Toggling colored/line-drawing mode re-renders the ortho views.
   QObject::connect(this->drawingDock, &DrawingViewDock::renderModeChanged, this,
                    &MainWindow::refreshDrawingViews);
@@ -3999,6 +4005,39 @@ void MainWindow::onMaterializeKvotas()
   activeEditor->setPlainText(appended);
   this->statusBar()->showMessage(
     tr("Materialized %1 kvota dimension(s). Press F5 to update.").arg(newLines.size()), 4000);
+}
+
+void MainWindow::onExportLineDrawing()
+{
+  if (!this->rootNode) {
+    QMessageBox::information(this, tr("Line drawing"),
+                            tr("Nothing to export; press F5 first."));
+    return;
+  }
+  // Evaluate the concrete mesh (like F6); this can take a moment for big models.
+  std::shared_ptr<const Geometry> geom;
+  try {
+    GeometryEvaluator ge(this->tree);
+    geom = ge.evaluateGeometry(*this->rootNode, true);
+  } catch (const std::exception& e) {
+    LOG(message_group::Error, "Line drawing: geometry evaluation failed: %1$s", e.what());
+    geom = nullptr;
+  }
+  const auto ps = geom ? PolySetUtils::getGeometryAsPolySet(geom) : nullptr;
+  if (!ps || ps->isEmpty()) {
+    QMessageBox::warning(this, tr("Line drawing"), tr("No 3D geometry to export."));
+    return;
+  }
+
+  const QString path = QFileDialog::getSaveFileName(this, tr("Export line drawing"),
+                                                    "drawing.svg", tr("SVG files (*.svg)"));
+  if (path.isEmpty()) return;
+  // 20° dihedral threshold: keeps real edges, drops tessellation facets.
+  if (exportLineDrawingSvg(*ps, 20.0, path.toStdString())) {
+    this->statusBar()->showMessage(tr("Line drawing exported to %1").arg(path), 4000);
+  } else {
+    QMessageBox::warning(this, tr("Line drawing"), tr("Failed to write %1").arg(path));
+  }
 }
 
 void MainWindow::onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished)

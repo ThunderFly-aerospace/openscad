@@ -553,10 +553,16 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->saveButton = new QPushButton(tr("Save Sheet…"), central);
   this->saveButton->setEnabled(false);
 
+  this->lineExportButton = new QPushButton(tr("Line drawing (vector)…"), central);
+  this->lineExportButton->setEnabled(false);
+  this->lineExportButton->setToolTip(
+    tr("Export a compact vector SVG of the silhouette + feature edges (from the mesh)."));
+
   auto *buttonRow = new QWidget(central);
   auto *buttonLayout = new QHBoxLayout(buttonRow);
   buttonLayout->setContentsMargins(0, 0, 0, 0);
   buttonLayout->addWidget(this->materializeButton);
+  buttonLayout->addWidget(this->lineExportButton);
   buttonLayout->addWidget(this->saveButton);
 
   auto *checkRow = new QWidget(central);
@@ -578,6 +584,8 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   connect(this->exportButton, &QPushButton::clicked, this, &DrawingViewDock::exportDrawing);
   connect(this->materializeButton, &QPushButton::clicked, this,
           &DrawingViewDock::materializeRequested);
+  connect(this->lineExportButton, &QPushButton::clicked, this,
+          &DrawingViewDock::lineDrawingRequested);
   connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
   connect(this->lineModeCheck, &QCheckBox::toggled, this, &DrawingViewDock::renderModeChanged);
 }
@@ -617,6 +625,7 @@ void DrawingViewDock::setViews(const QList<OrthoViewData>& newViews, const QStri
   }
   this->saveButton->setEnabled(any);
   this->exportButton->setEnabled(any);
+  this->lineExportButton->setEnabled(any);
   this->placeholder->setVisible(!any);
 }
 

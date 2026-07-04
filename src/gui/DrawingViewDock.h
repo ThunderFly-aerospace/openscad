@@ -181,6 +181,8 @@ signals:
   void jumpToSource(int line);
   // Emitted when the user clicks "Materialize kvóty".
   void materializeRequested();
+  // Emitted when the user clicks "Line drawing (vector)…".
+  void lineDrawingRequested();
   // Emitted when the colored/line-drawing mode is toggled (needs a re-render).
   void renderModeChanged();
 
@@ -193,6 +195,7 @@ private:
   QVector<OrthoViewWidget *> viewWidgets;
   QLabel *placeholder;
   QPushButton *saveButton;
+  QPushButton *lineExportButton;
   QPushButton *materializeButton;
   QPushButton *exportButton;
   QCheckBox *showRefsCheck;
