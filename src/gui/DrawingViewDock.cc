@@ -82,12 +82,6 @@ void OrthoViewWidget::setShowAnchors(bool show)
   update();
 }
 
-void OrthoViewWidget::setShowLeaders(bool show)
-{
-  this->showLeaders = show;
-  update();
-}
-
 void OrthoViewWidget::setScale(double scale)
 {
   this->data.scale = scale;
@@ -300,14 +294,14 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
   // and — when leaders are on and the label sits away from its dimension line — a
   // thin leader from the box to the nearest point of the segment [seg0,seg1].
   auto drawLabel = [&](const QPointF& center, const QString& text, const QPointF& seg0,
-                       const QPointF& seg1) {
+                       const QPointF& seg1, bool leader) {
     const QRectF tr = painter.fontMetrics().boundingRect(text).adjusted(-3, -2, 3, 2);
     QRectF box(center.x() - tr.width() / 2.0, center.y() - tr.height() / 2.0,
                tr.width(), tr.height());
     const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
     const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
     box.moveTo(bx, by);
-    if (this->showLeaders) {
+    if (leader) {
       const QPointF foot = closestOnSegment(box.center(), seg0, seg1);
       if (std::hypot(box.center().x() - foot.x(), box.center().y() - foot.y()) >
           box.height()) {
@@ -347,7 +341,7 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
       drawArrow(b2, -dir, nrm);                    // head at the rim, pointing out
       if (!dim.radiusHalf) drawArrow(a2, dir, nrm);  // diameter: head at both rims
     }
-    drawLabel(mapToWidget(dimLabelPos(dim)), dim.label, a2, b2);
+    drawLabel(mapToWidget(dimLabelPos(dim)), dim.label, a2, b2, dim.leader);
   }
 
   for (const auto& dim : this->data.dims) {
@@ -399,7 +393,7 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
 
     // Label at its own position (dimension midpoint plus label offset), with a
     // leader to the dimension line when it has been dragged away.
-    drawLabel(mapToWidget(dimLabelPos(dim)), dim.label, a2, b2);
+    drawLabel(mapToWidget(dimLabelPos(dim)), dim.label, a2, b2, dim.leader);
   }
 
   // Angle dimensions: two rays from the vertex, an arc between them, and a label.
@@ -719,23 +713,14 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
 
   for (int i = 0; i < kViewCount; ++i) {
     auto *box = new QGroupBox(tr(defaultTitles[i]), sheet);
-    // Checkable title = per-view on/off. Unchecked hides the view (the empty
-    // titled box stays so the first-angle grid keeps its alignment).
-    box->setCheckable(true);
-    box->setChecked(kViewDefault[i]);
     auto *boxLayout = new QVBoxLayout(box);
     boxLayout->setContentsMargins(2, 2, 2, 2);
     auto *view = new OrthoViewWidget(box);
-    view->setVisible(kViewDefault[i]);
     boxLayout->addWidget(view);
     grid->addWidget(box, kGridPos[i][0], kGridPos[i][1]);
+    box->setVisible(kViewDefault[i]);  // shown only when its checkbox is ticked
     this->viewWidgets.append(view);
     this->viewBoxes.append(box);
-    connect(box, &QGroupBox::toggled, this, [this, i, view](bool on) {
-      view->setVisible(on);
-      emit viewSelectionChanged();
-      this->updateExportEnabled();
-    });
 
     connect(view, &OrthoViewWidget::anchorClicked, this,
             [this, i](const QString& name) { emit anchorClicked(i, name); });
@@ -755,8 +740,30 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
             &DrawingViewDock::dimensionDoubleClicked);
     connect(view, &OrthoViewWidget::jumpToSource, this, &DrawingViewDock::jumpToSource);
   }
-  for (int r = 0; r < 3; ++r) grid->setRowStretch(r, 1);
-  for (int c = 0; c < 4; ++c) grid->setColumnStretch(c, 1);
+  relayoutViews();  // only occupied rows/cols take space (no empty tiles)
+
+  // Row of per-view enable checkboxes: only the ticked views are shown, and the
+  // sheet collapses around them (no blank cells).
+  const char *viewNames[kViewCount] = {QT_TR_NOOP("Front"), QT_TR_NOOP("Back"),
+                                       QT_TR_NOOP("Left"),  QT_TR_NOOP("Right"),
+                                       QT_TR_NOOP("Top"),   QT_TR_NOOP("Bottom")};
+  auto *viewsRow = new QWidget(central);
+  auto *viewsLayout = new QHBoxLayout(viewsRow);
+  viewsLayout->setContentsMargins(0, 0, 0, 0);
+  viewsLayout->addWidget(new QLabel(tr("Views:"), viewsRow));
+  for (int i = 0; i < kViewCount; ++i) {
+    auto *cb = new QCheckBox(tr(viewNames[i]), viewsRow);
+    cb->setChecked(kViewDefault[i]);
+    connect(cb, &QCheckBox::toggled, this, [this, i](bool on) {
+      this->viewBoxes.at(i)->setVisible(on);
+      relayoutViews();
+      emit viewSelectionChanged();
+      updateExportEnabled();
+    });
+    viewsLayout->addWidget(cb);
+    this->viewChecks.append(cb);
+  }
+  viewsLayout->addStretch(1);
 
   this->placeholder = new QLabel(tr("Render (F5) to generate orthographic views."), central);
   this->placeholder->setAlignment(Qt::AlignCenter);
@@ -765,11 +772,6 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->showRefsCheck->setChecked(true);
   this->showRefsCheck->setToolTip(
     tr("Show the dimref anchor dots and their names (dimension labels stay)."));
-
-  this->showLeadersCheck = new QCheckBox(tr("Leader lines"), central);
-  this->showLeadersCheck->setChecked(true);
-  this->showLeadersCheck->setToolTip(
-    tr("Draw a thin leader from a dragged-away label to its dimension line."));
 
   this->separateFilesCheck = new QCheckBox(tr("Separate files"), central);
   this->separateFilesCheck->setChecked(false);
@@ -808,12 +810,12 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   auto *checkLayout = new QHBoxLayout(checkRow);
   checkLayout->setContentsMargins(0, 0, 0, 0);
   checkLayout->addWidget(this->showRefsCheck);
-  checkLayout->addWidget(this->showLeadersCheck);
   checkLayout->addWidget(this->separateFilesCheck);
   checkLayout->addStretch(1);
   checkLayout->addWidget(this->scaleSpin);
   checkLayout->addWidget(this->exportButton);
 
+  layout->addWidget(viewsRow);
   layout->addWidget(sheet, 1);
   layout->addWidget(this->placeholder);
   layout->addWidget(checkRow);
@@ -825,12 +827,12 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   connect(this->materializeButton, &QPushButton::clicked, this,
           &DrawingViewDock::materializeRequested);
   connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
-  connect(this->showLeadersCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowLeaders);
   // Changing the scale only affects text / line-weight sizing relative to the
   // geometry (and the export size), so push it to the views without a re-render.
   connect(this->scaleSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
           [this](double) {
             for (auto *view : this->viewWidgets) view->setScale(exportScale());
+            for (auto *view : this->sectionWidgets) view->setScale(exportScale());
           });
 }
 
@@ -843,11 +845,6 @@ double DrawingViewDock::exportScale() const
 void DrawingViewDock::setShowAnchors(bool show)
 {
   for (auto *view : this->viewWidgets) view->setShowAnchors(show);
-}
-
-void DrawingViewDock::setShowLeaders(bool show)
-{
-  for (auto *view : this->viewWidgets) view->setShowLeaders(show);
 }
 
 DrawingViewDock::~DrawingViewDock() = default;
@@ -898,13 +895,32 @@ void DrawingViewDock::setSectionViews(const QList<OrthoViewData>& sections)
       this->sectionWidgets.at(i)->clear();
     }
   }
+  relayoutViews();
   updateExportEnabled();
+}
+
+void DrawingViewDock::relayoutViews()
+{
+  // Give a grid row/column stretch only if it holds a visible tile, so hidden
+  // views (and empty section rows) collapse to nothing.
+  const int rows = this->sheetGrid->rowCount(), cols = this->sheetGrid->columnCount();
+  std::vector<bool> rowUsed(rows, false), colUsed(cols, false);
+  for (int idx = 0; idx < this->sheetGrid->count(); ++idx) {
+    auto *item = this->sheetGrid->itemAt(idx);
+    if (!item || !item->widget() || !item->widget()->isVisible()) continue;
+    int r, c, rs, cs;
+    this->sheetGrid->getItemPosition(idx, &r, &c, &rs, &cs);
+    if (r >= 0 && r < rows) rowUsed[r] = true;
+    if (c >= 0 && c < cols) colUsed[c] = true;
+  }
+  for (int r = 0; r < rows; ++r) this->sheetGrid->setRowStretch(r, rowUsed[r] ? 1 : 0);
+  for (int c = 0; c < cols; ++c) this->sheetGrid->setColumnStretch(c, colUsed[c] ? 1 : 0);
 }
 
 bool DrawingViewDock::isViewSelected(int viewIndex) const
 {
-  return viewIndex >= 0 && viewIndex < this->viewBoxes.size() &&
-         this->viewBoxes.at(viewIndex)->isChecked();
+  return viewIndex >= 0 && viewIndex < this->viewChecks.size() &&
+         this->viewChecks.at(viewIndex)->isChecked();
 }
 
 void DrawingViewDock::updateExportEnabled()
@@ -969,7 +985,6 @@ void DrawingViewDock::exportDrawing()
   if (!any) return;
 
   const double scale = exportScale();  // drawing-mm per model-mm
-  const bool leaders = this->showLeadersCheck->isChecked();
 
   const QString filename = QFileDialog::getSaveFileName(
     this, tr("Export drawing"), "drawing.svg",
@@ -1006,9 +1021,10 @@ void DrawingViewDock::exportDrawing()
         << (tip + along * arrowMm - nrm * arrowMm * 0.4);
       arrows.push_back(h);
     };
-    // Leader from a dragged-away label to the nearest point of its dimension line.
-    auto addLeader = [&](const QPointF& lp, const QPointF& s0, const QPointF& s1) {
-      if (!leaders) return;
+    // Leader from a dragged-away label to the nearest point of its dimension line
+    // (per-dimension: only when d.leader is on).
+    auto addLeader = [&](const QPointF& lp, const QPointF& s0, const QPointF& s1, bool leader) {
+      if (!leader) return;
       const QPointF foot = closestOnSegment(lp, s0, s1);
       if (std::hypot((lp - foot).x(), (lp - foot).y()) > fontMm) witSegs.emplace_back(lp, foot);
     };
@@ -1038,7 +1054,7 @@ void DrawingViewDock::exportDrawing()
             if (!d.radiusHalf) addArrow(a2, sdir, nrm);
           }
         }
-        addLeader(labelPos, a2, b2);
+        addLeader(labelPos, a2, b2, d.leader);
         labels.emplace_back(labelPos, d.label);
         continue;
       }
@@ -1053,7 +1069,7 @@ void DrawingViewDock::exportDrawing()
         if (d.arrowsOut) { addArrow(a2, -sdir, nrm); addArrow(b2, sdir, nrm); }
         else { addArrow(a2, sdir, nrm); addArrow(b2, -sdir, nrm); }
       }
-      addLeader(labelPos, a2, b2);
+      addLeader(labelPos, a2, b2, d.leader);
       labels.emplace_back(labelPos, d.label);
     }
     for (const auto& ang : v.angles) {

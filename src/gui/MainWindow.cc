@@ -3884,6 +3884,7 @@ void MainWindow::onDimensionDoubleClicked(int id)
   if (curLabel.isEmpty()) curLabel = tokenValue(R"(\blabel=(\S+))");
   const QString curPrec = tokenValue(R"(\bprec=(\d+))");
   const QString curArrows = tokenValue(R"(\barrows=(\w+))");
+  const QString curLeader = tokenValue(R"(\bleader=(\w+))");
   const QString curProj = tokenValue(R"(\bproj=(\w+))");
   const QString curMeasure = tokenValue(R"(\bmeasure=(\w+))");
   const QString curKind = tokenValue(R"(\bkind=(\w+))");
@@ -3909,6 +3910,11 @@ void MainWindow::onDimensionDoubleClicked(int id)
   arrowsBox->addItems({"in", "out"});
   arrowsBox->setCurrentText(curArrows == "out" ? "out" : "in");
   form->addRow(tr("Arrows"), arrowsBox);
+
+  // Leader line to a dragged-away label (per dimension). Default on.
+  auto *leaderCheck = new QCheckBox(tr("Leader when label moved"), &dialog);
+  leaderCheck->setChecked(curLeader.toLower() != "off");
+  form->addRow(tr("Leader"), leaderCheck);
 
   // Diameter vs radius: only for radial dims (value comes from the dimref's
   // d=/r=, either implies the other, so flipping this is always possible).
@@ -3970,6 +3976,10 @@ void MainWindow::onDimensionDoubleClicked(int id)
     line.remove(QRegularExpression(R"(\s*\bprec=\S+)"));
   }
   line = setLineToken(line, "arrows", arrowsBox->currentText());
+
+  // Leader is on by default: write leader=off only when disabled, else drop it.
+  if (!leaderCheck->isChecked()) line = setLineToken(line, "leader", "off");
+  else line.remove(QRegularExpression(R"(\s*\bleader=\S+)"));
 
   line.remove(QRegularExpression(R"(\s*\bproj=\S+)"));
   if (projBox->currentIndex() > 0) {
@@ -4194,6 +4204,7 @@ struct ResolvedDim {
   QString label;        // final label text (template already substituted)
   double offsetMm{0};   // dimension line offset from the anchor line, model units
   bool arrowsOut{false};  // arrowheads outside the extension lines (for tight dims)
+  bool leader{true};      // draw a leader to a dragged-away label (leader=on|off)
   double labAlongMm{0};  // label offset along the dimension line, model units
   double labPerpMm{0};   // label offset perpendicular to the dimension line
   int sourceLine{-1};   // 0-based editor line of the // @dim (for write-back)
@@ -4496,6 +4507,7 @@ ResolvedDrawing resolveDrawing(const std::vector<DimrefInfo>& dimrefs,
       else if (tok.startsWith("offset=")) rd.offsetMm = tok.mid(7).toDouble();
       else if (tok.startsWith("prec=")) prec = tok.mid(5).toInt();
       else if (tok.startsWith("arrows=")) rd.arrowsOut = (tok.mid(7).toLower() == "out");
+      else if (tok.startsWith("leader=")) rd.leader = (tok.mid(7).toLower() != "off");
       else if (tok.startsWith("laboff=")) {
         const QStringList parts = tok.mid(7).split(',');
         if (parts.size() == 2) {
@@ -4710,6 +4722,7 @@ void MainWindow::refreshDrawingViews()
             od.dir = d / dl;
             od.label = rd.label;
             od.arrowsOut = rd.arrowsOut;
+            od.leader = rd.leader;
             od.labAlongPx = rd.labAlongMm;
             od.labPerpPx = rd.labPerpMm;
             od.id = rd.sourceLine;
@@ -4736,6 +4749,7 @@ void MainWindow::refreshDrawingViews()
           od.label = rd.label;
           od.offsetPx = rd.offsetMm;  // model-mm (dock coordinate space)
           od.arrowsOut = rd.arrowsOut;
+          od.leader = rd.leader;
           od.labAlongPx = rd.labAlongMm;
           od.labPerpPx = rd.labPerpMm;
           od.id = rd.sourceLine;  // -1 for kvota= dims (not draggable)

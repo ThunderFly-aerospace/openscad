@@ -54,6 +54,9 @@ struct OrthoDimension {
   // dimension's own frame (along the line, and perpendicular to it).
   double labAlongPx{0.0};
   double labPerpPx{0.0};
+  // Draw a leader line to the dimension line when the label is dragged away.
+  // Per-dimension (from leader=on|off in source); default on.
+  bool leader{true};
   // Radial (diameter / radius) dimension: drawn straight through the feature
   // centre at an adjustable angle, with no witness lines. `center` is the circle
   // centre; for a diameter a/b are the two opposite rim points, for a radius
@@ -128,9 +131,6 @@ public:
   void setData(const OrthoViewData& data);
   void clear();
   void setShowAnchors(bool show);
-  // Draw a leader line from a dragged-away label to its dimension line (all dim
-  // types). Off = the label floats free with no connector.
-  void setShowLeaders(bool show);
   // Update only the drawing scale (drawing-mm per model-mm) and repaint; used
   // when the user changes the scale spinbox without re-rendering the geometry.
   void setScale(double scale);
@@ -201,8 +201,6 @@ private:
   QPointF panLast;
   // Whether to draw reference-point dots and their names.
   bool showAnchors{true};
-  // Whether to draw a leader line from a dragged-away label to its dimension line.
-  bool showLeaders{true};
 };
 
 /*!
@@ -255,15 +253,18 @@ private slots:
   void saveSheet();
   void exportDrawing();
   void setShowAnchors(bool show);
-  void setShowLeaders(bool show);
 
 private:
   // Enable/disable the export + save buttons based on whether any shown view has
   // content.
   void updateExportEnabled();
+  // Give grid rows/columns stretch only where a visible tile sits, so unticked
+  // views leave no blank space.
+  void relayoutViews();
 
   QVector<OrthoViewWidget *> viewWidgets;
-  QVector<class QGroupBox *> viewBoxes;  // parallel to viewWidgets; checkable = shown
+  QVector<class QGroupBox *> viewBoxes;  // parallel to viewWidgets
+  QVector<class QCheckBox *> viewChecks;  // per-view enable, parallel to viewWidgets
   QVector<OrthoViewWidget *> sectionWidgets;  // dynamic; one per section() marker
   QVector<class QGroupBox *> sectionBoxes;
   QList<OrthoViewData> sectionViews;
@@ -274,7 +275,6 @@ private:
   QPushButton *materializeButton;
   QPushButton *exportButton;
   QCheckBox *showRefsCheck;
-  QCheckBox *showLeadersCheck;
   QCheckBox *separateFilesCheck;
   QDoubleSpinBox *scaleSpin;
   QList<OrthoViewData> views;
