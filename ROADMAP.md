@@ -527,3 +527,79 @@ se stává **editorem exportu** (WYSIWYG): co vidím, to se vyexportuje.
 ### Refactor (hotový, neutrální)
 - `resolveDrawing()` — řešení kotev/kvót do světa vytaženo mimo render loop
   (sdílí dok overlay i vektorový export).
+
+---
+
+## Fáze 6 — Standardní pohledy, normovaný layout (ISO-E) a řezy
+
+Rozšíření výkresů z pevných 3 pohledů na plnohodnotný technický list: až 6
+zapínatelných standardních pohledů rozmístěných podle promítací metody, plus
+**řezy (sections)** definované markerem v kódu.
+
+### Rozhodnutí (2026-07-05)
+- **Směr projekce se NErozvolňuje** — pro jiný úhel si uživatel model otočí.
+  Ortografie (oko v nekonečnu) → „oko uvnitř tělesa" nenastává.
+- **Promítání ISO-E** (1. kvadrant / evropská metoda) jako default; přepínač
+  E/A v doku.
+- **Výkres zůstává čárový** (ČSN EN ISO 128: barva nemá normovaný význam).
+  Obarvení/šedá jen jako nenormativní pomůcka na obrazovce, ne v defaultním
+  exportu → problém „výplně" tímto uzavřen (nepřidávat do exportu).
+- **Řezná rovina markeru:** díváš se ve směru lokální **+Z** (šipky = +Z),
+  zachová se půlka „za" rovinou; parametr `flip` překlopí.
+- **Export:** default **jeden složený list**; checkbox „samostatné soubory"
+  vysype každý pohled/řez do vlastního souboru. Stejná primitiva.
+
+### A. 6 zapínatelných pohledů + normovaný layout
+- `LineDrawingView`: rozšířit standardní sadu na 6 (Front, Back, Left, Right,
+  Top, Bottom) — pořád přes indexy os + `depthSign` (žádný obecný směr).
+  Back = −Y, Left/Right = ∓X, Bottom = −Z.
+- **Výběr pohledů:** checkboxy v doku (default dle ISO-E: Front + Top + Right).
+- **Layout engine** (sdílený dok + soubor. export): kanonické pozice v mřížce
+  3×3 kolem Frontu podle ISO-E se **zarovnanými osami** (Top přesně pod Front ve
+  stejném X; boky ve stejné výšce jako Front). Řez = dlaždice mimo mřížku.
+  Tímto se sjednotí dnešní dva rozdílné layouty (dok stack vs. knihovní 2×2).
+- **Export:** jeden list vs. samostatné soubory (checkbox); obojí ze stejného
+  seznamu dlaždic.
+
+### B. Marker řezu v kódu (`section()`)
+- Nový **`SectionNode`** (šablona: `DimrefNode`/`CameraNode`): `VISITABLE`,
+  prázdná geometrie (v `NodeVisitor.h` jako empty group → neviditelný v
+  preview/render/exportu/měření). Builtin `section(name="A", flip=false,
+  hatch=…)` v `Builtins.cc`; `collectSections(root)` prochází strom s akumulací
+  `TransformNode::matrix`.
+- **Rovina z markeru:** počátek = world translace; normála = world rotace ×
+  lokální +Z. Umístění/orientace čistě transformacemi (`translate`/`rotate`),
+  jako u kamer/dimref → přežije editace, skriptovatelné.
+
+### C. Kreslení řezu
+- V `refreshDrawingViews`/exportu pro každý `section`:
+  1. `PolySet → ManifoldUtils::createManifoldFromPolySet → Manifold::TrimByPlane(
+     normal, offset) → PolySet` (uřízne a **zavíčkuje** řeznou plochu; ověřit
+     znaménko strany, aplikovat `flip`).
+  2. **Táž pipeline** `FeatureEdges` + HLR v rámu řezu (right/up z markeru,
+     dir = +Z) → hrany řezového pohledu.
+  3. **Řezné víčko:** plochy s normálou ≈ normála roviny a ležící v rovině →
+     **vyšrafovat 45°** (tenká plná, rozteč default ~3 mm drawing-mm, clip na
+     polygon víčka). (Obrys víčka lze i z `projection(cut=true)` —
+     `manifold->slice()` / `CGALUtils::project`, `GeometryEvaluator.cc:850`.)
+  4. Dlaždice **„Řez A–A"** na listu.
+- **Annotace v ostatních pohledech:** kde je rovina *hranou* (obsahuje směr
+  daného pohledu), nakreslit tlustou čerchovanou čáru přes bbox + **šipky**
+  (směr +Z) + **písmena „A"** na koncích.
+
+### D. Polish / testy
+- Parametry: `flip`, rozteč/úhel šraf; **cache řezu** podle (mesh hash, rovina),
+  počítat jen když je dok vidět (boolean navíc je drahý).
+- **Unit testy** (`src/gui/LineDrawing_test.cc` styl): krychle půl na půl →
+  čtvercové vyšrafované víčko + uzavřený obrys; 6 směrů promítají správně;
+  ISO-E pozice dlaždic; `TrimByPlane` sanity (objem/normála víčka).
+
+### Pořadí (inkrementálně)
+A (pohledy + layout + export) → B (marker) → C (řez + annotace) → D (polish).
+A je samostatně užitečné a nízkorizikové; B–C jsou jádro řezů.
+
+### Rizika
+- Znaménko/orientace u `TrimByPlane` — ověřit empiricky.
+- Rozpoznání koplanárního víčka (tolerance polohy/normály).
+- Cena booleanu na každý refresh → cache.
+- DXF: šrafy jako `LINE` segmenty (ok), UTF-8 text „⌀/°" (staré čtečky).
