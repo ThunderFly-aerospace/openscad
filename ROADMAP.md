@@ -603,3 +603,14 @@ A je samostatně užitečné a nízkorizikové; B–C jsou jádro řezů.
 - Rozpoznání koplanárního víčka (tolerance polohy/normály).
 - Cena booleanu na každý refresh → cache.
 - DXF: šrafy jako `LINE` segmenty (ok), UTF-8 text „⌀/°" (staré čtečky).
+
+### Stav (2026-07-05): HOTOVO A–D
+- **A** — 6 standardních pohledů se znaménkem os (`standardViews()`), dok v ISO-E
+  mřížce se zaškrtávacími pohledy, export ISO-E + „samostatné soubory". ✅
+- **B** — `section()` marker (`SectionNode`, empty group), `collectSections()`. ✅
+- **C** — `projectSection()` (TrimByPlane cut + projekce + 45° šrafy), dlaždice
+  „Řez A–A" v doku i exportu, čerchovaná čára řezu se šipkami + písmeny v ostatních
+  pohledech (kde je rovina hranou). Ověřeno v GUI. ✅
+- **D** — unit testy (6 směrů + zrcadlení, section cut/hatch, kept-half sign) +
+  cmdline regrese `dump/echo-section-node`. ✅
+- **Zbývá jako optimalizace:** cache řezu (boolean běží při každém refreshi doku).
