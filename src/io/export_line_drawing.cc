@@ -18,6 +18,11 @@ namespace {
 // The view definition is shared with the drawing dock (see export_line_drawing.h).
 using ViewDef = LineDrawingView;
 
+// Screen coordinates of a world point in a view (signed, so mirrored views read
+// correctly). Depth keeps its own sign (smaller = closer to the viewer).
+inline double screenX(const ViewDef& v, const Vector3d& p) { return v.sx * p[v.ax]; }
+inline double screenY(const ViewDef& v, const Vector3d& p) { return v.sy * p[v.ay]; }
+
 // A sheet-space segment (origin-shifted and scaled), millimetres, y-up.
 struct ProjSeg {
   double x0, y0, x1, y1;
@@ -34,8 +39,9 @@ public:
     double minx = std::numeric_limits<double>::max(), miny = minx;
     double maxx = std::numeric_limits<double>::lowest(), maxy = maxx;
     for (const auto& p : ps.vertices) {
-      minx = std::min(minx, p[v.ax]); maxx = std::max(maxx, p[v.ax]);
-      miny = std::min(miny, p[v.ay]); maxy = std::max(maxy, p[v.ay]);
+      const double sx = screenX(v, p), sy = screenY(v, p);
+      minx = std::min(minx, sx); maxx = std::max(maxx, sx);
+      miny = std::min(miny, sy); maxy = std::max(maxy, sy);
     }
     if (maxx <= minx || maxy <= miny) { valid_ = false; return; }
     minx_ = minx; miny_ = miny;
@@ -66,7 +72,7 @@ public:
   bool visible(const Vector3d& p, const ViewDef& v) const
   {
     int px, py;
-    if (!toPixel(p[v.ax], p[v.ay], px, py)) return true;  // outside buffer: keep
+    if (!toPixel(screenX(v, p), screenY(v, p), px, py)) return true;  // outside buffer: keep
     const double d = v.depthSign * p[v.az];
     const double buf = buf_[static_cast<size_t>(py) * W_ + px];
     if (buf == std::numeric_limits<double>::max()) return true;  // nothing there
@@ -105,9 +111,9 @@ private:
 
   void rasterTri(const Vector3d& a, const Vector3d& b, const Vector3d& c, const ViewDef& v)
   {
-    const double ax = (a[v.ax] - minx_) * scale_, ay = (a[v.ay] - miny_) * scale_;
-    const double bx = (b[v.ax] - minx_) * scale_, by = (b[v.ay] - miny_) * scale_;
-    const double cx = (c[v.ax] - minx_) * scale_, cy = (c[v.ay] - miny_) * scale_;
+    const double ax = (screenX(v, a) - minx_) * scale_, ay = (screenY(v, a) - miny_) * scale_;
+    const double bx = (screenX(v, b) - minx_) * scale_, by = (screenY(v, b) - miny_) * scale_;
+    const double cx = (screenX(v, c) - minx_) * scale_, cy = (screenY(v, c) - miny_) * scale_;
     const double da = v.depthSign * a[v.az], db = v.depthSign * b[v.az], dc = v.depthSign * c[v.az];
     const double denom = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
     if (std::abs(denom) < 1e-9) return;
@@ -272,9 +278,25 @@ bool endsWithNoCase(const std::string& s, const std::string& suffix)
 const std::vector<LineDrawingView>& lineDrawingViews()
 {
   static const std::vector<LineDrawingView> views = {
-    {"Front", 0, 2, 1, +1.0, {0, 1, 0}},   // XZ plane, depth +Y (viewer at -Y)
-    {"Side", 1, 2, 0, -1.0, {1, 0, 0}},     // YZ plane, depth -X (viewer at +X)
-    {"Top", 0, 1, 2, -1.0, {0, 0, 1}},      // XY plane, depth -Z (viewer at +Z)
+    {"Front", 0, 2, 1, +1, +1, +1.0, {0, 1, 0}},  // XZ plane, depth +Y (viewer at -Y)
+    {"Side", 1, 2, 0, +1, +1, -1.0, {1, 0, 0}},   // YZ plane, depth -X (viewer at +X)
+    {"Top", 0, 1, 2, +1, +1, -1.0, {0, 0, 1}},    // XY plane, depth -Z (viewer at +Z)
+  };
+  return views;
+}
+
+const std::vector<LineDrawingView>& standardViews()
+{
+  // Screen frame per view derived from screen_right = cross(viewDir, up), up as
+  // noted. Front/Right/Top match lineDrawingViews(); Back/Left/Bottom mirror the
+  // marked screen axis so a multi-view sheet is laterally consistent.
+  static const std::vector<LineDrawingView> views = {
+    {"Front", 0, 2, 1, +1, +1, +1.0, {0, 1, 0}},   // look +Y, right +X, up +Z
+    {"Back", 0, 2, 1, -1, +1, -1.0, {0, 1, 0}},    // look -Y, right -X (mirror)
+    {"Left", 1, 2, 0, -1, +1, +1.0, {1, 0, 0}},    // look +X, right -Y (mirror)
+    {"Right", 1, 2, 0, +1, +1, -1.0, {1, 0, 0}},   // look -X, right +Y
+    {"Top", 0, 1, 2, +1, +1, -1.0, {0, 0, 1}},     // look -Z, right +X, up +Y
+    {"Bottom", 0, 1, 2, +1, -1, +1.0, {0, 0, 1}},  // look +Z, up -Y (mirror)
   };
   return views;
 }
@@ -288,12 +310,12 @@ std::vector<LineDrawingSeg2D> projectViewEdges(const PolySet& ps, const LineDraw
 
   std::vector<LineDrawingSeg2D> proj;
   auto emit = [&](const Vector3d& p0, const Vector3d& p1) {
-    proj.push_back({p0[v.ax], p0[v.ay], p1[v.ax], p1[v.ay]});
+    proj.push_back({screenX(v, p0), screenY(v, p0), screenX(v, p1), screenY(v, p1)});
   };
   for (const auto& s : segs) {
     if (!depth.valid()) { emit(s.p0, s.p1); continue; }
     // Sample the edge and keep the contiguous visible runs (hidden-line removal).
-    const double dx = s.p1[v.ax] - s.p0[v.ax], dy = s.p1[v.ay] - s.p0[v.ay];
+    const double dx = screenX(v, s.p1) - screenX(v, s.p0), dy = screenY(v, s.p1) - screenY(v, s.p0);
     const double lenPx = std::hypot(dx, dy);
     // Unit screen-space perpendicular of the edge, for the outline (background)
     // test that rescues silhouette edges from self-occlusion.
@@ -307,8 +329,8 @@ std::vector<LineDrawingSeg2D> projectViewEdges(const PolySet& ps, const LineDraw
       const double t = static_cast<double>(i) / n;
       const Vector3d p = s.p0 + t * (s.p1 - s.p0);
       bool vis = depth.visible(p, v);
-      if (!vis && (depth.backgroundToward(p[v.ax], p[v.ay], perpx, perpy) ||
-                   depth.backgroundToward(p[v.ax], p[v.ay], -perpx, -perpy))) {
+      if (!vis && (depth.backgroundToward(screenX(v, p), screenY(v, p), perpx, perpy) ||
+                   depth.backgroundToward(screenX(v, p), screenY(v, p), -perpx, -perpy))) {
         vis = true;  // edge lies on the object's outline against empty space
       }
       if (vis && !runOpen) { runOpen = true; runStart = p; }

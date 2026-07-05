@@ -81,6 +81,42 @@ std::unique_ptr<PolySet> uvSphere(int num_fragments, double r)
   return ps;
 }
 
+// A right-triangle prism: cross-section (0,0)-(4,0)-(0,3) in the XZ plane,
+// extruded along Y from 0 to 2. Asymmetric in X and Z so mirrored views differ.
+std::unique_ptr<PolySet> wedgePrism()
+{
+  auto ps = std::make_unique<PolySet>(3);
+  ps->vertices = {{0, 0, 0}, {4, 0, 0}, {0, 0, 3}, {0, 2, 0}, {4, 2, 0}, {0, 2, 3}};
+  ps->indices.push_back({0, 2, 1});        // y=0 cap
+  ps->indices.push_back({3, 4, 5});        // y=2 cap
+  ps->indices.push_back({0, 1, 4, 3});     // bottom (z=0)
+  ps->indices.push_back({0, 3, 5, 2});     // back (x=0)
+  ps->indices.push_back({1, 2, 5, 4});     // hypotenuse
+  return ps;
+}
+
+double centroidX(const std::vector<LineDrawingSeg2D>& s)
+{
+  double sum = 0; int n = 0;
+  for (const auto& e : s) { sum += e.x0 + e.x1; n += 2; }
+  return n ? sum / n : 0.0;
+}
+double centroidY(const std::vector<LineDrawingSeg2D>& s)
+{
+  double sum = 0; int n = 0;
+  for (const auto& e : s) { sum += e.y0 + e.y1; n += 2; }
+  return n ? sum / n : 0.0;
+}
+void extent(const std::vector<LineDrawingSeg2D>& s, double& w, double& h)
+{
+  double minx = 1e30, maxx = -1e30, miny = 1e30, maxy = -1e30;
+  for (const auto& e : s) {
+    minx = std::min({minx, e.x0, e.x1}); maxx = std::max({maxx, e.x0, e.x1});
+    miny = std::min({miny, e.y0, e.y1}); maxy = std::max({maxy, e.y0, e.y1});
+  }
+  w = maxx - minx; h = maxy - miny;
+}
+
 double svgWidthMm(const std::string& path)
 {
   std::ifstream in(path);
@@ -120,6 +156,31 @@ double maxOutlineGapDeg(const std::vector<LineDrawingSeg2D>& segs)
     if (bins[i % 360]) cur = 0; else if (++cur > best) best = cur;
   }
   return std::min(best, 360);
+}
+
+TEST_CASE("six standard views map the right axes and mirror correctly", "[linedrawing]")
+{
+  auto ps = wedgePrism();
+  const auto& v = standardViews();
+  REQUIRE(v.size() == 6);
+  // Order: Front, Back, Left, Right, Top, Bottom.
+  const auto front = projectViewEdges(*ps, v[0], 20.0);
+  const auto back = projectViewEdges(*ps, v[1], 20.0);
+  const auto left = projectViewEdges(*ps, v[2], 20.0);
+  const auto right = projectViewEdges(*ps, v[3], 20.0);
+  const auto top = projectViewEdges(*ps, v[4], 20.0);
+  const auto bottom = projectViewEdges(*ps, v[5], 20.0);
+  for (const auto* s : {&front, &back, &left, &right, &top, &bottom}) REQUIRE(!s->empty());
+
+  double w, h;
+  extent(front, w, h);  CHECK(w == Catch::Approx(4));  CHECK(h == Catch::Approx(3));  // X,Z
+  extent(right, w, h);  CHECK(w == Catch::Approx(2));  CHECK(h == Catch::Approx(3));  // Y,Z
+  extent(top, w, h);    CHECK(w == Catch::Approx(4));  CHECK(h == Catch::Approx(2));  // X,Y
+
+  // Mirrored pairs negate the mirrored screen axis (raw, unshifted coords).
+  CHECK(centroidX(back) == Catch::Approx(-centroidX(front)));    // Back mirrors X
+  CHECK(centroidX(left) == Catch::Approx(-centroidX(right)));    // Left mirrors Y
+  CHECK(centroidY(bottom) == Catch::Approx(-centroidY(top)));    // Bottom mirrors Y
 }
 
 TEST_CASE("line drawing outline of a sphere is continuous (no HLR dashes)", "[linedrawing]")

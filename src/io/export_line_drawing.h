@@ -18,20 +18,30 @@ class PolySet;
  */
 
 // One orthographic view: which world axes map to the screen right / up
-// directions, which axis is depth (depthSign orients it so smaller = closer to
-// the viewer), and the view direction used for the silhouette test.
+// directions (with a sign so back/left/bottom views mirror correctly), which
+// axis is depth (depthSign orients it so smaller = closer to the viewer), and
+// the view direction used for the silhouette test. Screen coords are
+//   screen_x = sx * world[ax],  screen_y = sy * world[ay].
 struct LineDrawingView {
   const char *name;
   int ax;          // world axis -> screen right (x)
   int ay;          // world axis -> screen up (y)
   int az;          // world axis -> depth
+  double sx;       // sign of screen x (mirror: back/left views)
+  double sy;       // sign of screen y (mirror: bottom view)
   double depthSign;
   Vector3d dir;    // view direction for the silhouette test
 };
 
-// The three standard views (Front, Side, Top). Same convention as the GL ortho
-// views and MainWindow::measureAxes so dimension projection stays consistent.
+// The default three views (Front, Side, Top) — the historical set, kept for the
+// dimension projection vocabulary (proj=front|side|top).
 const std::vector<LineDrawingView>& lineDrawingViews();
+
+// The six standard orthographic views (Front, Back, Left, Right, Top, Bottom),
+// in that order. Front/Right/Top share their frame with the default set; Back,
+// Left and Bottom mirror the appropriate screen axis so a multi-view sheet reads
+// correctly (first-angle / third-angle layout is applied by the caller).
+const std::vector<LineDrawingView>& standardViews();
 
 // A projected 2D segment in a view's screen plane: coordinates are the raw
 // world-plane values sx = world[ax], sy = world[ay] (millimetres, y-up), NOT
