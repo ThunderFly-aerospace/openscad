@@ -28,6 +28,7 @@ class NodeVisitor : public BaseVisitor,
                     public Visitor<class ColorNode>,
                     public Visitor<class CameraNode>,
                     public Visitor<class DimrefNode>,
+                    public Visitor<class SectionNode>,
                     public Visitor<class OffsetNode>
 {
 public:
@@ -119,6 +120,13 @@ public:
   // group so it stays invisible in preview/render/export and does not break
   // measurement.
   Response visit(State& state, const DimrefNode& node) override
+  {
+    return visit(state, (const AbstractNode&)node);
+  }
+  // section() is a cutting-plane marker without geometry: treat it like an empty
+  // group so it stays invisible in preview/render/export and does not break
+  // measurement.
+  Response visit(State& state, const SectionNode& node) override
   {
     return visit(state, (const AbstractNode&)node);
   }

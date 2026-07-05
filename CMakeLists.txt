@@ -1008,6 +1008,7 @@ set(CORE_SOURCES
   src/core/CSGTreeEvaluator.cc
   src/core/CameraNode.cc
   src/core/DimrefNode.cc
+  src/core/SectionNode.cc
   src/core/CgalAdvNode.cc
   src/core/Children.cc
   src/core/ColorNode.cc
