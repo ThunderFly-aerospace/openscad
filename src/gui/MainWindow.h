@@ -182,7 +182,7 @@ private:
   // dock, pending the second. Empty = no pending pick.
   QString pendingDimAnchor;
   // Pixels per model unit (mm) in each ortho view, for offset px<->mm mapping.
-  double viewPxPerMm[3]{1.0, 1.0, 1.0};
+  double viewPxPerMm[6]{1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
 
 protected:
   void closeEvent(QCloseEvent *event) override;

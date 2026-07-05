@@ -211,6 +211,8 @@ public:
   void clearViews();
   // Drawing scale as drawing-mm per model-mm (1/denominator from the spinbox).
   double exportScale() const;
+  // Is standard view `viewIndex` (0..5 = Front/Back/Left/Right/Top/Bottom) shown?
+  bool isViewSelected(int viewIndex) const;
 
 signals:
   // Emitted when an anchor is clicked in one of the views (view index + name).
@@ -230,6 +232,9 @@ signals:
   void jumpToSource(int line);
   // Emitted when the user clicks "Materialize kvóty".
   void materializeRequested();
+  // Emitted when the set of shown views changes (a view checkbox toggled), so the
+  // owner can reproject only the now-visible views.
+  void viewSelectionChanged();
 
 private slots:
   void saveSheet();
@@ -238,7 +243,12 @@ private slots:
   void setShowLeaders(bool show);
 
 private:
+  // Enable/disable the export + save buttons based on whether any shown view has
+  // content.
+  void updateExportEnabled();
+
   QVector<OrthoViewWidget *> viewWidgets;
+  QVector<class QGroupBox *> viewBoxes;  // parallel to viewWidgets; checkable = shown
   QLabel *placeholder;
   QPushButton *saveButton;
   QPushButton *materializeButton;

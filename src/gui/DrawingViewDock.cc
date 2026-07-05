@@ -636,8 +636,21 @@ namespace {
 // Grid position (row, col) for each ortho view, laid out like a drawing sheet:
 //   nárys (front)  | bokorys (side)
 //   půdorys (top)  |
-constexpr int kViewCount = 3;
-constexpr int kGridPos[kViewCount][2] = {{0, 0}, {0, 1}, {1, 0}};
+// The six standard views, order matching io/export_line_drawing.cc standardViews():
+// Front, Back, Left, Right, Top, Bottom. Grid positions follow first-angle (ISO-E)
+// projection around the centred front view: top view below, bottom above, left
+// view to the right, right view to the left, back to the far right.
+constexpr int kViewCount = 6;
+constexpr int kGridPos[kViewCount][2] = {
+  {1, 1},  // Front  (centre)
+  {1, 3},  // Back   (far right)
+  {1, 2},  // Left   (right of front)
+  {1, 0},  // Right  (left of front)
+  {2, 1},  // Top    (below front)
+  {0, 1},  // Bottom (above front)
+};
+// Default-visible set: Front, Right, Top (the historical three).
+constexpr bool kViewDefault[kViewCount] = {true, false, false, true, true, false};
 }  // namespace
 
 DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
@@ -651,16 +664,28 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   grid->setContentsMargins(0, 0, 0, 0);
 
   const char *defaultTitles[kViewCount] = {
-    QT_TR_NOOP("Front (nárys)"), QT_TR_NOOP("Side (bokorys)"), QT_TR_NOOP("Top (půdorys)")};
+    QT_TR_NOOP("Front (nárys)"), QT_TR_NOOP("Back (zadní)"), QT_TR_NOOP("Left (levý bok)"),
+    QT_TR_NOOP("Right (pravý bok)"), QT_TR_NOOP("Top (půdorys)"), QT_TR_NOOP("Bottom (spodní)")};
 
   for (int i = 0; i < kViewCount; ++i) {
     auto *box = new QGroupBox(tr(defaultTitles[i]), sheet);
+    // Checkable title = per-view on/off. Unchecked hides the view (the empty
+    // titled box stays so the first-angle grid keeps its alignment).
+    box->setCheckable(true);
+    box->setChecked(kViewDefault[i]);
     auto *boxLayout = new QVBoxLayout(box);
     boxLayout->setContentsMargins(2, 2, 2, 2);
     auto *view = new OrthoViewWidget(box);
+    view->setVisible(kViewDefault[i]);
     boxLayout->addWidget(view);
     grid->addWidget(box, kGridPos[i][0], kGridPos[i][1]);
     this->viewWidgets.append(view);
+    this->viewBoxes.append(box);
+    connect(box, &QGroupBox::toggled, this, [this, i, view](bool on) {
+      view->setVisible(on);
+      emit viewSelectionChanged();
+      this->updateExportEnabled();
+    });
 
     connect(view, &OrthoViewWidget::anchorClicked, this,
             [this, i](const QString& name) { emit anchorClicked(i, name); });
@@ -680,10 +705,8 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
             &DrawingViewDock::dimensionDoubleClicked);
     connect(view, &OrthoViewWidget::jumpToSource, this, &DrawingViewDock::jumpToSource);
   }
-  grid->setRowStretch(0, 1);
-  grid->setRowStretch(1, 1);
-  grid->setColumnStretch(0, 1);
-  grid->setColumnStretch(1, 1);
+  for (int r = 0; r < 3; ++r) grid->setRowStretch(r, 1);
+  for (int c = 0; c < 4; ++c) grid->setColumnStretch(c, 1);
 
   this->placeholder = new QLabel(tr("Render (F5) to generate orthographic views."), central);
   this->placeholder->setAlignment(Qt::AlignCenter);
@@ -789,9 +812,20 @@ void DrawingViewDock::setViews(const QList<OrthoViewData>& newViews, const QStri
     }
   }
 
+  updateExportEnabled();
+}
+
+bool DrawingViewDock::isViewSelected(int viewIndex) const
+{
+  return viewIndex >= 0 && viewIndex < this->viewBoxes.size() &&
+         this->viewBoxes.at(viewIndex)->isChecked();
+}
+
+void DrawingViewDock::updateExportEnabled()
+{
   bool any = false;
-  for (const auto& v : this->views) {
-    if (v.valid()) any = true;
+  for (int i = 0; i < this->views.size(); ++i) {
+    if (isViewSelected(i) && this->views.at(i).valid()) any = true;
   }
   this->saveButton->setEnabled(any);
   this->exportButton->setEnabled(any);
@@ -810,11 +844,12 @@ void DrawingViewDock::saveSheet()
     this, tr("Save Drawing Sheet"), "drawing.png", tr("PNG image (*.png)"));
   if (filename.isEmpty()) return;
 
-  // Compose the three views (with overlays) side by side by grabbing each widget.
+  // Compose the shown views (with overlays) side by side by grabbing each widget.
   QVector<QPixmap> shots;
   int totalW = 0, maxH = 0;
-  for (auto *view : this->viewWidgets) {
-    QPixmap shot = view->grab();
+  for (int i = 0; i < this->viewWidgets.size(); ++i) {
+    if (!isViewSelected(i)) continue;
+    QPixmap shot = this->viewWidgets.at(i)->grab();
     shots.append(shot);
     totalW += shot.width();
     maxH = std::max(maxH, shot.height());
@@ -835,9 +870,8 @@ void DrawingViewDock::saveSheet()
 void DrawingViewDock::exportDrawing()
 {
   bool any = false;
-  for (const auto& v : this->views) {
-    if (v.valid()) any = true;
-  }
+  for (int i = 0; i < this->views.size(); ++i)
+    if (isViewSelected(i) && this->views.at(i).valid()) any = true;
   if (!any) return;
 
   const double scale = exportScale();  // drawing-mm per model-mm
@@ -856,8 +890,9 @@ void DrawingViewDock::exportDrawing()
   // Vertical layout: title + view stacked, sizes in drawing-mm (geometry * scale).
   QVector<double> viewYmm;
   double sheetWmm = 0.0, sheetHmm = marginMm;
-  for (const auto& v : this->views) {
-    if (!v.valid()) { viewYmm << 0; continue; }
+  for (int i = 0; i < this->views.size(); ++i) {
+    const auto& v = this->views.at(i);
+    if (!v.valid() || !isViewSelected(i)) { viewYmm << 0; continue; }
     const double vh = v.sizeMm.height() * scale;
     sheetHmm += titleMm;
     viewYmm << sheetHmm;
@@ -875,7 +910,7 @@ void DrawingViewDock::exportDrawing()
   std::vector<std::pair<QPointF, QString>> labels, titles;
   for (int i = 0; i < this->views.size(); ++i) {
     const auto& v = this->views[i];
-    if (!v.valid()) continue;
+    if (!v.valid() || !isViewSelected(i)) continue;
     const double oxmm = marginMm, oymm = viewYmm[i];
     auto map = [&](const QPointF& mp) {
       return QPointF(oxmm + mp.x() * scale, oymm + mp.y() * scale);  // -> drawing-mm

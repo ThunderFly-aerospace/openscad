@@ -3830,6 +3830,9 @@ void MainWindow::setupDrawingDock()
   // Rotating a radial (⌀/R) dimension writes angle= back on release.
   QObject::connect(this->drawingDock, &DrawingViewDock::dimensionAngleChanged, this,
                    &MainWindow::onDimensionAngleChanged);
+  // Toggling which standard views are shown reprojects (mesh stays cached).
+  QObject::connect(this->drawingDock, &DrawingViewDock::viewSelectionChanged, this,
+                   [this] { refreshDrawingViews(); });
   // Dragging a label writes laboff= back on release.
   QObject::connect(this->drawingDock, &DrawingViewDock::labelOffsetChanged, this,
                    &MainWindow::onLabelOffsetChanged);
@@ -4045,7 +4048,7 @@ void MainWindow::onDimensionOffsetChanged(int viewIndex, int id, double offsetPx
   if (!finished || id < 0 || !activeEditor) return;
 
   const double pxPerMm =
-    (viewIndex >= 0 && viewIndex < 3 && this->viewPxPerMm[viewIndex] > 1e-9)
+    (viewIndex >= 0 && viewIndex < 6 && this->viewPxPerMm[viewIndex] > 1e-9)
       ? this->viewPxPerMm[viewIndex]
       : 1.0;
   const double offsetMm = offsetPx / pxPerMm;
@@ -4075,7 +4078,7 @@ void MainWindow::onLabelOffsetChanged(int viewIndex, int id, double alongPx, dou
   if (!finished || id < 0 || !activeEditor) return;
 
   const double pxPerMm =
-    (viewIndex >= 0 && viewIndex < 3 && this->viewPxPerMm[viewIndex] > 1e-9)
+    (viewIndex >= 0 && viewIndex < 6 && this->viewPxPerMm[viewIndex] > 1e-9)
       ? this->viewPxPerMm[viewIndex]
       : 1.0;
   const double alongMm = alongPx / pxPerMm;
@@ -4121,8 +4124,8 @@ void MainWindow::onDrawingAnchorClicked(int viewIndex, const QString& name)
 {
   if (name.isEmpty() || !activeEditor) return;
 
-  static const char *const keys[3] = {"front", "side", "top"};
-  const QString proj = keys[std::clamp(viewIndex, 0, 2)];
+  static const char *const keys[6] = {"front", "back", "left", "right", "top", "bottom"};
+  const QString proj = keys[std::clamp(viewIndex, 0, 5)];
 
   // Append a // @dim line at the end of the document (the "list of pairs") and
   // reproject: an @dim line is a comment, so the geometry (and dimref world
@@ -4201,8 +4204,11 @@ QString normalizeProj(const QString& raw)
 {
   const QString p = raw.trimmed().toLower();
   if (p == "front" || p == "narys" || p == "nárys") return "front";
-  if (p == "side" || p == "bokorys") return "side";
+  if (p == "back" || p == "rear" || p == "zadni" || p == "zadní") return "back";
+  if (p == "left" || p == "levy" || p == "levý") return "left";
+  if (p == "right" || p == "side" || p == "bokorys" || p == "pravy" || p == "pravý") return "right";
   if (p == "top" || p == "pudorys" || p == "půdorys") return "top";
+  if (p == "bottom" || p == "spodni" || p == "spodní") return "bottom";
   return "";
 }
 
@@ -4211,9 +4217,11 @@ QString normalizeProj(const QString& raw)
 // orthoViews). Defaults to front when proj is unspecified.
 void measureAxes(const QString& proj, int& hAxis, int& vAxis)
 {
-  if (proj == "top") { hAxis = 0; vAxis = 1; }
-  else if (proj == "side") { hAxis = 1; vAxis = 2; }
-  else { hAxis = 0; vAxis = 2; }  // front (and default)
+  // The screen sign (mirroring) does not matter here: measure lengths use the
+  // absolute component, so only the axis pair per projection group is needed.
+  if (proj == "top" || proj == "bottom") { hAxis = 0; vAxis = 1; }        // XY
+  else if (proj == "side" || proj == "left" || proj == "right") { hAxis = 1; vAxis = 2; }  // YZ
+  else { hAxis = 0; vAxis = 2; }  // front / back (and default): XZ
 }
 
 // Measured length of a dimension per its measure mode, relative to its
@@ -4623,19 +4631,23 @@ void MainWindow::refreshDrawingViews()
   // view's bounding-box top-left) — the same convention the old raster overlay
   // used, so the dimension/dragging math is unchanged.
   const double scale = this->drawingDock->exportScale();
-  const std::vector<LineDrawingView>& views = lineDrawingViews();
-  const char *const titleUtf8[3] = {"Front (nárys)", "Side (bokorys)", "Top (půdorys)"};
+  const std::vector<LineDrawingView>& views = standardViews();
+  // Titles parallel to standardViews(): Front, Back, Left, Right, Top, Bottom.
+  const char *const titleUtf8[6] = {"Front (nárys)", "Back (zadní)", "Left (levý bok)",
+                                    "Right (pravý bok)", "Top (půdorys)", "Bottom (spodní)"};
 
   QList<OrthoViewData> viewData;
   QStringList titles;
   for (int vi = 0; vi < static_cast<int>(views.size()); ++vi) {
     const LineDrawingView& view = views[vi];
-    const QString key = QString(view.name).toLower();  // "front" | "side" | "top"
+    const QString key = QString(view.name).toLower();  // front|back|left|right|top|bottom
     this->viewPxPerMm[vi] = 1.0;  // dock coords are model-mm now (dim write-back)
     OrthoViewData vd;
     vd.title = QString::fromUtf8(titleUtf8[vi]);
     vd.scale = scale;
 
+    // Only project the views the dock currently shows (mesh stays cached).
+    if (!this->drawingDock->isViewSelected(vi)) { viewData.append(vd); titles.append(vd.title); continue; }
     const auto raw = projectViewEdges(*ps, view, 20.0);
     if (!raw.empty()) {
       double minSx = raw[0].x0, maxSx = raw[0].x0, minSy = raw[0].y0, maxSy = raw[0].y0;
@@ -4647,7 +4659,9 @@ void MainWindow::refreshDrawingViews()
         vd.sizeMm = QSizeF(maxSx - minSx, maxSy - minSy);
         // world-plane (sx=world[ax], sy=world[ay], y-up) -> view-local mm, y-down
         auto toLocal = [&](double sx, double sy) { return QPointF(sx - minSx, maxSy - sy); };
-        auto proj = [&](const Eigen::Vector3d& P) { return toLocal(P[view.ax], P[view.ay]); };
+        auto proj = [&](const Eigen::Vector3d& P) {
+          return toLocal(view.sx * P[view.ax], view.sy * P[view.ay]);
+        };
 
         for (const auto& r : raw)
           vd.edges.append(QLineF(toLocal(r.x0, r.y0), toLocal(r.x1, r.y1)));
