@@ -651,6 +651,8 @@ constexpr int kGridPos[kViewCount][2] = {
 };
 // Default-visible set: Front, Right, Top (the historical three).
 constexpr bool kViewDefault[kViewCount] = {true, false, false, true, true, false};
+// Filename slug per view (for the "separate files" export).
+const char *const kViewSlug[kViewCount] = {"front", "back", "left", "right", "top", "bottom"};
 }  // namespace
 
 DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
@@ -721,6 +723,12 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->showLeadersCheck->setToolTip(
     tr("Draw a thin leader from a dragged-away label to its dimension line."));
 
+  this->separateFilesCheck = new QCheckBox(tr("Separate files"), central);
+  this->separateFilesCheck->setChecked(false);
+  this->separateFilesCheck->setToolTip(
+    tr("Export each shown view to its own file (name_front.svg, …) instead of "
+       "one composed sheet."));
+
   this->materializeButton = new QPushButton(tr("Materialize kvóty"), central);
   this->materializeButton->setToolTip(
     tr("Write a // @dim line for each kvota= pair, making them editable."));
@@ -753,6 +761,7 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   checkLayout->setContentsMargins(0, 0, 0, 0);
   checkLayout->addWidget(this->showRefsCheck);
   checkLayout->addWidget(this->showLeadersCheck);
+  checkLayout->addWidget(this->separateFilesCheck);
   checkLayout->addStretch(1);
   checkLayout->addWidget(this->scaleSpin);
   checkLayout->addWidget(this->exportButton);
@@ -887,32 +896,19 @@ void DrawingViewDock::exportDrawing()
   const double marginMm = 10.0, gapMm = 12.0, titleMm = 5.0;
   const double fontMm = 3.0, edgeMm = 0.3, dimMm = 0.25, witMm = 0.15, arrowMm = 2.5;
 
-  // Vertical layout: title + view stacked, sizes in drawing-mm (geometry * scale).
-  QVector<double> viewYmm;
-  double sheetWmm = 0.0, sheetHmm = marginMm;
-  for (int i = 0; i < this->views.size(); ++i) {
-    const auto& v = this->views.at(i);
-    if (!v.valid() || !isViewSelected(i)) { viewYmm << 0; continue; }
-    const double vh = v.sizeMm.height() * scale;
-    sheetHmm += titleMm;
-    viewYmm << sheetHmm;
-    sheetHmm += vh + gapMm;
-    sheetWmm = std::max(sheetWmm, v.sizeMm.width() * scale);
-  }
-  sheetWmm += 2 * marginMm;
-  sheetHmm += marginMm;
-
-  // Build the whole sheet once as primitives in drawing-mm (y-down, origin at the
-  // top-left of the sheet). Both the raster/vector (QPainter) and the DXF writer
-  // consume the same primitives, so all three formats are truly WYSIWYG.
-  std::vector<QLineF> edgeSegs, dimSegs, witSegs;
-  std::vector<QPolygonF> arrows;
-  std::vector<std::pair<QPointF, QString>> labels, titles;
-  for (int i = 0; i < this->views.size(); ++i) {
-    const auto& v = this->views[i];
-    if (!v.valid() || !isViewSelected(i)) continue;
-    const double oxmm = marginMm, oymm = viewYmm[i];
-    auto map = [&](const QPointF& mp) {
+  struct Placement { int idx; double ox, oy; };
+  // Build the placed views' primitives (drawing-mm, y-down) and render to `path`.
+  // Both the QPainter (SVG/PDF) and the DXF writer consume the same primitives, so
+  // every format is truly WYSIWYG.
+  auto renderToFile = [&](const QVector<Placement>& places, double sheetWmm, double sheetHmm,
+                          const QString& path) {
+    std::vector<QLineF> edgeSegs, dimSegs, witSegs;
+    std::vector<QPolygonF> arrows;
+    std::vector<std::pair<QPointF, QString>> labels, titles;
+    for (const auto& pl : places) {
+      const auto& v = this->views[pl.idx];
+      const double oxmm = pl.ox, oymm = pl.oy;
+      auto map = [&](const QPointF& mp) {
       return QPointF(oxmm + mp.x() * scale, oymm + mp.y() * scale);  // -> drawing-mm
     };
     titles.emplace_back(QPointF(oxmm, oymm - 1.5), v.title);
@@ -985,8 +981,8 @@ void DrawingViewDock::exportDrawing()
     }
   }
 
-  if (filename.endsWith(".dxf", Qt::CaseInsensitive)) {
-    std::ofstream out(filename.toStdString());
+  if (path.endsWith(".dxf", Qt::CaseInsensitive)) {
+    std::ofstream out(path.toStdString());
     if (!out.is_open()) return;
     auto Y = [&](double y) { return sheetHmm - y; };  // DXF is y-up
     auto line = [&](const QPointF& a, const QPointF& b) {
@@ -1059,20 +1055,65 @@ void DrawingViewDock::exportDrawing()
     }
   };
 
-  if (filename.endsWith(".pdf", Qt::CaseInsensitive)) {
-    QPdfWriter pdf(filename);
-    pdf.setResolution(static_cast<int>(dpi));
-    pdf.setPageSize(QPageSize(QSizeF(sheetWmm, sheetHmm), QPageSize::Millimeter));
-    pdf.setPageMargins(QMarginsF(0, 0, 0, 0));
-    QPainter p(&pdf);
-    paintSheet(p);
+  if (path.endsWith(".pdf", Qt::CaseInsensitive)) {
+      QPdfWriter pdf(path);
+      pdf.setResolution(static_cast<int>(dpi));
+      pdf.setPageSize(QPageSize(QSizeF(sheetWmm, sheetHmm), QPageSize::Millimeter));
+      pdf.setPageMargins(QMarginsF(0, 0, 0, 0));
+      QPainter p(&pdf);
+      paintSheet(p);
+    } else {
+      QSvgGenerator svg;
+      svg.setFileName(path);
+      svg.setResolution(static_cast<int>(dpi));
+      svg.setSize(QSize(sheetWpx, sheetHpx));
+      svg.setViewBox(QRect(0, 0, sheetWpx, sheetHpx));
+      QPainter p(&svg);
+      paintSheet(p);
+    }
+  };  // renderToFile
+
+  // Selected, non-empty views.
+  QVector<int> sel;
+  for (int i = 0; i < this->views.size(); ++i)
+    if (isViewSelected(i) && this->views.at(i).valid()) sel.push_back(i);
+  if (sel.isEmpty()) return;
+
+  if (this->separateFilesCheck->isChecked()) {
+    // One file per view (name_slug.ext), each a single-view sheet.
+    for (int idx : sel) {
+      const double w = this->views[idx].sizeMm.width() * scale;
+      const double h = this->views[idx].sizeMm.height() * scale;
+      QString path = filename;
+      const int dot = path.lastIndexOf('.');
+      const QString slug = "_" + QString(kViewSlug[idx]);
+      if (dot >= 0) path.insert(dot, slug); else path += slug;
+      renderToFile({{idx, marginMm, marginMm + titleMm}}, w + 2 * marginMm,
+                   h + titleMm + 2 * marginMm, path);
+    }
   } else {
-    QSvgGenerator svg;
-    svg.setFileName(filename);
-    svg.setResolution(static_cast<int>(dpi));
-    svg.setSize(QSize(sheetWpx, sheetHpx));
-    svg.setViewBox(QRect(0, 0, sheetWpx, sheetHpx));
-    QPainter p(&svg);
-    paintSheet(p);
+    // First-angle (ISO-E) grid. Same-axis views share extents, so centring each
+    // view in its (equal-width/height) cell aligns them: top under front, side
+    // views level with front, etc.
+    double colW[4] = {0, 0, 0, 0}, rowH[3] = {0, 0, 0};
+    for (int idx : sel) {
+      const int r = kGridPos[idx][0], c = kGridPos[idx][1];
+      colW[c] = std::max(colW[c], this->views[idx].sizeMm.width() * scale);
+      rowH[r] = std::max(rowH[r], this->views[idx].sizeMm.height() * scale);
+    }
+    double colX[4], rowY[3], x = marginMm, y = marginMm;
+    for (int c = 0; c < 4; ++c) { colX[c] = x; if (colW[c] > 0) x += colW[c] + gapMm; }
+    for (int r = 0; r < 3; ++r) { rowY[r] = y; if (rowH[r] > 0) y += titleMm + rowH[r] + gapMm; }
+    const double sheetWmm = std::max(2 * marginMm, x - gapMm + marginMm);
+    const double sheetHmm = std::max(2 * marginMm, y - gapMm + marginMm);
+    QVector<Placement> places;
+    for (int idx : sel) {
+      const int r = kGridPos[idx][0], c = kGridPos[idx][1];
+      const double w = this->views[idx].sizeMm.width() * scale;
+      const double h = this->views[idx].sizeMm.height() * scale;
+      places.push_back({idx, colX[c] + (colW[c] - w) / 2.0,
+                        rowY[r] + titleMm + (rowH[r] - h) / 2.0});
+    }
+    renderToFile(places, sheetWmm, sheetHmm, filename);
   }
 }

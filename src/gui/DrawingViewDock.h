@@ -255,6 +255,7 @@ private:
   QPushButton *exportButton;
   QCheckBox *showRefsCheck;
   QCheckBox *showLeadersCheck;
+  QCheckBox *separateFilesCheck;
   QDoubleSpinBox *scaleSpin;
   QList<OrthoViewData> views;
 };
