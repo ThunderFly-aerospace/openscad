@@ -55,6 +55,24 @@ struct LineDrawingSeg2D {
 std::vector<LineDrawingSeg2D> projectViewEdges(const PolySet& ps, const LineDrawingView& v,
                                                double creaseAngleDeg);
 
+// A section view: the mesh cut by a plane, projected along the plane normal, with
+// the cut face hatched. `edges` are the visible feature edges of the solid behind
+// the cut; `hatch` are the 45° fill lines over the cut face. All 2D coordinates
+// are in the section's local screen plane (millimetres, y-up, unshifted).
+struct SectionDrawing {
+  std::vector<LineDrawingSeg2D> edges;
+  std::vector<LineDrawingSeg2D> hatch;
+  bool valid{false};
+};
+
+// Cut `ps` with the plane through `worldFrame`'s origin whose normal is the frame's
+// local +Z (the viewing direction), keep the far half (near half if `flip`), and
+// project it along +Z. `hatchSpacingMm` is the hatch line spacing in model units
+// (<=0 = auto from the cut size). Needs the Manifold backend; returns an invalid
+// result otherwise.
+SectionDrawing projectSection(const PolySet& ps, const Transform3d& worldFrame, bool flip,
+                              double creaseAngleDeg, double hatchSpacingMm);
+
 /*!
    Write a compact vector line drawing of `ps` to `path`: the three orthographic
    views laid out like a technical sheet. `creaseAngleDeg` is the dihedral

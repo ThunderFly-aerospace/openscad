@@ -1,6 +1,7 @@
 #include "io/export_line_drawing.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <fstream>
@@ -12,6 +13,12 @@
 #include "geometry/FeatureEdges.h"
 #include "geometry/PolySet.h"
 #include "geometry/linalg.h"
+
+#ifdef ENABLE_MANIFOLD
+#include "geometry/manifold/ManifoldGeometry.h"
+#include "geometry/manifold/manifoldutils.h"
+#include "manifold/manifold.h"
+#endif
 
 namespace {
 
@@ -340,6 +347,97 @@ std::vector<LineDrawingSeg2D> projectViewEdges(const PolySet& ps, const LineDraw
     if (runOpen) emit(runStart, prev);
   }
   return proj;
+}
+
+namespace {
+// Clip the 45° line {x - y = c} to triangle (a,b,c2) and, if it crosses, append
+// the interior segment to `out`.
+void hatchTriangle(const std::array<double, 2>& a, const std::array<double, 2>& b,
+                   const std::array<double, 2>& c2, double cval, std::vector<LineDrawingSeg2D>& out)
+{
+  const std::array<std::array<double, 2>, 3> tri = {a, b, c2};
+  std::array<double, 2> hit[3];
+  int nh = 0;
+  for (int e = 0; e < 3 && nh < 3; ++e) {
+    const auto& p = tri[e];
+    const auto& q = tri[(e + 1) % 3];
+    const double kp = p[0] - p[1], kq = q[0] - q[1];
+    const double denom = kq - kp;
+    if (std::abs(denom) < 1e-12) continue;  // edge parallel to the hatch line
+    const double t = (cval - kp) / denom;
+    if (t < -1e-9 || t > 1.0 + 1e-9) continue;
+    hit[nh++] = {p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])};
+  }
+  if (nh < 2) return;
+  // Take the two most separated hits (guards against a vertex-grazing third hit).
+  int i0 = 0, i1 = 1;
+  double best = -1;
+  for (int i = 0; i < nh; ++i)
+    for (int j = i + 1; j < nh; ++j) {
+      const double d = std::hypot(hit[i][0] - hit[j][0], hit[i][1] - hit[j][1]);
+      if (d > best) { best = d; i0 = i; i1 = j; }
+    }
+  if (best < 1e-9) return;
+  out.push_back({hit[i0][0], hit[i0][1], hit[i1][0], hit[i1][1]});
+}
+}  // namespace
+
+SectionDrawing projectSection(const PolySet& ps, const Transform3d& worldFrame, bool flip,
+                              double creaseAngleDeg, double hatchSpacingMm)
+{
+  SectionDrawing out;
+#ifdef ENABLE_MANIFOLD
+  // Move the mesh into the section frame: cut plane -> z=0, view along +Z.
+  const Transform3d L = worldFrame.inverse();
+  PolySet local(3);
+  local.vertices.reserve(ps.vertices.size());
+  for (const auto& v : ps.vertices) local.vertices.push_back(L * v);
+  local.indices = ps.indices;
+
+  auto mg = ManifoldUtils::createManifoldFromPolySet(local);
+  if (!mg) return out;
+  // Keep the half the +Z view looks onto (z >= 0); flip keeps the near half.
+  // TrimByPlane(normal) keeps the half on the negative-normal side, so +Z keeps z>=0.
+  const double s = flip ? -1.0 : 1.0;
+  manifold::Manifold trimmed = mg->getManifold().TrimByPlane(manifold::vec3(0, 0, s), 0.0);
+  if (trimmed.IsEmpty()) return out;
+  auto cutPs = ManifoldGeometry(trimmed).toPolySet();
+  if (!cutPs || cutPs->vertices.empty()) return out;
+
+  // Project like a +Z view (screen x=X, y=Y, depth +Z: smaller z nearer).
+  const LineDrawingView view{"Section", 0, 1, 2, +1, +1, +1.0, {0, 0, 1}};
+  out.edges = projectViewEdges(*cutPs, view, creaseAngleDeg);
+
+  // Hatch the cut face (faces lying on z=0). Spacing auto = cut size / 18.
+  double minx = 1e30, maxx = -1e30, miny = 1e30, maxy = -1e30;
+  for (const auto& e : out.edges) {
+    minx = std::min({minx, e.x0, e.x1}); maxx = std::max({maxx, e.x0, e.x1});
+    miny = std::min({miny, e.y0, e.y1}); maxy = std::max({maxy, e.y0, e.y1});
+  }
+  const double diag = std::hypot(maxx - minx, maxy - miny);
+  const double spacing = hatchSpacingMm > 0 ? hatchSpacingMm : std::max(diag / 18.0, 1e-3);
+  const double dc = spacing * std::sqrt(2.0);  // Δ(x−y) between adjacent 45° lines
+  const double zEps = std::max(1e-4, diag * 1e-4);
+  for (const auto& face : cutPs->indices) {
+    for (size_t i = 1; i + 1 < face.size(); ++i) {
+      const int ia = face[0], ib = face[i], ic = face[i + 1];
+      if (ia < 0 || ib < 0 || ic < 0) continue;
+      const Vector3d& A = cutPs->vertices[ia];
+      const Vector3d& B = cutPs->vertices[ib];
+      const Vector3d& C = cutPs->vertices[ic];
+      if (std::abs(A.z()) > zEps || std::abs(B.z()) > zEps || std::abs(C.z()) > zEps) continue;
+      const std::array<double, 2> a{A.x(), A.y()}, b{B.x(), B.y()}, c{C.x(), C.y()};
+      double kmin = std::min({a[0] - a[1], b[0] - b[1], c[0] - c[1]});
+      double kmax = std::max({a[0] - a[1], b[0] - b[1], c[0] - c[1]});
+      for (double cval = std::ceil(kmin / dc) * dc; cval <= kmax; cval += dc)
+        hatchTriangle(a, b, c, cval, out.hatch);
+    }
+  }
+  out.valid = !out.edges.empty();
+#else
+  (void)ps; (void)worldFrame; (void)flip; (void)creaseAngleDeg; (void)hatchSpacingMm;
+#endif
+  return out;
 }
 
 bool exportLineDrawing(const PolySet& ps, double creaseAngleDeg, const std::string& path,

@@ -13,6 +13,7 @@
 
 #include "geometry/PolySet.h"
 #include "io/export_line_drawing.h"
+#include "platform/PlatformUtils.h"
 
 namespace {
 
@@ -156,6 +157,50 @@ double maxOutlineGapDeg(const std::vector<LineDrawingSeg2D>& segs)
     if (bins[i % 360]) cur = 0; else if (++cur > best) best = cur;
   }
   return std::min(best, 360);
+}
+
+// A stepped solid: a 10x10 slab z in [0,3], plus a 4x4 tower z in [3,6], both
+// centred on the origin in X/Y. The cross-section area differs above/below z=3.
+std::unique_ptr<PolySet> steppedBox()
+{
+  auto box = [](PolySet& ps, double hx, double hy, double z0, double z1) {
+    const int b = static_cast<int>(ps.vertices.size());
+    ps.vertices.insert(ps.vertices.end(), {{-hx, -hy, z0}, {hx, -hy, z0}, {hx, hy, z0},
+                                           {-hx, hy, z0}, {-hx, -hy, z1}, {hx, -hy, z1},
+                                           {hx, hy, z1}, {-hx, hy, z1}});
+    const int f[6][4] = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+                         {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+    for (auto& q : f) ps.indices.push_back({b + q[0], b + q[1], b + q[2], b + q[3]});
+  };
+  auto ps = std::make_unique<PolySet>(3);
+  box(*ps, 5, 5, 0, 3);   // wide slab
+  box(*ps, 2, 2, 3, 6);   // narrow tower
+  return ps;
+}
+
+TEST_CASE("section view cuts, projects and hatches", "[linedrawing][section]")
+{
+  // The Manifold backend resolves resource paths lazily; give it an app path.
+  PlatformUtils::registerApplicationPath("/home/user/openscad/build");
+  auto ps = steppedBox();
+  // Cutting plane at world z=3 (frame origin there, local +Z = world +Z).
+  Transform3d frame = Transform3d::Identity();
+  frame.translation() = Vector3d(0, 0, 3);
+
+  // flip=false keeps the far half (z >= 3) = the 4x4 tower -> cap 4x4.
+  const auto far = projectSection(*ps, frame, /*flip=*/false, 20.0, /*hatch=*/1.0);
+  REQUIRE(far.valid);
+  double w, h; extent(far.edges, w, h);
+  CHECK(w == Catch::Approx(4).margin(0.2));
+  CHECK(h == Catch::Approx(4).margin(0.2));
+  CHECK(!far.hatch.empty());  // cut face is hatched
+
+  // flip=true keeps the near half (z <= 3) = the 10x10 slab -> cap 10x10.
+  const auto near = projectSection(*ps, frame, /*flip=*/true, 20.0, /*hatch=*/1.0);
+  REQUIRE(near.valid);
+  extent(near.edges, w, h);
+  CHECK(w == Catch::Approx(10).margin(0.2));
+  CHECK(h == Catch::Approx(10).margin(0.2));
 }
 
 TEST_CASE("six standard views map the right axes and mirror correctly", "[linedrawing]")
