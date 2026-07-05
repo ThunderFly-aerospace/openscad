@@ -243,6 +243,43 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
     painter.drawLine(mapToWidget(e.p1()), mapToWidget(e.p2()));
   }
 
+  // Cutting-plane lines (section markers seen edge-on in this view): a thick chain
+  // line across the view with arrowheads and the section letter at both ends.
+  for (const auto& sl : this->data.sectionLines) {
+    const QPointF a = mapToWidget(sl.p0), b = mapToWidget(sl.p1);
+    QPen chain(QColor(20, 20, 20));
+    chain.setWidthF(std::max(0.8, absPx(0.5)));
+    chain.setStyle(Qt::DashDotLine);
+    painter.setPen(chain);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawLine(a, b);
+    const double s = std::max(5.0, absPx(3.0));
+    QPointF ad = sl.arrowDir;
+    const double adl = std::hypot(ad.x(), ad.y());
+    if (adl > 1e-6) {
+      ad /= adl;
+      const QPointF nrm(-ad.y(), ad.x());
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(QColor(20, 20, 20));
+      QFont f = overlayFont();
+      f.setBold(true);
+      for (const QPointF& end : {a, b}) {
+        // Short stem outward from the line end, arrowhead, then the letter.
+        painter.setPen(chain);
+        painter.drawLine(end, end + ad * s);
+        const QPointF tip = end + ad * s;
+        painter.setPen(Qt::NoPen);
+        QPolygonF head;
+        head << tip << (tip - ad * s * 0.9 + nrm * s * 0.35) << (tip - ad * s * 0.9 - nrm * s * 0.35);
+        painter.drawPolygon(head);
+        painter.setPen(QColor(20, 20, 20));
+        painter.setFont(f);
+        painter.drawText(tip + ad * (s * 0.4) - QPointF(s * 0.3, -s * 0.3), sl.label);
+      }
+      painter.setFont(overlayFont());
+    }
+  }
+
   // Dimensions: witness lines from the anchors out to an offset dimension line
   // with arrowheads, and a length label riding on it.
   QPen dimPen(QColor(20, 20, 20));
@@ -1027,6 +1064,20 @@ void DrawingViewDock::exportDrawing()
       const double bl = std::hypot(bis.x(), bis.y());
       bis = bl > 1e-6 ? bis / bl : QPointF(0, -1);
       labels.emplace_back(vtx + bis * (arrowMm * 4), ang.label);
+    }
+    for (const auto& sl : v.sectionLines) {
+      const QPointF a = map(sl.p0), b = map(sl.p1);
+      dimSegs.emplace_back(a, b);  // chain style is lost in export; drawn solid
+      QPointF ad = sl.arrowDir;
+      const double adl = std::hypot(ad.x(), ad.y());
+      if (adl < 1e-9) continue;
+      ad /= adl;
+      const QPointF nrm(-ad.y(), ad.x());
+      for (const QPointF& e : {a, b}) {
+        dimSegs.emplace_back(e, e + ad * arrowMm);
+        addArrow(e + ad * arrowMm, -ad, nrm);
+        titles.emplace_back(e + ad * (arrowMm * 1.6), sl.label);  // black letter
+      }
     }
   }
 

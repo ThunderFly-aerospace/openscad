@@ -4637,6 +4637,20 @@ void MainWindow::refreshDrawingViews()
   const char *const titleUtf8[6] = {"Front (nárys)", "Back (zadní)", "Left (levý bok)",
                                     "Right (pravý bok)", "Top (půdorys)", "Bottom (spodní)"};
 
+  // Section markers, resolved once: world plane origin, unit normal (= viewing
+  // direction) and label. Reused for the cutting-line annotation in every standard
+  // view and for the section tiles below.
+  const auto sections = collectSections(this->rootNode);
+  struct SectionRef { Eigen::Vector3d p, n; QString label; };
+  std::vector<SectionRef> secRefs;
+  for (const auto& info : sections) {
+    if (!info.node) continue;
+    Eigen::Vector3d n = info.world.linear() * Eigen::Vector3d(0, 0, 1);
+    if (n.norm() < 1e-9) continue;
+    secRefs.push_back({info.world.translation(), n.normalized(),
+                       QString::fromStdString(info.node->section_name)});
+  }
+
   QList<OrthoViewData> viewData;
   QStringList titles;
   for (int vi = 0; vi < static_cast<int>(views.size()); ++vi) {
@@ -4728,6 +4742,38 @@ void MainWindow::refreshDrawingViews()
           od.jumpLine = rd.sourceLine >= 0 ? rd.sourceLine : rd.jumpLine;
           vd.dims.append(od);
         }
+
+        // Cutting-plane lines: section markers seen edge-on in this view (their
+        // normal lies in the view plane), drawn across the view with arrows + letter.
+        const double W = maxSx - minSx, H = maxSy - minSy;
+        auto projDir = [&](const Eigen::Vector3d& d) {
+          return QPointF(view.sx * d[view.ax], -view.sy * d[view.ay]);
+        };
+        Eigen::Vector3d eaz = Eigen::Vector3d::Zero();
+        eaz[view.az] = 1.0;
+        for (const auto& sr : secRefs) {
+          if (std::abs(sr.n.dot(eaz)) > 0.05) continue;  // face-on: no edge line here
+          QPointF dir = projDir(eaz.cross(sr.n));
+          const double dl = std::hypot(dir.x(), dir.y());
+          if (dl < 1e-9) continue;
+          dir /= dl;
+          const QPointF pt = proj(sr.p);
+          double t0 = -1e9, t1 = 1e9;  // clip the line pt + t*dir to [0,W]x[0,H]
+          auto slab = [&](double p, double d, double hi) {
+            if (std::abs(d) < 1e-9) return p >= 0 && p <= hi;
+            double ta = (0 - p) / d, tb = (hi - p) / d;
+            if (ta > tb) std::swap(ta, tb);
+            t0 = std::max(t0, ta); t1 = std::min(t1, tb);
+            return t0 <= t1;
+          };
+          if (!slab(pt.x(), dir.x(), W) || !slab(pt.y(), dir.y(), H) || t0 > t1) continue;
+          OrthoSectionLine sl;
+          sl.p0 = pt + dir * t0;
+          sl.p1 = pt + dir * t1;
+          sl.arrowDir = projDir(sr.n);
+          sl.label = sr.label;
+          vd.sectionLines.append(sl);
+        }
       }
     }
     viewData.append(vd);
@@ -4738,7 +4784,7 @@ void MainWindow::refreshDrawingViews()
   // 5. Section views from section() markers: cut the mesh, project + hatch, and
   // hand each over as an extra tile "Řez A–A".
   QList<OrthoViewData> sectionData;
-  for (const auto& info : collectSections(this->rootNode)) {
+  for (const auto& info : sections) {
     if (!info.node) continue;
     const double hatchMm = info.node->hatch > 0 && scale > 1e-9 ? info.node->hatch / scale : -1.0;
     const SectionDrawing sd = projectSection(*ps, info.world, info.node->flip, 20.0, hatchMm);

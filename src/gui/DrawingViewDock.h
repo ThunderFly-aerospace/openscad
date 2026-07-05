@@ -80,6 +80,16 @@ struct OrthoAngle {
   QString label;
 };
 
+// A cutting-plane line drawn in a standard view where a section() plane is seen
+// edge-on: a thick chain line across the view (p0..p1), arrowheads at both ends
+// pointing in the section's viewing direction, and the section letter at each end.
+struct OrthoSectionLine {
+  QPointF p0;
+  QPointF p1;
+  QPointF arrowDir;  // unit screen direction the arrows point (viewing direction)
+  QString label;
+};
+
 // Everything needed to render one ortho view as a vector line drawing with its
 // dimension overlay. All 2D coordinates are view-local model millimetres, y-down,
 // with the origin at the view's bounding-box top-left corner (see
@@ -92,6 +102,7 @@ struct OrthoViewData {
   QList<OrthoAnchor> anchors;
   QList<OrthoDimension> dims;
   QList<OrthoAngle> angles;
+  QList<OrthoSectionLine> sectionLines;
   QString title;
   // Drawing scale (drawing-mm per model-mm). Geometry is drawn in model-mm; text
   // and line weights are absolute drawing-mm, so their size relative to the
