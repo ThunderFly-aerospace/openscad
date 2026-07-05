@@ -469,3 +469,61 @@ Blender je z STL nepřečte. Zjištěno (viz níže „Jak jsou barvy uložené"
 | Rozsah Fáze 2 | A + B + cukr; jen délková kvóta; C (klikání kotev) a průměr = později |
 | Projekce kvóty | pole kvóty (`proj=…`), typicky jen jedna projekce |
 | Barevný export | 3MF (hotová cesta, Blender ≥ 4.1 nativně) + dopsat OBJ `.mtl` |
+
+---
+
+## Fáze 5 — Drawings jako vektorový WYSIWYG editor (redesign) + bugfixy
+
+**Rozhodnutí (2026-07-04):** Barvy jsou ve výkresech k ničemu (navíc rastru
+chybí hrany, nevypadá dobře). **Barevný raster zůstává jen pro kamery** (ten je
+prakticky hotový). **Drawings dělají výhradně čárový (vektorový) model** a dok
+se stává **editorem exportu** (WYSIWYG): co vidím, to se vyexportuje.
+
+### Model chování (dle uživatele)
+- **Scale je nastaven a je vidět** — geometrie v model-mm, ale text a tloušťky
+  čar jsou **absolutní mm**, takže jejich velikost *vůči geometrii* odpovídá
+  měřítku (1:2 → text relativně 2× větší). Zvětšení/zmenšení scale mění jen
+  relativní velikost textu/čar a fyzický rozměr exportu.
+- **Offsety kvót/labelů v mm** platí pro tento „výkres v měřítku".
+- **Zoom/pan** je jen navigace nad tím (nemění export). Texty se se zoomem
+  vizuálně zvětšují/zmenšují (kreslí se v mm-prostoru).
+- Dok **prakticky slouží jako editor exportu** — polohování kvót a labelů.
+  (Uživatel si zatím není jistý, co je „správně" → potřebuje to vidět.)
+
+### Důsledek: body 1 a 2 splynou
+- **Pixelace (bod 1) zmizí sama** — vektor se neškáluje z rastru 600×600, žádný
+  tichý hi-res re-render není potřeba.
+- **WYSIWYG (bod 2)** — dok kreslí přesně to, co export; kvóty + scale jsou
+  součástí jednoho vektorového listu.
+
+### Architektura
+1. **Sdílený projektor** (`export_line_drawing.cc`): vytáhnout per-view 2D
+   projekci (FeatureEdges + DepthBuffer HLR + projekce do os pohledu) do
+   znovupoužitelného API, které konzumuje **dok i souborový export** (jeden
+   zdroj pravdy → WYSIWYG). Kvóty (svět 3D z `resolveDrawing`) promítat do téže
+   2D roviny jako hrany.
+2. **`OrthoViewWidget`** (evoluce, ne přepis): místo `drawImage` kreslit
+   **úsečky hran** v model-mm; overlay kvót/kotev už v tomto prostoru pracuje.
+   Pera/fonty/šipky zadané v mm (÷ scale) a mapované transformací → škálují se
+   zoomem. Odpadá `QImage`/`pxPerMm` jako rastr; zůstává fit + zoom + pan.
+3. **`MainWindow::refreshDrawingViews`**: místo `render_ortho_view` (raster)
+   vyhodnotit **mesh** (znovupoužít F6 geometrii, jinak `GeometryEvaluator`),
+   spočítat 2D hrany per view + promítnout kvóty, předat vektorová data do doku.
+   Pozor na cenu mesh evaluace (F6) — dělat jen když je dok vidět.
+4. **Export** (SVG/PDF/DXF): ze stejného 2D listu → garantované WYSIWYG;
+   respektovat **scale** (geometrie × scale, text/čáry absolutní mm).
+5. **Úklid UI**: z drawings pryč přepínač barevný/čárový (vždy čárový);
+   barevný raster jen v cestě kamer.
+
+### Bugfixy v této fázi (samostatné, bezpečné)
+- **Bod 5 — auto-refresh po nové kvótě**: po vložení `// @dim` hned
+  `refreshDrawingViews()` (kvóta je komentář, geometrie se nemění). **Hotovo.**
+- **Bod 3 — chybějící hrany siluety**: `FeatureEdges::select` dostal
+  grazing-toleranci (facety skoro tečné k pohledu / soused rovnoběžný s projekcí
+  drží konturu bez děr). **Hotovo** (ověřeno simulací, netříští edge-count).
+- **Bod 4 — pravý klik → skok do zdroje**: reprodukovat v běžící appce a
+  opravit (drátování vypadá správně, příčina se najde za běhu).
+
+### Refactor (hotový, neutrální)
+- `resolveDrawing()` — řešení kotev/kvót do světa vytaženo mimo render loop
+  (sdílí dok overlay i vektorový export).

@@ -3827,6 +3827,9 @@ void MainWindow::setupDrawingDock()
   // Dragging a dimension line changes its offset= and writes it back on release.
   QObject::connect(this->drawingDock, &DrawingViewDock::dimensionOffsetChanged, this,
                    &MainWindow::onDimensionOffsetChanged);
+  // Rotating a radial (⌀/R) dimension writes angle= back on release.
+  QObject::connect(this->drawingDock, &DrawingViewDock::dimensionAngleChanged, this,
+                   &MainWindow::onDimensionAngleChanged);
   // Dragging a label writes laboff= back on release.
   QObject::connect(this->drawingDock, &DrawingViewDock::labelOffsetChanged, this,
                    &MainWindow::onLabelOffsetChanged);
@@ -3843,12 +3846,6 @@ void MainWindow::setupDrawingDock()
   // "Materialize kvóty" writes a // @dim kvota=… line for each kvota pair.
   QObject::connect(this->drawingDock, &DrawingViewDock::materializeRequested, this,
                    &MainWindow::onMaterializeKvotas);
-  // "Line drawing (vector)…" exports a vector SVG of the mesh's feature edges.
-  QObject::connect(this->drawingDock, &DrawingViewDock::lineDrawingRequested, this,
-                   &MainWindow::onExportLineDrawing);
-  // Toggling colored/line-drawing mode re-renders the ortho views.
-  QObject::connect(this->drawingDock, &DrawingViewDock::renderModeChanged, this,
-                   &MainWindow::refreshDrawingViews);
 }
 
 namespace {
@@ -3885,6 +3882,9 @@ void MainWindow::onDimensionDoubleClicked(int id)
   const QString curArrows = tokenValue(R"(\barrows=(\w+))");
   const QString curProj = tokenValue(R"(\bproj=(\w+))");
   const QString curMeasure = tokenValue(R"(\bmeasure=(\w+))");
+  const QString curKind = tokenValue(R"(\bkind=(\w+))");
+  const bool isRadial =
+    curKind == "diameter" || curKind == "radius" || curKind == "d" || curKind == "r";
 
   // Build the edit dialog.
   QDialog dialog(this);
@@ -3906,6 +3906,16 @@ void MainWindow::onDimensionDoubleClicked(int id)
   arrowsBox->setCurrentText(curArrows == "out" ? "out" : "in");
   form->addRow(tr("Arrows"), arrowsBox);
 
+  // Diameter vs radius: only for radial dims (value comes from the dimref's
+  // d=/r=, either implies the other, so flipping this is always possible).
+  QComboBox *kindBox = nullptr;
+  if (isRadial) {
+    kindBox = new QComboBox(&dialog);
+    kindBox->addItems({tr("diameter (⌀)"), tr("radius (R)")});
+    kindBox->setCurrentIndex(curKind == "radius" || curKind == "r" ? 1 : 0);
+    form->addRow(tr("Kind"), kindBox);
+  }
+
   auto *projBox = new QComboBox(&dialog);
   projBox->addItems({tr("(all)"), "front", "side", "top"});
   projBox->setCurrentText(curProj.isEmpty() ? tr("(all)") : curProj);
@@ -3921,11 +3931,28 @@ void MainWindow::onDimensionDoubleClicked(int id)
 
   auto *buttons =
     new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  auto *deleteButton = buttons->addButton(tr("Delete"), QDialogButtonBox::DestructiveRole);
+  deleteButton->setToolTip(tr("Remove this dimension (the // @dim line)."));
   form->addRow(buttons);
   connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
   connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  bool deleteRequested = false;
+  connect(deleteButton, &QPushButton::clicked, &dialog, [&] {
+    deleteRequested = true;
+    dialog.accept();
+  });
 
   if (dialog.exec() != QDialog::Accepted) return;
+
+  // Delete: drop the whole // @dim line. Line numbers of other dims shift, but
+  // refreshDrawingViews re-reads the source so their ids are recomputed.
+  if (deleteRequested) {
+    lines.removeAt(id);
+    activeEditor->setPlainText(lines.join('\n'));
+    refreshDrawingViews();
+    this->statusBar()->showMessage(tr("Dimension deleted."), 3000);
+    return;
+  }
 
   // Rewrite the tokens. Label may contain spaces -> always quote it.
   line.remove(QRegularExpression(R"RX(\s*label="[^"]*")RX"));
@@ -3950,9 +3977,14 @@ void MainWindow::onDimensionDoubleClicked(int id)
     line += " measure=" + measureBox->currentText();
   }
 
+  if (kindBox) line = setLineToken(line, "kind", kindBox->currentIndex() == 1 ? "radius" : "diameter");
+
   lines[id] = line;
   activeEditor->setPlainText(lines.join('\n'));
-  this->statusBar()->showMessage(tr("Dimension updated. Press F5 to refresh."), 3000);
+  // All edited tokens live in the // @dim comment, so the geometry is unchanged:
+  // reproject immediately instead of waiting for F5.
+  refreshDrawingViews();
+  this->statusBar()->showMessage(tr("Dimension updated."), 3000);
 }
 
 void MainWindow::onMaterializeKvotas()
@@ -4007,40 +4039,6 @@ void MainWindow::onMaterializeKvotas()
     tr("Materialized %1 kvota dimension(s). Press F5 to update.").arg(newLines.size()), 4000);
 }
 
-void MainWindow::onExportLineDrawing()
-{
-  if (!this->rootNode) {
-    QMessageBox::information(this, tr("Line drawing"),
-                            tr("Nothing to export; press F5 first."));
-    return;
-  }
-  // Evaluate the concrete mesh (like F6); this can take a moment for big models.
-  std::shared_ptr<const Geometry> geom;
-  try {
-    GeometryEvaluator ge(this->tree);
-    geom = ge.evaluateGeometry(*this->rootNode, true);
-  } catch (const std::exception& e) {
-    LOG(message_group::Error, "Line drawing: geometry evaluation failed: %1$s", e.what());
-    geom = nullptr;
-  }
-  const auto ps = geom ? PolySetUtils::getGeometryAsPolySet(geom) : nullptr;
-  if (!ps || ps->isEmpty()) {
-    QMessageBox::warning(this, tr("Line drawing"), tr("No 3D geometry to export."));
-    return;
-  }
-
-  const QString path = QFileDialog::getSaveFileName(
-    this, tr("Export line drawing"), "drawing.svg",
-    tr("Vector drawing (*.svg *.dxf)"));
-  if (path.isEmpty()) return;
-  // 20° dihedral threshold: keeps real edges, drops tessellation facets.
-  if (exportLineDrawing(*ps, 20.0, path.toStdString())) {
-    this->statusBar()->showMessage(tr("Line drawing exported to %1").arg(path), 4000);
-  } else {
-    QMessageBox::warning(this, tr("Line drawing"), tr("Failed to write %1").arg(path));
-  }
-}
-
 void MainWindow::onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished)
 {
   // Only persist on release; live drag already updates the overlay in the dock.
@@ -4055,6 +4053,19 @@ void MainWindow::onDimensionOffsetChanged(int viewIndex, int id, double offsetPx
   QStringList lines = activeEditor->toPlainText().split('\n');
   if (id >= lines.size()) return;
   lines[id] = setLineToken(lines.at(id), "offset", QString::number(offsetMm, 'g', 4));
+  activeEditor->setPlainText(lines.join('\n'));
+}
+
+void MainWindow::onDimensionAngleChanged(int /*viewIndex*/, int id, double angleDeg, bool finished)
+{
+  // Only persist on release; the live drag already rotates the overlay in the dock.
+  if (!finished || id < 0 || !activeEditor) return;
+  QStringList lines = activeEditor->toPlainText().split('\n');
+  if (id >= lines.size()) return;
+  // Normalise to [0,360) so the written angle stays tidy.
+  double a = std::fmod(angleDeg, 360.0);
+  if (a < 0) a += 360.0;
+  lines[id] = setLineToken(lines.at(id), "angle", QString::number(a, 'g', 4));
   activeEditor->setPlainText(lines.join('\n'));
 }
 
@@ -4078,45 +4089,89 @@ void MainWindow::onLabelOffsetChanged(int viewIndex, int id, double alongPx, dou
   activeEditor->setPlainText(lines.join('\n'));
 }
 
+// If the anchor reference `ref` ("A" or "A#index") resolves to a dimref() that
+// carries a radial size, return "diameter" or "radius" (whichever was given, d=
+// taking precedence); otherwise an empty string. Used so a repeat-click on such
+// an anchor emits a ⌀/R dimension instead of a two-point length.
+QString MainWindow::radialKindOfAnchor(const QString& ref) const
+{
+  if (!this->rootNode) return {};
+  const bool byLine = ref.startsWith("@line");
+  const int wantLine = byLine ? ref.mid(5).toInt() : -1;
+  const int hash = ref.indexOf('#');
+  const std::string base = (hash >= 0 ? ref.left(hash) : ref).toStdString();
+  const int idx = hash >= 0 ? ref.mid(hash + 1).toInt() : 0;
+  int seen = 0;
+  for (const auto& d : collectDimrefs(this->rootNode)) {
+    if (!d.node) continue;
+    if (byLine) {
+      if (!d.node->modinst || d.node->modinst->location().firstLine() != wantLine) continue;
+    } else {
+      if (d.node->dimref_name != base) continue;
+      if (seen++ != idx) continue;
+    }
+    if (d.node->diameter >= 0) return QStringLiteral("diameter");
+    if (d.node->radius >= 0) return QStringLiteral("radius");
+    return {};
+  }
+  return {};
+}
+
 void MainWindow::onDrawingAnchorClicked(int viewIndex, const QString& name)
 {
-  if (name.isEmpty()) return;
+  if (name.isEmpty() || !activeEditor) return;
 
-  // First click: remember the anchor and wait for the second.
+  static const char *const keys[3] = {"front", "side", "top"};
+  const QString proj = keys[std::clamp(viewIndex, 0, 2)];
+
+  // Append a // @dim line at the end of the document (the "list of pairs") and
+  // reproject: an @dim line is a comment, so the geometry (and dimref world
+  // positions) is unchanged and the overlay updates without an F5.
+  auto appendDim = [&](const QString& dimLine, const QString& status) {
+    const QStringList lines = activeEditor->toPlainText().split('\n');
+    activeEditor->setCursorPosition(lines.size() - 1, lines.isEmpty() ? 0 : lines.last().length());
+    QString insertText;
+    if (!lines.isEmpty() && !lines.last().isEmpty()) insertText += "\n";
+    insertText += dimLine + "\n";
+    activeEditor->insertOrReplaceText(insertText);
+    refreshDrawingViews();
+    this->statusBar()->showMessage(status, 4000);
+  };
+
+  // First click: remember the anchor and wait for the second. If the anchor is a
+  // radial dimref (d=/r=), a repeat click on it makes a ⌀/R dimension.
   if (this->pendingDimAnchor.isEmpty()) {
     this->pendingDimAnchor = name;
+    const QString radial = radialKindOfAnchor(name);
     this->statusBar()->showMessage(
-      tr("Dimension: first point \"%1\" — click the second anchor.").arg(name), 4000);
+      radial.isEmpty()
+        ? tr("Dimension: first point \"%1\" — click the second anchor.").arg(name)
+        : tr("Dimension: \"%1\" — click a second anchor for a length, or click it "
+             "again for a %2.").arg(name, radial == "radius" ? tr("radius") : tr("diameter")),
+      5000);
     return;
   }
-  // Clicking the same anchor again cancels the pending pick.
+  // Clicking the same anchor again: emit a radial dimension if it carries a size,
+  // otherwise cancel the pending pick.
   if (name == this->pendingDimAnchor) {
     this->pendingDimAnchor.clear();
-    this->statusBar()->showMessage(tr("Dimension cancelled."), 2000);
+    const QString radial = radialKindOfAnchor(name);
+    if (radial.isEmpty()) {
+      this->statusBar()->showMessage(tr("Dimension cancelled."), 2000);
+      return;
+    }
+    appendDim(QString("// @dim %1 kind=%2 proj=%3").arg(name, radial, proj),
+              tr("Added %1 dimension for %2.")
+                .arg(radial == "radius" ? tr("radius") : tr("diameter"), name));
     return;
   }
 
   const QString first = this->pendingDimAnchor;
   this->pendingDimAnchor.clear();
-
-  static const char *const keys[3] = {"front", "side", "top"};
-  const QString proj = keys[std::clamp(viewIndex, 0, 2)];
-  const QString dimLine = QString("// @dim %1 %2 proj=%3").arg(first, name, proj);
-
-  // Append the // @dim line at the end of the document (the "list of pairs").
-  if (!activeEditor) return;
-  const QString text = activeEditor->toPlainText();
-  const QStringList lines = text.split('\n');
-  const int lastLine = lines.size() - 1;
-  const int lastCol = lines.isEmpty() ? 0 : lines.last().length();
-  activeEditor->setCursorPosition(lastLine, lastCol);
-  QString insertText;
-  if (!lines.isEmpty() && !lines.last().isEmpty()) insertText += "\n";
-  insertText += dimLine + "\n";
-  activeEditor->insertOrReplaceText(insertText);
-
-  this->statusBar()->showMessage(
-    tr("Added dimension %1 ↔ %2. Press F5 to update.").arg(first, name), 4000);
+  // Default to the in-plane (planar) distance: in a technical drawing you dimension
+  // what you see in that projection, not the true 3D distance.
+  appendDim(QString("// @dim %1 %2 proj=%3 measure=planar").arg(first, name, proj),
+            tr("Added dimension %1 ↔ %2.").arg(first, name));
 }
 
 namespace {
@@ -4138,29 +4193,8 @@ struct ResolvedDim {
   double labAlongMm{0};  // label offset along the dimension line, model units
   double labPerpMm{0};   // label offset perpendicular to the dimension line
   int sourceLine{-1};   // 0-based editor line of the // @dim (for write-back)
+  int jumpLine{-1};     // 0-based line for right-click jump (kvota= -> its dimref)
 };
-
-// gluProject-style world -> image pixel (top-left origin). modelview/projection
-// are column-major GLdouble[16] as returned by glGetDoublev.
-bool projectToImage(const Eigen::Vector3d& world, const GLdouble *mv, const GLdouble *pr,
-                    int w, int h, QPointF& out)
-{
-  auto mul = [](const GLdouble *m, const double v[4], double r[4]) {
-    for (int i = 0; i < 4; ++i)
-      r[i] = m[i] * v[0] + m[i + 4] * v[1] + m[i + 8] * v[2] + m[i + 12] * v[3];
-  };
-  const double in[4] = {world.x(), world.y(), world.z(), 1.0};
-  double eye[4], clip[4];
-  mul(mv, in, eye);
-  mul(pr, eye, clip);
-  if (std::abs(clip[3]) < 1e-9) return false;
-  const double nx = clip[0] / clip[3];
-  const double ny = clip[1] / clip[3];
-  const double winx = (nx * 0.5 + 0.5) * w;
-  const double winy = (ny * 0.5 + 0.5) * h;
-  out = QPointF(winx, h - winy);  // GL y is bottom-up, image y is top-down
-  return true;
-}
 
 // Normalize a projection token (english or czech) to front|side|top, or "".
 QString normalizeProj(const QString& raw)
@@ -4201,26 +4235,36 @@ double dimLength(const Eigen::Vector3d& a, const Eigen::Vector3d& b,
   return d.norm();  // unknown token -> direct
 }
 
-}  // namespace
+// A dimref anchor with its resolved world position and 0-based source line.
+struct AnchorRec { QString label; QString ref; Eigen::Vector3d pos; int sourceLine; };
+// The model's dimref anchors + resolved dimensions, independent of any view.
+struct ResolvedDrawing {
+  std::vector<AnchorRec> anchors;
+  std::vector<ResolvedDim> dims;
+};
 
-void MainWindow::refreshDrawingViews()
+// Resolve dimref anchors and every dimension (// @dim lines + kvota= sugar) to
+// world-space geometry. Shared by the drawing-dock overlay and the vector line-
+// drawing export. `warn` emits the duplicate-name warning once (secondary
+// callers pass false to avoid repeats).
+ResolvedDrawing resolveDrawing(const std::vector<DimrefInfo>& dimrefs,
+                               const QString& source, bool warn)
 {
-  if (!this->drawingDock) return;
-
-  // 1. Collect dimref anchors: world position per anchor, plus kvota groups.
-  // (Done unconditionally so the 3D markers update even when the dock is closed.)
-  const auto dimrefs =
-    this->rootNode ? collectDimrefs(this->rootNode) : std::vector<DimrefInfo>{};
   // World positions per dimref name, in tree (DFS) order — index = occurrence, so
   // a duplicated name can be pinned as name#index (a plain name takes the first).
   std::map<std::string, std::vector<Eigen::Vector3d>> posByName;
   std::map<std::string, std::vector<const DimrefNode *>> nodeByName;  // parallel to posByName
+  // An unnamed dimref (e.g. dimref(d=15)) has no name to reference, yet still needs
+  // to be clickable/dimensionable — key it by its 1-based source line as @line<N>.
+  std::map<int, Eigen::Vector3d> posByLine;
+  std::map<int, const DimrefNode *> nodeByLine;
   std::map<std::string, std::vector<Eigen::Vector3d>> kvotaGroups;
-  struct AnchorRec { QString label; QString ref; Eigen::Vector3d pos; int sourceLine; };
+  std::map<std::string, int> kvotaFirstLine;  // first dimref line per kvota (jump target)
   std::vector<AnchorRec> anchorRecs;
   for (const auto& d : dimrefs) {
     if (!d.node) continue;
     const Eigen::Vector3d pos = d.world.translation();
+    const int line1 = d.node->modinst ? d.node->modinst->location().firstLine() : -1;
     QString label = QString::fromStdString(d.node->dimref_name);
     if (label.isEmpty()) label = QString::fromStdString(d.node->kvota_name);
     QString ref = label;
@@ -4230,17 +4274,29 @@ void MainWindow::refreshDrawingViews()
       ref = label + "#" + QString::number(static_cast<int>(v.size()));
       v.push_back(pos);
       nodeByName[d.node->dimref_name].push_back(d.node);
+    } else if (line1 > 0) {
+      // Unnamed: reference by source line. The dot carries a compact marker (the
+      // value shows in the actual dimension once created), not a full label.
+      ref = QStringLiteral("@line%1").arg(line1);
+      if (d.node->diameter >= 0) label = QStringLiteral("⌀");
+      else if (d.node->radius >= 0) label = QStringLiteral("R");
+      else label = QStringLiteral("•");
+      posByLine[line1] = pos;
+      nodeByLine[line1] = d.node;
     }
     // 0-based editor line of the dimref() call, for right-click jump-to-source.
-    const int srcLine = d.node->modinst ? d.node->modinst->location().firstLine() - 1 : -1;
+    const int srcLine = line1 > 0 ? line1 - 1 : -1;
     anchorRecs.push_back({label, ref, pos, srcLine});
-    if (!d.node->kvota_name.empty()) kvotaGroups[d.node->kvota_name].push_back(pos);
+    if (!d.node->kvota_name.empty()) {
+      kvotaGroups[d.node->kvota_name].push_back(pos);
+      if (!kvotaFirstLine.count(d.node->kvota_name)) kvotaFirstLine[d.node->kvota_name] = srcLine;
+    }
   }
 
   // Duplicate names are ambiguous in a plain `@dim A B`. Warn once per name, and
   // for display/click use the plain name when unique but name#index when not.
   for (const auto& [name, positions] : posByName) {
-    if (positions.size() > 1) {
+    if (warn && positions.size() > 1) {
       LOG(message_group::UI_Warning,
           "dimref name '%1$s' is used %2$d times; a plain @dim reference takes the "
           "first — qualify as %1$s#index (0..%3$d) to pick another.",
@@ -4248,6 +4304,7 @@ void MainWindow::refreshDrawingViews()
     }
   }
   for (auto& rec : anchorRecs) {
+    if (rec.ref.startsWith("@line")) continue;  // synthetic line ref: keep as-is
     const std::string base = rec.ref.left(rec.ref.indexOf('#')).toStdString();
     const bool duplicated =
       !base.empty() && posByName.count(base) && posByName[base].size() > 1;
@@ -4258,6 +4315,12 @@ void MainWindow::refreshDrawingViews()
   // Resolve an @dim endpoint token ("A" or "A#index") to a world position.
   // Plain name -> first occurrence; #index -> that occurrence.
   auto resolveRef = [&](const QString& tok, Eigen::Vector3d& out) -> bool {
+    if (tok.startsWith("@line")) {  // unnamed dimref, keyed by source line
+      const auto it = posByLine.find(tok.mid(5).toInt());
+      if (it == posByLine.end()) return false;
+      out = it->second;
+      return true;
+    }
     const int hash = tok.indexOf('#');
     const QString base = hash >= 0 ? tok.left(hash) : tok;
     int idx = hash >= 0 ? tok.mid(hash + 1).toInt() : 0;
@@ -4269,6 +4332,10 @@ void MainWindow::refreshDrawingViews()
   };
   // Resolve an @dim token to the DimrefNode of that occurrence (for d=/r= values).
   auto resolveNode = [&](const QString& tok) -> const DimrefNode * {
+    if (tok.startsWith("@line")) {
+      const auto it = nodeByLine.find(tok.mid(5).toInt());
+      return it == nodeByLine.end() ? nullptr : it->second;
+    }
     const int hash = tok.indexOf('#');
     const QString base = hash >= 0 ? tok.left(hash) : tok;
     int idx = hash >= 0 ? tok.mid(hash + 1).toInt() : 0;
@@ -4300,7 +4367,6 @@ void MainWindow::refreshDrawingViews()
   //      // @dim angle V A B [proj=] [label=]                 (exact 3D angle at V)
   //      // @dim chain|running A B C… [proj=] [offset=] [step=]  (dimension series)
   //   label may be quoted to hold spaces/%f: label="šířka %f mm"
-  const QString source = activeEditor ? activeEditor->toPlainText() : QString();
   static const QRegularExpression dimRe(R"(^\s*//\s*@dim\s+(.*\S)\s*$)");
   static const QRegularExpression quotedLabelRe(R"RX(label="([^"]*)")RX");
   std::set<QString> materializedKvotas;  // kvota names already written as @dim
@@ -4486,8 +4552,30 @@ void MainWindow::refreshDrawingViews()
     rd.a = pts[0];
     rd.b = pts[1];
     rd.label = makeLabel(QString(), (rd.b - rd.a).norm(), -1);
+    // sourceLine stays -1 (not draggable), but right-click can still jump to the
+    // kvota's first dimref() call.
+    const auto jl = kvotaFirstLine.find(kvota);
+    rd.jumpLine = jl != kvotaFirstLine.end() ? jl->second : -1;
     dims.push_back(rd);  // id stays -1: in-memory, not draggable until materialized
   }
+
+  return {std::move(anchorRecs), std::move(dims)};
+}
+
+}  // namespace
+
+void MainWindow::refreshDrawingViews()
+{
+  if (!this->drawingDock) return;
+
+  // Resolve dimref anchors + dimensions once (view-independent). Done even when
+  // the dock is closed so the 3D markers still update on every preview.
+  const auto dimrefs =
+    this->rootNode ? collectDimrefs(this->rootNode) : std::vector<DimrefInfo>{};
+  const QString source = activeEditor ? activeEditor->toPlainText() : QString();
+  const ResolvedDrawing resolved = resolveDrawing(dimrefs, source, /*warn=*/true);
+  const std::vector<AnchorRec>& anchorRecs = resolved.anchors;
+  const std::vector<ResolvedDim>& dims = resolved.dims;
 
   // Push dimref markers (anchor crosses + dimension lines) to the 3D view. This
   // happens on every preview, like camera frustums, regardless of dock state.
@@ -4507,119 +4595,128 @@ void MainWindow::refreshDrawingViews()
   this->qglview->setDimrefMarkers(std::move(markerPoints), std::move(markerLines));
   this->qglview->update();
 
-  // Orthographic renders are expensive: only produce them while the dock is open.
+  // The line drawing needs the concrete mesh (feature edges come from a PolySet),
+  // so build it only while the dock is open. GeometryEvaluator hits the geometry
+  // cache when the model is unchanged, so repeated refreshes (dimension edits)
+  // are cheap; the first evaluation after a geometry change costs an F6.
   if (!this->drawingDock->isVisible()) return;
   if (!this->rootNode) {
     this->drawingDock->clearViews();
     return;
   }
+  std::shared_ptr<const Geometry> geom;
+  try {
+    GeometryEvaluator ge(this->tree);
+    geom = ge.evaluateGeometry(*this->rootNode, true);
+  } catch (const std::exception& e) {
+    LOG(message_group::Warning, "Drawing: geometry evaluation failed: %1$s", e.what());
+    geom = nullptr;
+  }
+  const auto ps = geom ? PolySetUtils::getGeometryAsPolySet(geom) : nullptr;
+  if (!ps || ps->isEmpty()) {
+    this->drawingDock->clearViews();
+    return;
+  }
 
-  // 4. Render each ortho view and project anchors/dims into it.
-  struct OrthoView {
-    const char *title;
-    QString key;
-    Eigen::Vector3d rot;
-  };
-  const std::vector<OrthoView> orthoViews = {
-    {"Front (nárys)", "front", {0, 0, 0}},
-    {"Side (bokorys)", "side", {0, 0, 90}},
-    {"Top (půdorys)", "top", {90, 0, 0}},
-  };
-  const int pw = 600, ph = 600;
+  // 4. Project the mesh's feature edges + the dimensions into each ortho view.
+  // Coordinates handed to the dock are view-local model-mm, y-down (origin at the
+  // view's bounding-box top-left) — the same convention the old raster overlay
+  // used, so the dimension/dragging math is unchanged.
+  const double scale = this->drawingDock->exportScale();
+  const std::vector<LineDrawingView>& views = lineDrawingViews();
+  const char *const titleUtf8[3] = {"Front (nárys)", "Side (bokorys)", "Top (půdorys)"};
 
   QList<OrthoViewData> viewData;
   QStringList titles;
-  ViewOptions options;  // OpenCSG previewer, no axes/edges/crosshairs
-  for (int vi = 0; vi < static_cast<int>(orthoViews.size()); ++vi) {
-    const auto& view = orthoViews[vi];
+  for (int vi = 0; vi < static_cast<int>(views.size()); ++vi) {
+    const LineDrawingView& view = views[vi];
+    const QString key = QString(view.name).toLower();  // "front" | "side" | "top"
+    this->viewPxPerMm[vi] = 1.0;  // dock coords are model-mm now (dim write-back)
     OrthoViewData vd;
-    if (auto glview = render_ortho_view(this->tree, options, view.rot, pw, ph,
-                                        this->drawingDock->lineMode())) {
-      std::ostringstream stream(std::ios::out | std::ios::binary);
-      if (glview->save(stream)) {
-        const std::string data = stream.str();
-        vd.image.loadFromData(reinterpret_cast<const uchar *>(data.data()),
-                              static_cast<int>(data.size()), "PNG");
-      }
-      // Pixels per model unit in this view: project a unit in-plane vector (the
-      // world direction that maps to screen +x under the view's modelview).
-      double pxPerMm = 1.0;
-      const Eigen::Vector3d base(0, 0, 0);
-      const Eigen::Vector3d inPlane(glview->modelview[0], glview->modelview[4],
-                                    glview->modelview[8]);
-      QPointF q0, q1;
-      if (projectToImage(base, glview->modelview, glview->projection, pw, ph, q0) &&
-          projectToImage(base + inPlane, glview->modelview, glview->projection, pw, ph, q1)) {
-        const double d = std::hypot(q1.x() - q0.x(), q1.y() - q0.y());
-        if (d > 1e-6) pxPerMm = d;
-      }
-      this->viewPxPerMm[vi] = pxPerMm;
-      vd.pxPerMm = pxPerMm;
-      vd.title = QString::fromUtf8(view.title);
+    vd.title = QString::fromUtf8(titleUtf8[vi]);
+    vd.scale = scale;
 
-      for (const auto& rec : anchorRecs) {
-        QPointF p;
-        if (projectToImage(rec.pos, glview->modelview, glview->projection, pw, ph, p)) {
-          vd.anchors.append({p, rec.label, rec.ref, rec.sourceLine});
-        }
+    const auto raw = projectViewEdges(*ps, view, 20.0);
+    if (!raw.empty()) {
+      double minSx = raw[0].x0, maxSx = raw[0].x0, minSy = raw[0].y0, maxSy = raw[0].y0;
+      for (const auto& r : raw) {
+        minSx = std::min({minSx, r.x0, r.x1}); maxSx = std::max({maxSx, r.x0, r.x1});
+        minSy = std::min({minSy, r.y0, r.y1}); maxSy = std::max({maxSy, r.y0, r.y1});
       }
-      for (const auto& rd : dims) {
-        if (!rd.proj.isEmpty() && rd.proj != view.key) continue;
-        if (rd.kind == DimKind::Angle) {
-          QPointF pv, pa, pb;
-          if (projectToImage(rd.c, glview->modelview, glview->projection, pw, ph, pv) &&
-              projectToImage(rd.a, glview->modelview, glview->projection, pw, ph, pa) &&
-              projectToImage(rd.b, glview->modelview, glview->projection, pw, ph, pb)) {
-            // Skip if a projected ray collapses (vertex/end coincide in this view).
-            if (std::hypot((pa - pv).x(), (pa - pv).y()) < 3.0 ||
-                std::hypot((pb - pv).x(), (pb - pv).y()) < 3.0)
+      if (maxSx > minSx && maxSy > minSy) {
+        vd.sizeMm = QSizeF(maxSx - minSx, maxSy - minSy);
+        // world-plane (sx=world[ax], sy=world[ay], y-up) -> view-local mm, y-down
+        auto toLocal = [&](double sx, double sy) { return QPointF(sx - minSx, maxSy - sy); };
+        auto proj = [&](const Eigen::Vector3d& P) { return toLocal(P[view.ax], P[view.ay]); };
+
+        for (const auto& r : raw)
+          vd.edges.append(QLineF(toLocal(r.x0, r.y0), toLocal(r.x1, r.y1)));
+
+        for (const auto& rec : anchorRecs)
+          vd.anchors.append({proj(rec.pos), rec.label, rec.ref, rec.sourceLine});
+
+        for (const auto& rd : dims) {
+          if (!rd.proj.isEmpty() && rd.proj != key) continue;
+          if (rd.kind == DimKind::Angle) {
+            const QPointF pv = proj(rd.c), pa = proj(rd.a), pb = proj(rd.b);
+            if (std::hypot((pa - pv).x(), (pa - pv).y()) < 0.1 ||
+                std::hypot((pb - pv).x(), (pb - pv).y()) < 0.1)
               continue;
             vd.angles.append({pv, pa, pb, rd.label});
+            continue;
           }
-          continue;
-        }
-        QPointF pa, pb;
-        if (projectToImage(rd.a, glview->modelview, glview->projection, pw, ph, pa) &&
-            projectToImage(rd.b, glview->modelview, glview->projection, pw, ph, pb)) {
-          // Measurement direction in image space: for h/v the view's screen axis
-          // (project a small world-axis vector), else the anchor-to-anchor line.
+          if (rd.kind == DimKind::Diameter || rd.kind == DimKind::Radius) {
+            // Radial dim: through the feature centre at the source angle. a/b are
+            // the rim points (diameter) or centre + rim point (radius).
+            const QPointF pa = proj(rd.a), pb = proj(rd.b);
+            QPointF d = pb - pa;
+            const double dl = std::hypot(d.x(), d.y());
+            if (dl < 1e-6) continue;  // circle edge-on in this view
+            OrthoDimension od;
+            od.radial = true;
+            od.radiusHalf = (rd.kind == DimKind::Radius);
+            od.a = pa;
+            od.b = pb;
+            od.center = od.radiusHalf ? pa : (pa + pb) / 2.0;
+            od.dir = d / dl;
+            od.label = rd.label;
+            od.arrowsOut = rd.arrowsOut;
+            od.labAlongPx = rd.labAlongMm;
+            od.labPerpPx = rd.labPerpMm;
+            od.id = rd.sourceLine;
+            od.jumpLine = rd.sourceLine >= 0 ? rd.sourceLine : rd.jumpLine;
+            vd.dims.append(od);
+            continue;
+          }
+          const QPointF pa = proj(rd.a), pb = proj(rd.b);
+          // Measurement direction: for h/v the view's screen axis (screen-x is
+          // local +x, screen-up is local -y), else along the anchor line.
           QPointF dir = pb - pa;
-          if (rd.measure == "h" || rd.measure == "v") {
-            int hAxis, vAxis;
-            measureAxes(rd.proj.isEmpty() ? view.key : rd.proj, hAxis, vAxis);
-            Eigen::Vector3d axis = Eigen::Vector3d::Zero();
-            axis[rd.measure == "h" ? hAxis : vAxis] = 1.0;
-            const Eigen::Vector3d mid = 0.5 * (rd.a + rd.b);
-            QPointF q0, q1;
-            if (projectToImage(mid, glview->modelview, glview->projection, pw, ph, q0) &&
-                projectToImage(mid + axis, glview->modelview, glview->projection, pw, ph, q1)) {
-              dir = q1 - q0;
-            }
-          }
+          if (rd.measure == "h") dir = QPointF(1, 0);
+          else if (rd.measure == "v") dir = QPointF(0, -1);
           const double dirLen = std::hypot(dir.x(), dir.y());
-          if (dirLen < 1e-6) continue;
+          if (dirLen < 1e-9) continue;
           dir /= dirLen;
-          // Drawn length = component of (b-a) along the measurement direction.
-          // Skip dimensions that collapse to a dot in this view (edge-on, or a
-          // zero h/v component): they can't be shown or grabbed.
+          // Skip dimensions that collapse to a dot in this view (edge-on).
           const QPointF ab = pb - pa;
-          if (std::abs(ab.x() * dir.x() + ab.y() * dir.y()) < 3.0) continue;
+          if (std::abs(ab.x() * dir.x() + ab.y() * dir.y()) < 0.05) continue;
           OrthoDimension od;
           od.a = pa;
           od.b = pb;
           od.dir = dir;
           od.label = rd.label;
-          od.offsetPx = rd.offsetMm * pxPerMm;
+          od.offsetPx = rd.offsetMm;  // model-mm (dock coordinate space)
           od.arrowsOut = rd.arrowsOut;
-          od.labAlongPx = rd.labAlongMm * pxPerMm;
-          od.labPerpPx = rd.labPerpMm * pxPerMm;
+          od.labAlongPx = rd.labAlongMm;
+          od.labPerpPx = rd.labPerpMm;
           od.id = rd.sourceLine;  // -1 for kvota= dims (not draggable)
+          od.jumpLine = rd.sourceLine >= 0 ? rd.sourceLine : rd.jumpLine;
           vd.dims.append(od);
         }
       }
     }
     viewData.append(vd);
-    titles.append(QString::fromUtf8(view.title));
+    titles.append(vd.title);
   }
   this->drawingDock->setViews(viewData, titles);
 }

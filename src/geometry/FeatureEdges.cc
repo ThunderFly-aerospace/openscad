@@ -89,6 +89,10 @@ std::vector<Segment> select(const PolySet& ps, const Vector3d& viewDir, double c
   Vector3d view(0, 0, 1);
   if (viewDir.norm() > 1e-12) view = viewDir.normalized();
   const double cosCrease = std::cos(creaseAngle);
+  // Grazing band (|n·view| below this counts as edge-on) for the silhouette test.
+  // ~1.1°: small enough not to thicken the contour, large enough to swallow the
+  // tessellation/numeric noise that otherwise leaves gaps in a curved outline.
+  constexpr double kGrazeTol = 0.02;
 
   // 4. Classify each edge.
   std::vector<Segment> out;
@@ -100,10 +104,21 @@ std::vector<Segment> select(const PolySet& ps, const Vector3d& viewDir, double c
     } else {
       const Vector3d& nA = normals[adj[0]];
       const Vector3d& nB = normals[adj[1]];
+      const double da = nA.dot(view);
+      const double db = nB.dot(view);
       // Crease: dihedral sharper than the threshold (view-independent).
-      if (nA.dot(nB) < cosCrease) keep = true;
-      // Silhouette: the two faces face opposite ways relative to the view.
-      else if ((nA.dot(view)) * (nB.dot(view)) <= 1e-9) keep = true;
+      if (nA.dot(nB) < cosCrease) {
+        keep = true;
+      }
+      // Silhouette: the two faces face opposite ways relative to the view. A
+      // grazing tolerance (a face whose normal is nearly perpendicular to the
+      // view is on neither side) closes gaps in the contour of a tessellated
+      // curved surface: without it a facet that is almost edge-on — or whose
+      // neighbour is a flat face nearly parallel to the projection plane — can
+      // land a hair on the "wrong" side and drop a segment of the outline.
+      else if (da * db <= 0.0 || std::abs(da) <= kGrazeTol || std::abs(db) <= kGrazeTol) {
+        keep = true;
+      }
     }
     if (keep) out.push_back({points[edge.first], points[edge.second]});
   }

@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <utility>
+#include <vector>
 
 #include <QFileDialog>
 #include <QCheckBox>
@@ -30,8 +33,8 @@
 // ---------------------------------------------------------------------------
 
 namespace {
-// Distance from point p to segment [a,b].
-double distToSegment(const QPointF& p, const QPointF& a, const QPointF& b)
+// Closest point on segment [a,b] to p.
+QPointF closestOnSegment(const QPointF& p, const QPointF& a, const QPointF& b)
 {
   const QPointF ab = b - a;
   const double len2 = ab.x() * ab.x() + ab.y() * ab.y();
@@ -40,7 +43,13 @@ double distToSegment(const QPointF& p, const QPointF& a, const QPointF& b)
     t = ((p.x() - a.x()) * ab.x() + (p.y() - a.y()) * ab.y()) / len2;
     t = std::clamp(t, 0.0, 1.0);
   }
-  const QPointF proj(a.x() + t * ab.x(), a.y() + t * ab.y());
+  return QPointF(a.x() + t * ab.x(), a.y() + t * ab.y());
+}
+
+// Distance from point p to segment [a,b].
+double distToSegment(const QPointF& p, const QPointF& a, const QPointF& b)
+{
+  const QPointF proj = closestOnSegment(p, a, b);
   return std::hypot(p.x() - proj.x(), p.y() - proj.y());
 }
 }  // namespace
@@ -71,6 +80,38 @@ void OrthoViewWidget::setShowAnchors(bool show)
 {
   this->showAnchors = show;
   update();
+}
+
+void OrthoViewWidget::setShowLeaders(bool show)
+{
+  this->showLeaders = show;
+  update();
+}
+
+void OrthoViewWidget::setScale(double scale)
+{
+  this->data.scale = scale;
+  update();
+}
+
+double OrthoViewWidget::mmToPx() const
+{
+  return this->fitScale * this->userZoom;
+}
+
+double OrthoViewWidget::absPx(double drawingMm) const
+{
+  const double sc = this->data.scale > 1e-9 ? this->data.scale : 1.0;
+  return drawingMm / sc * mmToPx();
+}
+
+QFont OrthoViewWidget::overlayFont() const
+{
+  // Dimension text ~3 mm on the drawing (a common technical-drawing text height).
+  QFont f = font();
+  const double px = absPx(3.0);
+  f.setPixelSize(std::max(1, static_cast<int>(std::round(px))));
+  return f;
 }
 
 QPointF OrthoViewWidget::mapToWidget(const QPointF& imgPt) const
@@ -112,17 +153,53 @@ static QPointF dimFoot(const OrthoDimension& d, const QPointF& perp, const QPoin
   return base + dir * s;
 }
 
-QPointF OrthoViewWidget::dimLabelPos(const OrthoDimension& d) const
+// Free versions of the dimension geometry so both the widget paint and the
+// vector export compute identical positions (WYSIWYG).
+static QPointF perpOf(const OrthoDimension& d)
 {
-  // Image-space label anchor: midpoint of the dimension line (feet of a and b),
-  // plus the label's own offset along the line and perpendicular to it.
-  const QPointF perp = dimPerp(d);
   QPointF dir = d.dir;
   const double len = std::hypot(dir.x(), dir.y());
-  if (len > 1e-9) dir /= len;
-  else dir = QPointF(1, 0);
-  const QPointF mid = (dimFoot(d, perp, d.a) + dimFoot(d, perp, d.b)) / 2.0;
+  if (len < 1e-9) return QPointF(0, -1);
+  dir /= len;
+  return QPointF(dir.y(), -dir.x());
+}
+
+static QPointF unitDirOf(const OrthoDimension& d)
+{
+  QPointF dir = d.dir;
+  const double len = std::hypot(dir.x(), dir.y());
+  return len > 1e-9 ? dir / len : QPointF(1, 0);
+}
+
+// The drawn dimension line's endpoints in image space. A linear dimension runs
+// between the feet of its anchors on the offset line; a radial one runs straight
+// through the feature centre (the whole chord for a diameter, centre->rim for a
+// radius). Paint, export and hit-testing all go through this so they stay WYSIWYG.
+static void dimLineEnds(const OrthoDimension& d, QPointF& p0, QPointF& p1)
+{
+  if (d.radial) {
+    p0 = d.radiusHalf ? d.center : d.a;
+    p1 = d.b;
+  } else {
+    const QPointF perp = perpOf(d);
+    p0 = dimFoot(d, perp, d.a);
+    p1 = dimFoot(d, perp, d.b);
+  }
+}
+
+static QPointF labelPosOf(const OrthoDimension& d)
+{
+  QPointF p0, p1;
+  dimLineEnds(d, p0, p1);
+  const QPointF perp = perpOf(d);
+  const QPointF dir = unitDirOf(d);
+  const QPointF mid = (p0 + p1) / 2.0;
   return mid + dir * d.labAlongPx + perp * d.labPerpPx;
+}
+
+QPointF OrthoViewWidget::dimLabelPos(const OrthoDimension& d) const
+{
+  return labelPosOf(d);
 }
 
 void OrthoViewWidget::paintEvent(QPaintEvent *)
@@ -130,34 +207,105 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
   QPainter painter(this);
   painter.fillRect(rect(), Qt::white);
 
-  if (this->data.image.isNull()) {
+  if (!this->data.valid()) {
     painter.setPen(Qt::gray);
     painter.drawText(rect(), Qt::AlignCenter, tr("(no preview)"));
     return;
   }
 
-  // Fit the image into the widget while keeping aspect ratio, centered; the
-  // user's wheel-zoom and drag-pan are applied on top (see mapToWidget).
-  const QSize imgSize = this->data.image.size();
-  this->fitScale = std::min(static_cast<double>(width()) / imgSize.width(),
-                            static_cast<double>(height()) / imgSize.height());
-  const double drawW = imgSize.width() * this->fitScale;
-  const double drawH = imgSize.height() * this->fitScale;
+  // Fit the view's model-mm bounding box into the widget keeping aspect, centered;
+  // the user's wheel-zoom and drag-pan are applied on top (see mapToWidget).
+  const QSizeF sz = this->data.sizeMm;
+  this->fitScale = std::min(static_cast<double>(width()) / sz.width(),
+                            static_cast<double>(height()) / sz.height());
+  const double drawW = sz.width() * this->fitScale;
+  const double drawH = sz.height() * this->fitScale;
   this->fitOffset = QPointF((width() - drawW) / 2.0, (height() - drawH) / 2.0);
 
-  const QPointF topLeft = mapToWidget(QPointF(0, 0));
-  painter.drawImage(QRectF(topLeft.x(), topLeft.y(), drawW * this->userZoom, drawH * this->userZoom),
-                    this->data.image);
-
   painter.setRenderHint(QPainter::Antialiasing, true);
+  painter.setFont(overlayFont());
+
+  // The line drawing itself: silhouette + feature edges (model-mm -> widget).
+  QPen edgePen(Qt::black);
+  edgePen.setWidthF(std::max(0.6, absPx(0.3)));
+  edgePen.setCapStyle(Qt::RoundCap);
+  painter.setPen(edgePen);
+  for (const auto& e : this->data.edges) {
+    painter.drawLine(mapToWidget(e.p1()), mapToWidget(e.p2()));
+  }
 
   // Dimensions: witness lines from the anchors out to an offset dimension line
   // with arrowheads, and a length label riding on it.
   QPen dimPen(QColor(20, 20, 20));
-  dimPen.setWidthF(1.4);
+  dimPen.setWidthF(std::max(0.6, absPx(0.25)));
   QPen witnessPen(QColor(120, 120, 120));
-  witnessPen.setWidthF(0.8);
+  witnessPen.setWidthF(std::max(0.4, absPx(0.15)));
+  const double arrowS = std::max(4.0, absPx(2.5));  // arrowhead length (~2.5 mm)
+  // Arrowhead with apex at `tip`, body extending toward `along` (unit), width from nrm.
+  auto drawArrow = [&](const QPointF& tip, const QPointF& along, const QPointF& nrm) {
+    QPolygonF head;
+    head << tip << (tip + along * arrowS + nrm * (arrowS * 0.4))
+         << (tip + along * arrowS - nrm * (arrowS * 0.4));
+    painter.setBrush(QColor(20, 20, 20));
+    painter.setPen(Qt::NoPen);
+    painter.drawPolygon(head);
+  };
+  // Draw a label box (with a white backing) centred at `center`, kept on-screen,
+  // and — when leaders are on and the label sits away from its dimension line — a
+  // thin leader from the box to the nearest point of the segment [seg0,seg1].
+  auto drawLabel = [&](const QPointF& center, const QString& text, const QPointF& seg0,
+                       const QPointF& seg1) {
+    const QRectF tr = painter.fontMetrics().boundingRect(text).adjusted(-3, -2, 3, 2);
+    QRectF box(center.x() - tr.width() / 2.0, center.y() - tr.height() / 2.0,
+               tr.width(), tr.height());
+    const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
+    const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
+    box.moveTo(bx, by);
+    if (this->showLeaders) {
+      const QPointF foot = closestOnSegment(box.center(), seg0, seg1);
+      if (std::hypot(box.center().x() - foot.x(), box.center().y() - foot.y()) >
+          box.height()) {
+        painter.setPen(witnessPen);
+        painter.drawLine(box.center(), foot);
+      }
+    }
+    painter.fillRect(box, QColor(255, 255, 255, 220));
+    painter.setPen(QColor(150, 30, 30));
+    painter.drawText(box, Qt::AlignCenter, text);
+  };
+
+  // Radial (⌀ / R) dimensions: line straight through the centre, no witness lines.
   for (const auto& dim : this->data.dims) {
+    if (!dim.radial) continue;
+    QPointF p0, p1;
+    dimLineEnds(dim, p0, p1);
+    const QPointF a2 = mapToWidget(p0), b2 = mapToWidget(p1);
+    QPointF dir = b2 - a2;
+    const double len = std::hypot(dir.x(), dir.y());
+    if (len < 1e-6) continue;
+    dir /= len;
+    const QPointF nrm(-dir.y(), dir.x());
+    painter.setPen(dimPen);
+    painter.setBrush(Qt::NoBrush);
+    if (dim.arrowsOut) {
+      // Arrows outside the rim pointing in (small features): stubs + inward heads.
+      painter.drawLine(a2, b2);
+      painter.drawLine(b2, b2 + dir * (arrowS * 1.5));
+      drawArrow(b2, dir, nrm);
+      if (!dim.radiusHalf) {
+        painter.drawLine(a2, a2 - dir * (arrowS * 1.5));
+        drawArrow(a2, -dir, nrm);
+      }
+    } else {
+      painter.drawLine(a2, b2);
+      drawArrow(b2, -dir, nrm);                    // head at the rim, pointing out
+      if (!dim.radiusHalf) drawArrow(a2, dir, nrm);  // diameter: head at both rims
+    }
+    drawLabel(mapToWidget(dimLabelPos(dim)), dim.label, a2, b2);
+  }
+
+  for (const auto& dim : this->data.dims) {
+    if (dim.radial) continue;
     const QPointF a = mapToWidget(dim.a);
     const QPointF b = mapToWidget(dim.b);
     const QPointF perp = dimPerp(dim);
@@ -180,7 +328,7 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
     if (len > 1e-6) {
       dir /= len;
       const QPointF nrm(-dir.y(), dir.x());
-      const double s = 6.0;
+      const double s = std::max(4.0, absPx(2.5));  // arrowhead length (~2.5 mm)
       auto arrow = [&](const QPointF& tip, const QPointF& along) {
         QPolygonF head;
         head << tip << (tip + along * s + nrm * (s * 0.4))
@@ -203,19 +351,9 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
       }
     }
 
-    // Label at its own position (dimension midpoint plus label offset).
-    const QPointF labelCenter = mapToWidget(dimLabelPos(dim));
-    const QString label = dim.label;
-    const QRectF textRect = painter.fontMetrics().boundingRect(label).adjusted(-3, -2, 3, 2);
-    QRectF box(labelCenter.x() - textRect.width() / 2.0,
-               labelCenter.y() - textRect.height() / 2.0, textRect.width(), textRect.height());
-    // Keep the label inside the widget so it never clips at the view border.
-    const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
-    const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
-    box.moveTo(bx, by);
-    painter.fillRect(box, QColor(255, 255, 255, 220));
-    painter.setPen(QColor(150, 30, 30));
-    painter.drawText(box, Qt::AlignCenter, label);
+    // Label at its own position (dimension midpoint plus label offset), with a
+    // leader to the dimension line when it has been dragged away.
+    drawLabel(mapToWidget(dimLabelPos(dim)), dim.label, a2, b2);
   }
 
   // Angle dimensions: two rays from the vertex, an arc between them, and a label.
@@ -277,15 +415,15 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
 
 void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
 {
-  if (this->data.image.isNull()) return;
+  if (!this->data.valid()) return;
   const QPointF click = event->position();
 
   // Right button: jump to the source of the dimension or dimref under the cursor
   // (left button stays reserved for creating/dragging dimensions and panning).
   if (event->button() == Qt::RightButton) {
-    const int di = dimAt(click);
-    if (di >= 0) {
-      emit jumpToSource(this->data.dims.at(di).id);
+    const int di = dimAt(click, /*editableOnly=*/false);
+    if (di >= 0 && this->data.dims.at(di).jumpLine >= 0) {
+      emit jumpToSource(this->data.dims.at(di).jumpLine);
       return;
     }
     double best = 12.0;
@@ -301,7 +439,7 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
   if (event->button() != Qt::LeftButton) return;
 
   // First: start dragging a label if the click is on one (editable dims only).
-  const QFontMetrics fm = fontMetrics();
+  const QFontMetrics fm(overlayFont());
   for (int i = 0; i < this->data.dims.size(); ++i) {
     const auto& dim = this->data.dims.at(i);
     if (dim.id < 0) continue;
@@ -320,10 +458,9 @@ void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
   for (int i = 0; i < this->data.dims.size(); ++i) {
     const auto& dim = this->data.dims.at(i);
     if (dim.id < 0) continue;
-    const QPointF perp = dimPerp(dim);
-    const QPointF a2 = mapToWidget(dimFoot(dim, perp, dim.a));
-    const QPointF b2 = mapToWidget(dimFoot(dim, perp, dim.b));
-    const double d = distToSegment(click, a2, b2);
+    QPointF p0, p1;
+    dimLineEnds(dim, p0, p1);
+    const double d = distToSegment(click, mapToWidget(p0), mapToWidget(p1));
     if (d < bestLine) {
       bestLine = d;
       hitDim = i;
@@ -397,8 +534,27 @@ void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
 
   if (this->draggingDim < 0 || this->draggingDim >= this->data.dims.size()) return;
   OrthoDimension& dim = this->data.dims[this->draggingDim];
-  const QPointF perp = dimPerp(dim);
   const QPointF mouseImg = mapToImage(event->position());
+
+  // Radial dimension: dragging rotates the line about the feature centre, keeping
+  // the rim radius. The source angle is the screen angle negated (view-local y is
+  // down, source angle is measured CCW in the y-up view plane).
+  if (dim.radial) {
+    QPointF rel = mouseImg - dim.center;
+    const double L = std::hypot(rel.x(), rel.y());
+    if (L < 1e-6) return;
+    const double r = std::hypot((dim.b - dim.center).x(), (dim.b - dim.center).y());
+    const QPointF u = rel / L;
+    dim.dir = u;
+    dim.b = dim.center + u * r;
+    dim.a = dim.radiusHalf ? dim.center : dim.center - u * r;
+    update();
+    const double angleDeg = -std::atan2(u.y(), u.x()) * 180.0 / M_PI;
+    emit dimensionAngleChanged(dim.id, angleDeg, false);
+    return;
+  }
+
+  const QPointF perp = dimPerp(dim);
   const QPointF mid = (dim.a + dim.b) / 2.0;
   const QPointF rel = mouseImg - mid;
   dim.offsetPx = rel.x() * perp.x() + rel.y() * perp.y();  // project onto perp
@@ -406,30 +562,30 @@ void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
   emit dimensionOffsetChanged(dim.id, dim.offsetPx, false);
 }
 
-int OrthoViewWidget::dimAt(const QPointF& pt) const
+int OrthoViewWidget::dimAt(const QPointF& pt, bool editableOnly) const
 {
-  const QFontMetrics fm = fontMetrics();
+  const QFontMetrics fm(overlayFont());
   // Label box first, then the dimension line.
   for (int i = 0; i < this->data.dims.size(); ++i) {
     const auto& dim = this->data.dims.at(i);
-    if (dim.id < 0) continue;
+    if (editableOnly && dim.id < 0) continue;
     QRectF box = fm.boundingRect(dim.label).adjusted(-3, -2, 3, 2);
     box.moveCenter(mapToWidget(dimLabelPos(dim)));
     if (box.contains(pt)) return i;
   }
   for (int i = 0; i < this->data.dims.size(); ++i) {
     const auto& dim = this->data.dims.at(i);
-    if (dim.id < 0) continue;
-    const QPointF perp = dimPerp(dim);
-    if (distToSegment(pt, mapToWidget(dimFoot(dim, perp, dim.a)),
-                      mapToWidget(dimFoot(dim, perp, dim.b))) < 8.0) return i;
+    if (editableOnly && dim.id < 0) continue;
+    QPointF p0, p1;
+    dimLineEnds(dim, p0, p1);
+    if (distToSegment(pt, mapToWidget(p0), mapToWidget(p1)) < 8.0) return i;
   }
   return -1;
 }
 
 void OrthoViewWidget::mouseDoubleClickEvent(QMouseEvent *event)
 {
-  if (this->data.image.isNull()) return;
+  if (!this->data.valid()) return;
   const int i = dimAt(event->position());
   if (i >= 0) emit dimensionDoubleClicked(this->data.dims.at(i).id);
 }
@@ -448,13 +604,18 @@ void OrthoViewWidget::mouseReleaseEvent(QMouseEvent *)
   }
   if (this->draggingDim < 0 || this->draggingDim >= this->data.dims.size()) return;
   const OrthoDimension& dim = this->data.dims[this->draggingDim];
-  emit dimensionOffsetChanged(dim.id, dim.offsetPx, true);
+  if (dim.radial) {
+    const QPointF u = unitDirOf(dim);
+    emit dimensionAngleChanged(dim.id, -std::atan2(u.y(), u.x()) * 180.0 / M_PI, true);
+  } else {
+    emit dimensionOffsetChanged(dim.id, dim.offsetPx, true);
+  }
   this->draggingDim = -1;
 }
 
 void OrthoViewWidget::wheelEvent(QWheelEvent *event)
 {
-  if (this->data.image.isNull()) return;
+  if (!this->data.valid()) return;
   const double steps = event->angleDelta().y() / 120.0;
   if (steps == 0.0) return;
   const QPointF cursor = event->position();
@@ -507,6 +668,10 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
             [this, i](int id, double offsetPx, bool finished) {
               emit dimensionOffsetChanged(i, id, offsetPx, finished);
             });
+    connect(view, &OrthoViewWidget::dimensionAngleChanged, this,
+            [this, i](int id, double angleDeg, bool finished) {
+              emit dimensionAngleChanged(i, id, angleDeg, finished);
+            });
     connect(view, &OrthoViewWidget::labelOffsetChanged, this,
             [this, i](int id, double alongPx, double perpPx, bool finished) {
               emit labelOffsetChanged(i, id, alongPx, perpPx, finished);
@@ -528,11 +693,10 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->showRefsCheck->setToolTip(
     tr("Show the dimref anchor dots and their names (dimension labels stay)."));
 
-  this->lineModeCheck = new QCheckBox(tr("Line drawing (b&&w)"), central);
-  this->lineModeCheck->setChecked(false);
-  this->lineModeCheck->setToolTip(
-    tr("Render a black-and-white line drawing (uniform faces + visible edges) "
-       "instead of the colored model."));
+  this->showLeadersCheck = new QCheckBox(tr("Leader lines"), central);
+  this->showLeadersCheck->setChecked(true);
+  this->showLeadersCheck->setToolTip(
+    tr("Draw a thin leader from a dragged-away label to its dimension line."));
 
   this->materializeButton = new QPushButton(tr("Materialize kvóty"), central);
   this->materializeButton->setToolTip(
@@ -545,31 +709,27 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->scaleSpin->setValue(1.0);
   this->scaleSpin->setToolTip(tr("Drawing scale for export (model units : drawing mm)."));
 
-  this->exportButton = new QPushButton(tr("Export SVG/PDF…"), central);
+  this->exportButton = new QPushButton(tr("Export…"), central);
   this->exportButton->setEnabled(false);
   this->exportButton->setToolTip(
-    tr("Export the sheet as scaled vector SVG or PDF (labels stay readable)."));
+    tr("Export exactly what is shown (edges + dimensions) as scaled vector "
+       "SVG, PDF or DXF."));
 
   this->saveButton = new QPushButton(tr("Save Sheet…"), central);
   this->saveButton->setEnabled(false);
-
-  this->lineExportButton = new QPushButton(tr("Line drawing (vector)…"), central);
-  this->lineExportButton->setEnabled(false);
-  this->lineExportButton->setToolTip(
-    tr("Export a compact vector SVG of the silhouette + feature edges (from the mesh)."));
+  this->saveButton->setToolTip(tr("Save the sheet as a PNG image (raster)."));
 
   auto *buttonRow = new QWidget(central);
   auto *buttonLayout = new QHBoxLayout(buttonRow);
   buttonLayout->setContentsMargins(0, 0, 0, 0);
   buttonLayout->addWidget(this->materializeButton);
-  buttonLayout->addWidget(this->lineExportButton);
   buttonLayout->addWidget(this->saveButton);
 
   auto *checkRow = new QWidget(central);
   auto *checkLayout = new QHBoxLayout(checkRow);
   checkLayout->setContentsMargins(0, 0, 0, 0);
   checkLayout->addWidget(this->showRefsCheck);
-  checkLayout->addWidget(this->lineModeCheck);
+  checkLayout->addWidget(this->showLeadersCheck);
   checkLayout->addStretch(1);
   checkLayout->addWidget(this->scaleSpin);
   checkLayout->addWidget(this->exportButton);
@@ -584,20 +744,30 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   connect(this->exportButton, &QPushButton::clicked, this, &DrawingViewDock::exportDrawing);
   connect(this->materializeButton, &QPushButton::clicked, this,
           &DrawingViewDock::materializeRequested);
-  connect(this->lineExportButton, &QPushButton::clicked, this,
-          &DrawingViewDock::lineDrawingRequested);
   connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
-  connect(this->lineModeCheck, &QCheckBox::toggled, this, &DrawingViewDock::renderModeChanged);
+  connect(this->showLeadersCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowLeaders);
+  // Changing the scale only affects text / line-weight sizing relative to the
+  // geometry (and the export size), so push it to the views without a re-render.
+  connect(this->scaleSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this](double) {
+            for (auto *view : this->viewWidgets) view->setScale(exportScale());
+          });
 }
 
-bool DrawingViewDock::lineMode() const
+double DrawingViewDock::exportScale() const
 {
-  return this->lineModeCheck->isChecked();
+  const double denom = this->scaleSpin->value();
+  return denom > 1e-6 ? 1.0 / denom : 1.0;  // drawing-mm per model-mm
 }
 
 void DrawingViewDock::setShowAnchors(bool show)
 {
   for (auto *view : this->viewWidgets) view->setShowAnchors(show);
+}
+
+void DrawingViewDock::setShowLeaders(bool show)
+{
+  for (auto *view : this->viewWidgets) view->setShowLeaders(show);
 }
 
 DrawingViewDock::~DrawingViewDock() = default;
@@ -621,11 +791,10 @@ void DrawingViewDock::setViews(const QList<OrthoViewData>& newViews, const QStri
 
   bool any = false;
   for (const auto& v : this->views) {
-    if (!v.image.isNull()) any = true;
+    if (v.valid()) any = true;
   }
   this->saveButton->setEnabled(any);
   this->exportButton->setEnabled(any);
-  this->lineExportButton->setEnabled(any);
   this->placeholder->setVisible(!any);
 }
 
@@ -667,113 +836,191 @@ void DrawingViewDock::exportDrawing()
 {
   bool any = false;
   for (const auto& v : this->views) {
-    if (!v.image.isNull()) any = true;
+    if (v.valid()) any = true;
   }
   if (!any) return;
 
-  const double denom = this->scaleSpin->value();
-  const double scale = denom > 1e-6 ? 1.0 / denom : 1.0;  // model-mm -> drawing-mm
+  const double scale = exportScale();  // drawing-mm per model-mm
+  const bool leaders = this->showLeadersCheck->isChecked();
 
   const QString filename = QFileDialog::getSaveFileName(
-    this, tr("Export drawing"), "drawing.svg", tr("SVG (*.svg);;PDF (*.pdf)"));
+    this, tr("Export drawing"), "drawing.svg",
+    tr("SVG (*.svg);;PDF (*.pdf);;DXF (*.dxf)"));
   if (filename.isEmpty()) return;
 
   const double dpi = 96.0;
   const double mmToPx = dpi / 25.4;
-  const double marginMm = 10.0, gapMm = 8.0, titleMm = 5.0;
-  const double fontPt = 9.0;
+  const double marginMm = 10.0, gapMm = 12.0, titleMm = 5.0;
+  const double fontMm = 3.0, edgeMm = 0.3, dimMm = 0.25, witMm = 0.15, arrowMm = 2.5;
 
-  // Vertical layout: title + view, stacked. Sizes computed in mm.
-  QVector<double> viewYmm, viewWmm, viewHmm;
+  // Vertical layout: title + view stacked, sizes in drawing-mm (geometry * scale).
+  QVector<double> viewYmm;
   double sheetWmm = 0.0, sheetHmm = marginMm;
   for (const auto& v : this->views) {
-    if (v.image.isNull()) {
-      viewYmm << 0; viewWmm << 0; viewHmm << 0;
-      continue;
-    }
-    const double vw = v.image.width() / v.pxPerMm * scale;
-    const double vh = v.image.height() / v.pxPerMm * scale;
+    if (!v.valid()) { viewYmm << 0; continue; }
+    const double vh = v.sizeMm.height() * scale;
     sheetHmm += titleMm;
     viewYmm << sheetHmm;
-    viewWmm << vw;
-    viewHmm << vh;
     sheetHmm += vh + gapMm;
-    sheetWmm = std::max(sheetWmm, vw);
+    sheetWmm = std::max(sheetWmm, v.sizeMm.width() * scale);
   }
   sheetWmm += 2 * marginMm;
   sheetHmm += marginMm;
+
+  // Build the whole sheet once as primitives in drawing-mm (y-down, origin at the
+  // top-left of the sheet). Both the raster/vector (QPainter) and the DXF writer
+  // consume the same primitives, so all three formats are truly WYSIWYG.
+  std::vector<QLineF> edgeSegs, dimSegs, witSegs;
+  std::vector<QPolygonF> arrows;
+  std::vector<std::pair<QPointF, QString>> labels, titles;
+  for (int i = 0; i < this->views.size(); ++i) {
+    const auto& v = this->views[i];
+    if (!v.valid()) continue;
+    const double oxmm = marginMm, oymm = viewYmm[i];
+    auto map = [&](const QPointF& mp) {
+      return QPointF(oxmm + mp.x() * scale, oymm + mp.y() * scale);  // -> drawing-mm
+    };
+    titles.emplace_back(QPointF(oxmm, oymm - 1.5), v.title);
+    for (const auto& e : v.edges) edgeSegs.emplace_back(map(e.p1()), map(e.p2()));
+
+    auto addArrow = [&](const QPointF& tip, const QPointF& along, const QPointF& nrm) {
+      QPolygonF h;
+      h << tip << (tip + along * arrowMm + nrm * arrowMm * 0.4)
+        << (tip + along * arrowMm - nrm * arrowMm * 0.4);
+      arrows.push_back(h);
+    };
+    // Leader from a dragged-away label to the nearest point of its dimension line.
+    auto addLeader = [&](const QPointF& lp, const QPointF& s0, const QPointF& s1) {
+      if (!leaders) return;
+      const QPointF foot = closestOnSegment(lp, s0, s1);
+      if (std::hypot((lp - foot).x(), (lp - foot).y()) > fontMm) witSegs.emplace_back(lp, foot);
+    };
+    for (const auto& d : v.dims) {
+      QPointF e0, e1;
+      dimLineEnds(d, e0, e1);
+      const QPointF a2 = map(e0), b2 = map(e1);
+      const QPointF labelPos = map(labelPosOf(d));
+      QPointF sdir = b2 - a2;
+      const double sl = std::hypot(sdir.x(), sdir.y());
+      if (d.radial) {
+        // Line through the centre, no witness lines; arrow at the rim (and the
+        // opposite rim for a diameter); a leader from a dragged-away label.
+        dimSegs.emplace_back(a2, b2);
+        if (sl > 1e-6) {
+          sdir /= sl;
+          const QPointF nrm(-sdir.y(), sdir.x());
+          if (d.arrowsOut) {
+            dimSegs.emplace_back(b2, b2 + sdir * (arrowMm * 1.5));
+            addArrow(b2, sdir, nrm);
+            if (!d.radiusHalf) {
+              dimSegs.emplace_back(a2, a2 - sdir * (arrowMm * 1.5));
+              addArrow(a2, -sdir, nrm);
+            }
+          } else {
+            addArrow(b2, -sdir, nrm);
+            if (!d.radiusHalf) addArrow(a2, sdir, nrm);
+          }
+        }
+        addLeader(labelPos, a2, b2);
+        labels.emplace_back(labelPos, d.label);
+        continue;
+      }
+      const QPointF perp = perpOf(d);
+      const QPointF a = map(d.a), b = map(d.b);
+      if (std::hypot((a2 - a).x(), (a2 - a).y()) > 0.5) witSegs.emplace_back(a, a2);
+      if (std::hypot((b2 - b).x(), (b2 - b).y()) > 0.5) witSegs.emplace_back(b, b2);
+      dimSegs.emplace_back(a2, b2);
+      if (sl > 1e-6) {
+        sdir /= sl;
+        const QPointF nrm(-sdir.y(), sdir.x());
+        if (d.arrowsOut) { addArrow(a2, -sdir, nrm); addArrow(b2, sdir, nrm); }
+        else { addArrow(a2, sdir, nrm); addArrow(b2, -sdir, nrm); }
+      }
+      addLeader(labelPos, a2, b2);
+      labels.emplace_back(labelPos, d.label);
+    }
+    for (const auto& ang : v.angles) {
+      const QPointF vtx = map(ang.vertex), pa = map(ang.a), pb = map(ang.b);
+      witSegs.emplace_back(vtx, pa);
+      witSegs.emplace_back(vtx, pb);
+      QPointF bis = (pa - vtx) + (pb - vtx);
+      const double bl = std::hypot(bis.x(), bis.y());
+      bis = bl > 1e-6 ? bis / bl : QPointF(0, -1);
+      labels.emplace_back(vtx + bis * (arrowMm * 4), ang.label);
+    }
+  }
+
+  if (filename.endsWith(".dxf", Qt::CaseInsensitive)) {
+    std::ofstream out(filename.toStdString());
+    if (!out.is_open()) return;
+    auto Y = [&](double y) { return sheetHmm - y; };  // DXF is y-up
+    auto line = [&](const QPointF& a, const QPointF& b) {
+      out << "0\nLINE\n8\n0\n10\n" << a.x() << "\n20\n" << Y(a.y()) << "\n30\n0\n11\n"
+          << b.x() << "\n21\n" << Y(b.y()) << "\n31\n0\n";
+    };
+    out << "0\nSECTION\n2\nENTITIES\n";
+    for (const auto& e : edgeSegs) line(e.p1(), e.p2());
+    for (const auto& w : witSegs) line(w.p1(), w.p2());
+    for (const auto& d : dimSegs) line(d.p1(), d.p2());
+    for (const auto& h : arrows)
+      for (int k = 0; k < h.size(); ++k) line(h[k], h[(k + 1) % h.size()]);
+    auto text = [&](const QPointF& p, const QString& s, double h) {
+      // Horizontally centred (group code 72 = 1); alignment point in 11/21.
+      out << "0\nTEXT\n8\n0\n10\n" << p.x() << "\n20\n" << Y(p.y()) << "\n30\n0\n40\n" << h
+          << "\n72\n1\n11\n" << p.x() << "\n21\n" << Y(p.y()) << "\n31\n0\n1\n"
+          << s.toStdString() << "\n";
+    };
+    for (const auto& [p, s] : labels) text(p, s, fontMm);
+    for (const auto& [p, s] : titles) text(QPointF(p.x() + 10, p.y()), s, fontMm);
+    out << "0\nENDSEC\n0\nEOF\n";
+    return;
+  }
+
+  // SVG / PDF via QPainter: draw the same primitives in device px.
   const int sheetWpx = qRound(sheetWmm * mmToPx);
   const int sheetHpx = qRound(sheetHmm * mmToPx);
-
   auto paintSheet = [&](QPainter& p) {
     p.setRenderHint(QPainter::Antialiasing, true);
     p.fillRect(QRectF(0, 0, sheetWpx, sheetHpx), Qt::white);
     QFont font = p.font();
-    font.setPointSizeF(fontPt);
+    font.setPixelSize(std::max(1, static_cast<int>(std::round(fontMm * mmToPx))));
     p.setFont(font);
+    auto P = [&](const QPointF& mm) { return QPointF(mm.x() * mmToPx, mm.y() * mmToPx); };
 
-    for (int i = 0; i < this->views.size(); ++i) {
-      const auto& v = this->views[i];
-      if (v.image.isNull()) continue;
-      const double ox = marginMm * mmToPx;
-      const double oy = viewYmm[i] * mmToPx;
+    p.setPen(Qt::black);
+    for (const auto& [pos, txt] : titles) p.drawText(P(pos), txt);
 
-      p.setPen(Qt::black);
-      p.drawText(QPointF(ox, oy - 2.0), v.title);
-      p.drawImage(QRectF(ox, oy, viewWmm[i] * mmToPx, viewHmm[i] * mmToPx), v.image);
+    QPen edgePen(Qt::black);
+    edgePen.setWidthF(edgeMm * mmToPx);
+    edgePen.setCapStyle(Qt::RoundCap);
+    p.setPen(edgePen);
+    for (const auto& e : edgeSegs) p.drawLine(P(e.p1()), P(e.p2()));
 
-      // image-px -> sheet-px (same factor the raster is drawn at)
-      const double k = (1.0 / v.pxPerMm) * scale * mmToPx;
-      auto map = [&](const QPointF& ip) { return QPointF(ox + ip.x() * k, oy + ip.y() * k); };
+    QPen witPen(QColor(120, 120, 120));
+    witPen.setWidthF(witMm * mmToPx);
+    p.setPen(witPen);
+    for (const auto& w : witSegs) p.drawLine(P(w.p1()), P(w.p2()));
 
-      QPen dimPen(Qt::black);
-      dimPen.setWidthF(std::max(0.5, 0.3 * mmToPx));
-      for (const auto& d : v.dims) {
-        QPointF dir = d.b - d.a;
-        const double len = std::hypot(dir.x(), dir.y());
-        if (len < 1e-6) continue;
-        dir /= len;
-        const QPointF perp(dir.y(), -dir.x());
-        const QPointF a = map(d.a + perp * d.offsetPx);
-        const QPointF b = map(d.b + perp * d.offsetPx);
-        p.setPen(dimPen);
-        p.drawLine(a, b);
-        if (std::abs(d.offsetPx) > 0.5) {
-          QPen wit(QColor(120, 120, 120));
-          wit.setWidthF(0.5);
-          p.setPen(wit);
-          p.drawLine(map(d.a), a);
-          p.drawLine(map(d.b), b);
-          p.setPen(dimPen);
-        }
-        // Arrowheads (fixed size, in px).
-        QPointF sdir = b - a;
-        const double sl = std::hypot(sdir.x(), sdir.y());
-        if (sl > 1e-6) {
-          sdir /= sl;
-          const QPointF nrm(-sdir.y(), sdir.x());
-          const double s = 3.5 * mmToPx * 0.35;
-          auto arrow = [&](const QPointF& tip, const QPointF& along) {
-            QPolygonF h;
-            h << tip << (tip + along * s + nrm * s * 0.4) << (tip + along * s - nrm * s * 0.4);
-            p.setBrush(Qt::black);
-            p.setPen(Qt::NoPen);
-            p.drawPolygon(h);
-            p.setPen(dimPen);
-          };
-          if (d.arrowsOut) { arrow(a, -sdir); arrow(b, sdir); }
-          else { arrow(a, sdir); arrow(b, -sdir); }
-        }
-        // Label at the offset-line midpoint plus its own offset (fixed font).
-        const QPointF midImg = (d.a + d.b) / 2.0 + perp * d.offsetPx +
-                               dir * d.labAlongPx + perp * d.labPerpPx;
-        const QPointF lp = map(midImg);
-        const QRectF tr = p.fontMetrics().boundingRect(d.label).adjusted(-2, -1, 2, 1);
-        QRectF box(lp.x() - tr.width() / 2, lp.y() - tr.height() / 2, tr.width(), tr.height());
-        p.fillRect(box, QColor(255, 255, 255, 220));
-        p.setPen(QColor(150, 30, 30));
-        p.drawText(box, Qt::AlignCenter, d.label);
-      }
+    QPen dimPen(Qt::black);
+    dimPen.setWidthF(dimMm * mmToPx);
+    p.setPen(dimPen);
+    for (const auto& d : dimSegs) p.drawLine(P(d.p1()), P(d.p2()));
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(Qt::black);
+    for (const auto& h : arrows) {
+      QPolygonF q;
+      for (const auto& pt : h) q << P(pt);
+      p.drawPolygon(q);
+    }
+
+    for (const auto& [pos, txt] : labels) {
+      const QPointF c = P(pos);
+      const QRectF tr = p.fontMetrics().boundingRect(txt).adjusted(-2, -1, 2, 1);
+      QRectF box(c.x() - tr.width() / 2, c.y() - tr.height() / 2, tr.width(), tr.height());
+      p.fillRect(box, QColor(255, 255, 255, 220));
+      p.setPen(QColor(150, 30, 30));
+      p.drawText(box, Qt::AlignCenter, txt);
     }
   };
 

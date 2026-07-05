@@ -15,17 +15,10 @@
 
 namespace {
 
-// One orthographic view: which world axes map to screen x / y, and which axis is
-// depth. depthSign orients depth so that smaller = closer to the viewer.
-struct ViewDef {
-  const char *name;
-  int ax;          // world axis -> screen x
-  int ay;          // world axis -> screen y (drawn upward)
-  int az;          // world axis -> depth
-  double depthSign;
-  Vector3d dir;    // view direction for the silhouette test
-};
+// The view definition is shared with the drawing dock (see export_line_drawing.h).
+using ViewDef = LineDrawingView;
 
+// A sheet-space segment (origin-shifted and scaled), millimetres, y-up.
 struct ProjSeg {
   double x0, y0, x1, y1;
 };
@@ -80,6 +73,25 @@ public:
     return d <= buf + depthEps_;
   }
 
+  // Is there empty space (background, or off the model) within a few pixels of the
+  // screen point along the unit screen direction (ux, uy)? Used to recognise an
+  // outline edge: the tessellated silhouette of a curved object sits a fraction
+  // inside the true rim, so the object's own nearer front surface occludes it in
+  // the depth test and it drops out in dashes. But an edge with empty space just
+  // to one side is on the object's boundary against nothing — it is genuinely
+  // visible and must be drawn regardless of the depth test. Interior hidden edges
+  // have covered pixels on both sides and are unaffected.
+  bool backgroundToward(double sx, double sy, double ux, double uy) const
+  {
+    for (int k = 1; k <= 3; ++k) {
+      int px, py;
+      if (!toPixel(sx + ux * k / scale_, sy + uy * k / scale_, px, py)) return true;
+      if (buf_[static_cast<size_t>(py) * W_ + px] == std::numeric_limits<double>::max())
+        return true;
+    }
+    return false;
+  }
+
 private:
   static constexpr double kTargetPx = 900.0;
 
@@ -123,48 +135,27 @@ private:
   std::vector<double> buf_;
 };
 
-// Project one view's feature edges to 2D (mm, y-up), removing the parts hidden
-// behind the mesh, then shift to the origin and report width/height.
-std::vector<ProjSeg> projectView(const PolySet& ps, const ViewDef& v, double creaseAngle,
-                                 double& outW, double& outH)
+// Project one view's feature edges to sheet space: origin-shifted and multiplied
+// by `scale`; report the scaled width/height. Built on the shared raw projector.
+std::vector<ProjSeg> projectViewShifted(const PolySet& ps, const ViewDef& v, double creaseAngleDeg,
+                                        double scale, double& outW, double& outH)
 {
-  const auto segs = FeatureEdges::select(ps, v.dir, creaseAngle);
-  const DepthBuffer depth(ps, v);
-
+  const auto raw = projectViewEdges(ps, v, creaseAngleDeg);
   double minx = std::numeric_limits<double>::max(), miny = minx;
   double maxx = std::numeric_limits<double>::lowest(), maxy = maxx;
-  std::vector<ProjSeg> proj;
-  auto emit = [&](const Vector3d& p0, const Vector3d& p1) {
-    const double x0 = p0[v.ax], y0 = p0[v.ay];
-    const double x1 = p1[v.ax], y1 = p1[v.ay];
-    proj.push_back({x0, y0, x1, y1});
-    minx = std::min({minx, x0, x1}); miny = std::min({miny, y0, y1});
-    maxx = std::max({maxx, x0, x1}); maxy = std::max({maxy, y0, y1});
-  };
-
-  for (const auto& s : segs) {
-    if (!depth.valid()) { emit(s.p0, s.p1); continue; }
-    // Sample the edge and keep the contiguous visible runs (hidden-line removal).
-    const double lenPx = (Vector3d(s.p1[v.ax] - s.p0[v.ax], s.p1[v.ay] - s.p0[v.ay], 0)).norm();
-    const int n = std::clamp(static_cast<int>(lenPx * 2.0), 8, 400);
-    bool runOpen = false;
-    Vector3d runStart;
-    Vector3d prev;
-    for (int i = 0; i <= n; ++i) {
-      const double t = static_cast<double>(i) / n;
-      const Vector3d p = s.p0 + t * (s.p1 - s.p0);
-      const bool vis = depth.visible(p, v);
-      if (vis && !runOpen) { runOpen = true; runStart = p; }
-      else if (!vis && runOpen) { emit(runStart, prev); runOpen = false; }
-      prev = p;
-    }
-    if (runOpen) emit(runStart, prev);
+  for (const auto& r : raw) {
+    minx = std::min({minx, r.x0, r.x1}); miny = std::min({miny, r.y0, r.y1});
+    maxx = std::max({maxx, r.x0, r.x1}); maxy = std::max({maxy, r.y0, r.y1});
   }
-
-  if (proj.empty()) { outW = outH = 0; return proj; }
-  for (auto& p : proj) { p.x0 -= minx; p.x1 -= minx; p.y0 -= miny; p.y1 -= miny; }
-  outW = maxx - minx;
-  outH = maxy - miny;
+  std::vector<ProjSeg> proj;
+  if (raw.empty()) { outW = outH = 0; return proj; }
+  proj.reserve(raw.size());
+  for (const auto& r : raw) {
+    proj.push_back({(r.x0 - minx) * scale, (r.y0 - miny) * scale,
+                    (r.x1 - minx) * scale, (r.y1 - miny) * scale});
+  }
+  outW = (maxx - minx) * scale;
+  outH = (maxy - miny) * scale;
   return proj;
 }
 
@@ -187,14 +178,9 @@ struct Sheet {
   double labelH{6.0};
 };
 
-bool buildSheet(const PolySet& ps, double creaseAngleDeg, Sheet& sh)
+bool buildSheet(const PolySet& ps, double creaseAngleDeg, double scale, Sheet& sh)
 {
-  const double creaseAngle = creaseAngleDeg * M_PI / 180.0;
-  const std::vector<ViewDef> views = {
-    {"Front", 0, 2, 1, +1.0, {0, 1, 0}},   // XZ plane, depth +Y (viewer at -Y)
-    {"Side", 1, 2, 0, -1.0, {1, 0, 0}},     // YZ plane, depth -X (viewer at +X)
-    {"Top", 0, 1, 2, -1.0, {0, 0, 1}},      // XY plane, depth -Z (viewer at +Z)
-  };
+  const std::vector<LineDrawingView>& views = lineDrawingViews();
   const int cellCol[3] = {0, 1, 0};
   const int cellRow[3] = {0, 0, 1};  // row 0 = upper, row 1 = lower
 
@@ -205,7 +191,7 @@ bool buildSheet(const PolySet& ps, double creaseAngleDeg, Sheet& sh)
   sh.oy.resize(views.size());
   double cellW = 0, cellH = 0;
   for (size_t i = 0; i < views.size(); ++i) {
-    sh.proj[i] = projectView(ps, views[i], creaseAngle, sh.vw[i], sh.vh[i]);
+    sh.proj[i] = projectViewShifted(ps, views[i], creaseAngleDeg, scale, sh.vw[i], sh.vh[i]);
     sh.names.push_back(views[i].name);
     cellW = std::max(cellW, sh.vw[i]);
     cellH = std::max(cellH, sh.vh[i]);
@@ -283,9 +269,61 @@ bool endsWithNoCase(const std::string& s, const std::string& suffix)
 
 }  // namespace
 
-bool exportLineDrawing(const PolySet& ps, double creaseAngleDeg, const std::string& path)
+const std::vector<LineDrawingView>& lineDrawingViews()
+{
+  static const std::vector<LineDrawingView> views = {
+    {"Front", 0, 2, 1, +1.0, {0, 1, 0}},   // XZ plane, depth +Y (viewer at -Y)
+    {"Side", 1, 2, 0, -1.0, {1, 0, 0}},     // YZ plane, depth -X (viewer at +X)
+    {"Top", 0, 1, 2, -1.0, {0, 0, 1}},      // XY plane, depth -Z (viewer at +Z)
+  };
+  return views;
+}
+
+std::vector<LineDrawingSeg2D> projectViewEdges(const PolySet& ps, const LineDrawingView& v,
+                                               double creaseAngleDeg)
+{
+  const double creaseAngle = creaseAngleDeg * M_PI / 180.0;
+  const auto segs = FeatureEdges::select(ps, v.dir, creaseAngle);
+  const DepthBuffer depth(ps, v);
+
+  std::vector<LineDrawingSeg2D> proj;
+  auto emit = [&](const Vector3d& p0, const Vector3d& p1) {
+    proj.push_back({p0[v.ax], p0[v.ay], p1[v.ax], p1[v.ay]});
+  };
+  for (const auto& s : segs) {
+    if (!depth.valid()) { emit(s.p0, s.p1); continue; }
+    // Sample the edge and keep the contiguous visible runs (hidden-line removal).
+    const double dx = s.p1[v.ax] - s.p0[v.ax], dy = s.p1[v.ay] - s.p0[v.ay];
+    const double lenPx = std::hypot(dx, dy);
+    // Unit screen-space perpendicular of the edge, for the outline (background)
+    // test that rescues silhouette edges from self-occlusion.
+    const double perpx = lenPx > 1e-9 ? -dy / lenPx : 0.0;
+    const double perpy = lenPx > 1e-9 ? dx / lenPx : 0.0;
+    const int n = std::clamp(static_cast<int>(lenPx * 2.0), 8, 400);
+    bool runOpen = false;
+    Vector3d runStart;
+    Vector3d prev;
+    for (int i = 0; i <= n; ++i) {
+      const double t = static_cast<double>(i) / n;
+      const Vector3d p = s.p0 + t * (s.p1 - s.p0);
+      bool vis = depth.visible(p, v);
+      if (!vis && (depth.backgroundToward(p[v.ax], p[v.ay], perpx, perpy) ||
+                   depth.backgroundToward(p[v.ax], p[v.ay], -perpx, -perpy))) {
+        vis = true;  // edge lies on the object's outline against empty space
+      }
+      if (vis && !runOpen) { runOpen = true; runStart = p; }
+      else if (!vis && runOpen) { emit(runStart, prev); runOpen = false; }
+      prev = p;
+    }
+    if (runOpen) emit(runStart, prev);
+  }
+  return proj;
+}
+
+bool exportLineDrawing(const PolySet& ps, double creaseAngleDeg, const std::string& path,
+                       double scale)
 {
   Sheet sh;
-  if (!buildSheet(ps, creaseAngleDeg, sh)) return false;
+  if (!buildSheet(ps, creaseAngleDeg, scale, sh)) return false;
   return endsWithNoCase(path, ".dxf") ? writeDxf(sh, path) : writeSvg(sh, path);
 }

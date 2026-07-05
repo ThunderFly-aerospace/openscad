@@ -170,11 +170,13 @@ private:
   void refreshCameras();
   void refreshDrawingViews();
   void onDrawingAnchorClicked(int viewIndex, const QString& name);
+  // "diameter"/"radius" if the anchor ref resolves to a dimref carrying d=/r=.
+  QString radialKindOfAnchor(const QString& ref) const;
   void onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
+  void onDimensionAngleChanged(int viewIndex, int id, double angleDeg, bool finished);
   void onLabelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx, bool finished);
   void onDimensionDoubleClicked(int id);
   void onMaterializeKvotas();
-  void onExportLineDrawing();
 
   // Interactive dimension creation: the first anchor clicked in the drawing
   // dock, pending the second. Empty = no pending pick.
