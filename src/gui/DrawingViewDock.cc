@@ -225,6 +225,15 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
   painter.setRenderHint(QPainter::Antialiasing, true);
   painter.setFont(overlayFont());
 
+  // Section cut-face hatching first, so edges sit on top of it.
+  if (!this->data.hatch.isEmpty()) {
+    QPen hatchPen(QColor(90, 90, 90));
+    hatchPen.setWidthF(std::max(0.4, absPx(0.13)));
+    painter.setPen(hatchPen);
+    for (const auto& hh : this->data.hatch)
+      painter.drawLine(mapToWidget(hh.p1()), mapToWidget(hh.p2()));
+  }
+
   // The line drawing itself: silhouette + feature edges (model-mm -> widget).
   QPen edgePen(Qt::black);
   edgePen.setWidthF(std::max(0.6, absPx(0.3)));
@@ -664,6 +673,8 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   auto *sheet = new QWidget(central);
   auto *grid = new QGridLayout(sheet);
   grid->setContentsMargins(0, 0, 0, 0);
+  this->sheetGrid = grid;
+  this->sheetWidget = sheet;
 
   const char *defaultTitles[kViewCount] = {
     QT_TR_NOOP("Front (nárys)"), QT_TR_NOOP("Back (zadní)"), QT_TR_NOOP("Left (levý bok)"),
@@ -824,6 +835,35 @@ void DrawingViewDock::setViews(const QList<OrthoViewData>& newViews, const QStri
   updateExportEnabled();
 }
 
+void DrawingViewDock::setSectionViews(const QList<OrthoViewData>& sections)
+{
+  this->sectionViews = sections;
+  // Grow the pool of section tiles as needed; place them in rows below the
+  // standard 3-row grid, four per row.
+  while (this->sectionWidgets.size() < sections.size()) {
+    const int i = this->sectionWidgets.size();
+    auto *box = new QGroupBox(this->sheetWidget);
+    auto *boxLayout = new QVBoxLayout(box);
+    boxLayout->setContentsMargins(2, 2, 2, 2);
+    auto *view = new OrthoViewWidget(box);
+    boxLayout->addWidget(view);
+    this->sheetGrid->addWidget(box, 3 + i / 4, i % 4);
+    this->sectionWidgets.append(view);
+    this->sectionBoxes.append(box);
+  }
+  for (int i = 0; i < this->sectionWidgets.size(); ++i) {
+    const bool shown = i < sections.size();
+    this->sectionBoxes.at(i)->setVisible(shown);
+    if (shown) {
+      this->sectionBoxes.at(i)->setTitle(sections.at(i).title);
+      this->sectionWidgets.at(i)->setData(sections.at(i));
+    } else {
+      this->sectionWidgets.at(i)->clear();
+    }
+  }
+  updateExportEnabled();
+}
+
 bool DrawingViewDock::isViewSelected(int viewIndex) const
 {
   return viewIndex >= 0 && viewIndex < this->viewBoxes.size() &&
@@ -833,9 +873,10 @@ bool DrawingViewDock::isViewSelected(int viewIndex) const
 void DrawingViewDock::updateExportEnabled()
 {
   bool any = false;
-  for (int i = 0; i < this->views.size(); ++i) {
+  for (int i = 0; i < this->views.size(); ++i)
     if (isViewSelected(i) && this->views.at(i).valid()) any = true;
-  }
+  for (const auto& s : this->sectionViews)
+    if (s.valid()) any = true;
   this->saveButton->setEnabled(any);
   this->exportButton->setEnabled(any);
   this->placeholder->setVisible(!any);
@@ -844,6 +885,7 @@ void DrawingViewDock::updateExportEnabled()
 void DrawingViewDock::clearViews()
 {
   setViews({}, {});
+  setSectionViews({});
 }
 
 void DrawingViewDock::saveSheet()
@@ -856,9 +898,13 @@ void DrawingViewDock::saveSheet()
   // Compose the shown views (with overlays) side by side by grabbing each widget.
   QVector<QPixmap> shots;
   int totalW = 0, maxH = 0;
-  for (int i = 0; i < this->viewWidgets.size(); ++i) {
-    if (!isViewSelected(i)) continue;
-    QPixmap shot = this->viewWidgets.at(i)->grab();
+  QVector<OrthoViewWidget *> grabList;
+  for (int i = 0; i < this->viewWidgets.size(); ++i)
+    if (isViewSelected(i)) grabList.append(this->viewWidgets.at(i));
+  for (int i = 0; i < this->sectionViews.size() && i < this->sectionWidgets.size(); ++i)
+    if (this->sectionViews.at(i).valid()) grabList.append(this->sectionWidgets.at(i));
+  for (auto *w : grabList) {
+    QPixmap shot = w->grab();
     shots.append(shot);
     totalW += shot.width();
     maxH = std::max(maxH, shot.height());
@@ -881,6 +927,8 @@ void DrawingViewDock::exportDrawing()
   bool any = false;
   for (int i = 0; i < this->views.size(); ++i)
     if (isViewSelected(i) && this->views.at(i).valid()) any = true;
+  for (const auto& s : this->sectionViews)
+    if (s.valid()) any = true;
   if (!any) return;
 
   const double scale = exportScale();  // drawing-mm per model-mm
@@ -896,22 +944,23 @@ void DrawingViewDock::exportDrawing()
   const double marginMm = 10.0, gapMm = 12.0, titleMm = 5.0;
   const double fontMm = 3.0, edgeMm = 0.3, dimMm = 0.25, witMm = 0.15, arrowMm = 2.5;
 
-  struct Placement { int idx; double ox, oy; };
+  struct Placement { const OrthoViewData *v; double ox, oy; QString slug; };
   // Build the placed views' primitives (drawing-mm, y-down) and render to `path`.
   // Both the QPainter (SVG/PDF) and the DXF writer consume the same primitives, so
   // every format is truly WYSIWYG.
   auto renderToFile = [&](const QVector<Placement>& places, double sheetWmm, double sheetHmm,
                           const QString& path) {
-    std::vector<QLineF> edgeSegs, dimSegs, witSegs;
+    std::vector<QLineF> edgeSegs, hatchSegs, dimSegs, witSegs;
     std::vector<QPolygonF> arrows;
     std::vector<std::pair<QPointF, QString>> labels, titles;
     for (const auto& pl : places) {
-      const auto& v = this->views[pl.idx];
+      const auto& v = *pl.v;
       const double oxmm = pl.ox, oymm = pl.oy;
       auto map = [&](const QPointF& mp) {
       return QPointF(oxmm + mp.x() * scale, oymm + mp.y() * scale);  // -> drawing-mm
     };
     titles.emplace_back(QPointF(oxmm, oymm - 1.5), v.title);
+    for (const auto& hh : v.hatch) hatchSegs.emplace_back(map(hh.p1()), map(hh.p2()));
     for (const auto& e : v.edges) edgeSegs.emplace_back(map(e.p1()), map(e.p2()));
 
     auto addArrow = [&](const QPointF& tip, const QPointF& along, const QPointF& nrm) {
@@ -990,6 +1039,7 @@ void DrawingViewDock::exportDrawing()
           << b.x() << "\n21\n" << Y(b.y()) << "\n31\n0\n";
     };
     out << "0\nSECTION\n2\nENTITIES\n";
+    for (const auto& hh : hatchSegs) line(hh.p1(), hh.p2());
     for (const auto& e : edgeSegs) line(e.p1(), e.p2());
     for (const auto& w : witSegs) line(w.p1(), w.p2());
     for (const auto& d : dimSegs) line(d.p1(), d.p2());
@@ -1020,6 +1070,11 @@ void DrawingViewDock::exportDrawing()
 
     p.setPen(Qt::black);
     for (const auto& [pos, txt] : titles) p.drawText(P(pos), txt);
+
+    QPen hatchPen(QColor(90, 90, 90));
+    hatchPen.setWidthF(0.13 * mmToPx);
+    p.setPen(hatchPen);
+    for (const auto& hh : hatchSegs) p.drawLine(P(hh.p1()), P(hh.p2()));
 
     QPen edgePen(Qt::black);
     edgePen.setWidthF(edgeMm * mmToPx);
@@ -1073,46 +1128,52 @@ void DrawingViewDock::exportDrawing()
     }
   };  // renderToFile
 
-  // Selected, non-empty views.
-  QVector<int> sel;
+  // Tiles to export: the selected standard views at their first-angle cells, plus
+  // the section views appended in rows below the standard 3-row grid.
+  struct Tile { const OrthoViewData *v; int gridR, gridC; QString slug; };
+  QVector<Tile> tiles;
   for (int i = 0; i < this->views.size(); ++i)
-    if (isViewSelected(i) && this->views.at(i).valid()) sel.push_back(i);
-  if (sel.isEmpty()) return;
+    if (isViewSelected(i) && this->views.at(i).valid())
+      tiles.push_back({&this->views.at(i), kGridPos[i][0], kGridPos[i][1], kViewSlug[i]});
+  for (int i = 0, cell = 0; i < this->sectionViews.size(); ++i) {
+    if (!this->sectionViews.at(i).valid()) continue;
+    tiles.push_back({&this->sectionViews.at(i), 3 + cell / 4, cell % 4,
+                     QString("section%1").arg(i + 1)});
+    ++cell;
+  }
+  if (tiles.isEmpty()) return;
 
   if (this->separateFilesCheck->isChecked()) {
-    // One file per view (name_slug.ext), each a single-view sheet.
-    for (int idx : sel) {
-      const double w = this->views[idx].sizeMm.width() * scale;
-      const double h = this->views[idx].sizeMm.height() * scale;
+    // One file per tile (name_slug.ext), each a single-view sheet.
+    for (const auto& t : tiles) {
+      const double w = t.v->sizeMm.width() * scale, h = t.v->sizeMm.height() * scale;
       QString path = filename;
       const int dot = path.lastIndexOf('.');
-      const QString slug = "_" + QString(kViewSlug[idx]);
+      const QString slug = "_" + t.slug;
       if (dot >= 0) path.insert(dot, slug); else path += slug;
-      renderToFile({{idx, marginMm, marginMm + titleMm}}, w + 2 * marginMm,
+      renderToFile({{t.v, marginMm, marginMm + titleMm, t.slug}}, w + 2 * marginMm,
                    h + titleMm + 2 * marginMm, path);
     }
   } else {
-    // First-angle (ISO-E) grid. Same-axis views share extents, so centring each
-    // view in its (equal-width/height) cell aligns them: top under front, side
-    // views level with front, etc.
-    double colW[4] = {0, 0, 0, 0}, rowH[3] = {0, 0, 0};
-    for (int idx : sel) {
-      const int r = kGridPos[idx][0], c = kGridPos[idx][1];
-      colW[c] = std::max(colW[c], this->views[idx].sizeMm.width() * scale);
-      rowH[r] = std::max(rowH[r], this->views[idx].sizeMm.height() * scale);
+    // First-angle (ISO-E) grid. Same-axis views share extents, so centring each in
+    // its (equal-width/height) cell aligns them: top under front, sides level, etc.
+    int maxR = 2;
+    for (const auto& t : tiles) maxR = std::max(maxR, t.gridR);
+    std::vector<double> colW(4, 0.0), rowH(maxR + 1, 0.0), colX(4), rowY(maxR + 1);
+    for (const auto& t : tiles) {
+      colW[t.gridC] = std::max(colW[t.gridC], t.v->sizeMm.width() * scale);
+      rowH[t.gridR] = std::max(rowH[t.gridR], t.v->sizeMm.height() * scale);
     }
-    double colX[4], rowY[3], x = marginMm, y = marginMm;
+    double x = marginMm, y = marginMm;
     for (int c = 0; c < 4; ++c) { colX[c] = x; if (colW[c] > 0) x += colW[c] + gapMm; }
-    for (int r = 0; r < 3; ++r) { rowY[r] = y; if (rowH[r] > 0) y += titleMm + rowH[r] + gapMm; }
+    for (int r = 0; r <= maxR; ++r) { rowY[r] = y; if (rowH[r] > 0) y += titleMm + rowH[r] + gapMm; }
     const double sheetWmm = std::max(2 * marginMm, x - gapMm + marginMm);
     const double sheetHmm = std::max(2 * marginMm, y - gapMm + marginMm);
     QVector<Placement> places;
-    for (int idx : sel) {
-      const int r = kGridPos[idx][0], c = kGridPos[idx][1];
-      const double w = this->views[idx].sizeMm.width() * scale;
-      const double h = this->views[idx].sizeMm.height() * scale;
-      places.push_back({idx, colX[c] + (colW[c] - w) / 2.0,
-                        rowY[r] + titleMm + (rowH[r] - h) / 2.0});
+    for (const auto& t : tiles) {
+      const double w = t.v->sizeMm.width() * scale, h = t.v->sizeMm.height() * scale;
+      places.push_back({t.v, colX[t.gridC] + (colW[t.gridC] - w) / 2.0,
+                        rowY[t.gridR] + titleMm + (rowH[t.gridR] - h) / 2.0, t.slug});
     }
     renderToFile(places, sheetWmm, sheetHmm, filename);
   }

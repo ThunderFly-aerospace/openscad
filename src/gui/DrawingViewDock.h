@@ -87,6 +87,7 @@ struct OrthoAngle {
 // what it paints is what the vector export writes.
 struct OrthoViewData {
   QList<QLineF> edges;          // silhouette + feature edges (model-mm, y-down)
+  QList<QLineF> hatch;          // section cut-face hatching (model-mm, y-down); empty for plain views
   QSizeF sizeMm;                // view bounding box (model-mm) used to fit
   QList<OrthoAnchor> anchors;
   QList<OrthoDimension> dims;
@@ -208,6 +209,9 @@ public:
   ~DrawingViewDock() override;
 
   void setViews(const QList<OrthoViewData>& views, const QStringList& titles);
+  // Section-view tiles ("Řez A–A"), shown below the standard views and appended
+  // to the export. Each carries edges + cut-face hatch; titles come from the data.
+  void setSectionViews(const QList<OrthoViewData>& sections);
   void clearViews();
   // Drawing scale as drawing-mm per model-mm (1/denominator from the spinbox).
   double exportScale() const;
@@ -249,6 +253,11 @@ private:
 
   QVector<OrthoViewWidget *> viewWidgets;
   QVector<class QGroupBox *> viewBoxes;  // parallel to viewWidgets; checkable = shown
+  QVector<OrthoViewWidget *> sectionWidgets;  // dynamic; one per section() marker
+  QVector<class QGroupBox *> sectionBoxes;
+  QList<OrthoViewData> sectionViews;
+  class QGridLayout *sheetGrid{nullptr};  // to add section tiles below the standard grid
+  class QWidget *sheetWidget{nullptr};
   QLabel *placeholder;
   QPushButton *saveButton;
   QPushButton *materializeButton;

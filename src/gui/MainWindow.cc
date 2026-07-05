@@ -135,6 +135,7 @@
 #include "gui/DrawingViewDock.h"
 #include "core/CameraNode.h"
 #include "core/DimrefNode.h"
+#include "core/SectionNode.h"
 #include "glview/GLView.h"
 #include "glview/OffscreenView.h"
 #include "utils/camera_math.h"
@@ -4733,6 +4734,32 @@ void MainWindow::refreshDrawingViews()
     titles.append(vd.title);
   }
   this->drawingDock->setViews(viewData, titles);
+
+  // 5. Section views from section() markers: cut the mesh, project + hatch, and
+  // hand each over as an extra tile "Řez A–A".
+  QList<OrthoViewData> sectionData;
+  for (const auto& info : collectSections(this->rootNode)) {
+    if (!info.node) continue;
+    const double hatchMm = info.node->hatch > 0 && scale > 1e-9 ? info.node->hatch / scale : -1.0;
+    const SectionDrawing sd = projectSection(*ps, info.world, info.node->flip, 20.0, hatchMm);
+    if (!sd.valid) continue;
+    double minSx = 1e30, maxSx = -1e30, minSy = 1e30, maxSy = -1e30;
+    for (const auto& e : sd.edges) {
+      minSx = std::min({minSx, e.x0, e.x1}); maxSx = std::max({maxSx, e.x0, e.x1});
+      minSy = std::min({minSy, e.y0, e.y1}); maxSy = std::max({maxSy, e.y0, e.y1});
+    }
+    if (maxSx <= minSx || maxSy <= minSy) continue;
+    auto toLocal = [&](double sx, double sy) { return QPointF(sx - minSx, maxSy - sy); };
+    OrthoViewData vd;
+    vd.sizeMm = QSizeF(maxSx - minSx, maxSy - minSy);
+    vd.scale = scale;
+    for (const auto& e : sd.edges) vd.edges.append(QLineF(toLocal(e.x0, e.y0), toLocal(e.x1, e.y1)));
+    for (const auto& hh : sd.hatch) vd.hatch.append(QLineF(toLocal(hh.x0, hh.y0), toLocal(hh.x1, hh.y1)));
+    const QString nm = QString::fromStdString(info.node->section_name);
+    vd.title = nm.isEmpty() ? tr("Section") : tr("Section %1–%1").arg(nm);
+    sectionData.append(vd);
+  }
+  this->drawingDock->setSectionViews(sectionData);
 }
 
 /**
