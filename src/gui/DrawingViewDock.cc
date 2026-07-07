@@ -879,7 +879,14 @@ SheetLayoutResult computeSheetLayout(const QVector<SheetTile>& tiles,
   }
   double x = marginMm, y = marginMm;
   for (int c = 0; c < 4; ++c) { colX[c] = x; if (colW[c] > 0) x += colW[c] + gapMm; }
-  for (int rr = 0; rr <= maxR; ++rr) { rowY[rr] = y; if (rowH[rr] > 0) y += titleMm + rowH[rr] + gapMm; }
+  // Rows 0..2 are the standard-view block; rows >=3 are section / detail tiles.
+  // Add extra breathing room before the extras block so the sheet reads in groups.
+  const double blockGapMm = gapMm * 1.6;
+  for (int rr = 0; rr <= maxR; ++rr) {
+    if (rr == 3) y += blockGapMm;  // separate the sections/details from the views
+    rowY[rr] = y;
+    if (rowH[rr] > 0) y += titleMm + rowH[rr] + gapMm;
+  }
   r.wMm = std::max(2 * marginMm, x - gapMm + marginMm);
   r.hMm = std::max(2 * marginMm, y - gapMm + marginMm);
   for (int i = 0; i < tiles.size(); ++i) {
@@ -1060,7 +1067,7 @@ void DrawingViewDock::rebuildSheet()
   std::vector<bool> sel(kViewCount, false);
   for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
   const double scale = exportScale();
-  const double marginMm = 10.0, gapMm = 12.0, titleMm = 5.0;
+  const double marginMm = 10.0, gapMm = 16.0, titleMm = 5.0;
   const QVector<SheetTile> tiles =
     collectSheetTiles(this->views, this->sectionViews, this->detailViews, sel, scale);
   const SheetLayoutResult lay = computeSheetLayout(tiles, marginMm, gapMm, titleMm);
@@ -1134,7 +1141,7 @@ void DrawingViewDock::exportDrawing()
 
   const double dpi = 96.0;
   const double mmToPx = dpi / 25.4;
-  const double marginMm = 10.0, gapMm = 12.0, titleMm = 5.0;
+  const double marginMm = 10.0, gapMm = 16.0, titleMm = 5.0;
   const double fontMm = 3.0, edgeMm = 0.3, dimMm = 0.25, witMm = 0.15, arrowMm = 2.5;
 
   struct Placement { const OrthoViewData *v; double ox, oy; QString slug; double drawScale; };
