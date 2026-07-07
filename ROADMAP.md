@@ -711,3 +711,14 @@ kružnicí** + **velké písmeno**; zvětšenina zvlášť, nadepsaná „**Deta
   (2:1)".
 - **Zbývá jako drobnost:** drift `cx,cy` při posunu modelu (akceptováno); volitelně
   world-kotva středu; PNG „Save Sheet" grabuje canvas v aktuálním zoomu.
+
+## Fáze 9 — rozvržení listu: mezery + ruční umístění dlaždic  ✅ HOTOVO (2026-07-07)
+- **Mezery/oddělení:** `gapMm` 12→16, extra `blockGapMm` před blokem řezů/detailů
+  (řádky ≥3) v `computeSheetLayout`; dok i export. Commit `3f8c7c763`.
+- **Ruční umístění řezu/detailu do volného místa** (rozhodnuto A = tažení + zápis
+  do zdroje): `OrthoViewData.movable/placeKey/hasAt/atMm`; dlaždice s `at=` plave na
+  dané sheet-mm pozici (mimo mřížku, list se zvětší), ostatní zůstávají v ISO-E.
+  Canvas táhne pohyblivou dlaždici (`viewIndex==-1`) → `tilePlaced(placeKey,x,y)` →
+  MainWindow zapíše `at=x,y` do `// @detail` řádku, resp. do/nový `// @section <name>
+  at=x,y`. Commit `f7211e8b7`. Ověřeno headless: přetažení „Section A–A" do prázdného
+  sloupce zapsalo `// @section A at=92.686,87.173` a dlaždici tam přesunulo.
