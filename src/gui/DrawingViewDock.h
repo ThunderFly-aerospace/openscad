@@ -219,9 +219,13 @@ private:
   // Index of the placement whose content box contains the widget point, or -1.
   // Prefers interactive standard views over display-only tiles on overlap.
   int placementAt(const QPointF& widgetPt) const;
-  // Index of the dimension under a widget point within placement pl (label or
-  // line). editableOnly restricts to draggable // @dim dims (id >= 0).
-  int dimAt(const PlacedView& pl, const QPointF& widgetPt, bool editableOnly = true) const;
+  // Find the dimension under a widget point across ALL standard-view placements
+  // (label box first, then the line within a few px) — not gated by the tile under
+  // the cursor, since dimensions / dragged-away labels often sit outside their tile.
+  // editableOnly restricts to draggable // @dim dims. On a hit returns true and sets
+  // the placement + dim index and whether the label (vs the line) was hit.
+  bool hitDim(const QPointF& widgetPt, bool editableOnly, int& place, int& dim,
+              bool& onLabel) const;
   void paintPlacement(QPainter& painter, const PlacedView& pl);
 
   QVector<PlacedView> places;

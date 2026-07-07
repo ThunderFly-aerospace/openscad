@@ -549,15 +549,16 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
     return;
   }
 
-  // Right button: jump to the source of the dimension or dimref under the cursor.
+  // Right button: jump to the source of the dimension / dimref under the cursor.
   if (event->button() == Qt::RightButton) {
-    if (pi >= 0) {
+    int hp, hd; bool onLabel;
+    if (hitDim(click, /*editableOnly=*/false, hp, hd, onLabel) &&
+        this->places.at(hp).data.dims.at(hd).jumpLine >= 0) {
+      emit jumpToSource(this->places.at(hp).data.dims.at(hd).jumpLine);
+      return;
+    }
+    if (pi >= 0) {  // else the nearest dimref anchor in the tile under the cursor
       const PlacedView& pl = this->places.at(pi);
-      const int di = dimAt(pl, click, /*editableOnly=*/false);
-      if (di >= 0 && pl.data.dims.at(di).jumpLine >= 0) {
-        emit jumpToSource(pl.data.dims.at(di).jumpLine);
-        return;
-      }
       double best = 12.0;
       int line = -1;
       for (const auto& anchor : pl.data.anchors) {
@@ -571,6 +572,18 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
   }
   if (event->button() != Qt::LeftButton) return;
 
+  // Dimension / label drag first, searched across ALL views (a dimension line or a
+  // dragged-away label often sits outside its tile's box; gating by the tile under
+  // the cursor would miss it and the click would pan instead).
+  {
+    int hp, hd; bool onLabel;
+    if (hitDim(click, /*editableOnly=*/true, hp, hd, onLabel)) {
+      this->dragPlace = hp;
+      if (onLabel) this->draggingLabel = hd; else this->draggingDim = hd;
+      return;
+    }
+  }
+
   // Left-drag a movable section / detail tile to reposition it in free space.
   if (pi >= 0 && this->places.at(pi).data.movable) {
     this->tileDrag = pi;
@@ -579,53 +592,26 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
     return;
   }
 
-  // Interactive editing only on standard-view placements; section / detail tiles
-  // and empty space fall through to panning the whole sheet.
-  if (pi >= 0 && this->places.at(pi).viewIndex >= 0) {
+  // Anchor click (create dimensions) — in the tile under the cursor; anchors are
+  // feature points, always inside their tile.
+  if (pi >= 0 && this->places.at(pi).viewIndex >= 0 && this->showAnchors) {
     const PlacedView& pl = this->places.at(pi);
-
-    // First: start dragging a label if the click is on one (editable dims only).
-    const QFontMetrics fm(overlayFont());
-    for (int i = 0; i < pl.data.dims.size(); ++i) {
-      const auto& dim = pl.data.dims.at(i);
-      if (dim.id < 0) continue;
-      QRectF box = fm.boundingRect(dim.label).adjusted(-3, -2, 3, 2);
-      box.moveCenter(mapToWidget(pl, labelPosOf(dim)));
-      if (box.contains(click)) { this->dragPlace = pi; this->draggingLabel = i; return; }
-    }
-
-    // Next: start dragging a dimension line if the click is near one.
-    double bestLine = 8.0;
-    int hitDim = -1;
-    for (int i = 0; i < pl.data.dims.size(); ++i) {
-      const auto& dim = pl.data.dims.at(i);
-      if (dim.id < 0) continue;
-      QPointF p0, p1;
-      dimLineEnds(dim, p0, p1);
-      const double d = distToSegment(click, mapToWidget(pl, p0), mapToWidget(pl, p1));
-      if (d < bestLine) { bestLine = d; hitDim = i; }
-    }
-    if (hitDim >= 0) { this->dragPlace = pi; this->draggingDim = hitDim; return; }
-
-    // Next: report an anchor click (used to create dimensions).
-    if (this->showAnchors) {
-      const double radius = 12.0;
-      QStringList hits;  // distinct anchor refs within the hit radius
-      for (const auto& anchor : pl.data.anchors) {
-        const QPointF p = mapToWidget(pl, anchor.pos);
-        if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= radius &&
-            !hits.contains(anchor.ref)) {
-          hits << anchor.ref;
-        }
+    const double radius = 12.0;
+    QStringList hits;  // distinct anchor refs within the hit radius
+    for (const auto& anchor : pl.data.anchors) {
+      const QPointF p = mapToWidget(pl, anchor.pos);
+      if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= radius &&
+          !hits.contains(anchor.ref)) {
+        hits << anchor.ref;
       }
-      if (hits.size() == 1) { emit anchorClicked(pl.viewIndex, hits.first()); return; }
-      if (hits.size() > 1) {
-        QMenu menu(this);
-        for (const QString& ref : hits) menu.addAction(ref);
-        if (QAction *chosen = menu.exec(event->globalPosition().toPoint()))
-          emit anchorClicked(pl.viewIndex, chosen->text());
-        return;
-      }
+    }
+    if (hits.size() == 1) { emit anchorClicked(pl.viewIndex, hits.first()); return; }
+    if (hits.size() > 1) {
+      QMenu menu(this);
+      for (const QString& ref : hits) menu.addAction(ref);
+      if (QAction *chosen = menu.exec(event->globalPosition().toPoint()))
+        emit anchorClicked(pl.viewIndex, chosen->text());
+      return;
     }
   }
 
@@ -706,34 +692,46 @@ void DrawingSheetWidget::mouseMoveEvent(QMouseEvent *event)
   emit dimensionOffsetChanged(pl.viewIndex, dim.id, dim.offsetPx, false);
 }
 
-int DrawingSheetWidget::dimAt(const PlacedView& pl, const QPointF& pt, bool editableOnly) const
+bool DrawingSheetWidget::hitDim(const QPointF& pt, bool editableOnly, int& place, int& dim,
+                                bool& onLabel) const
 {
   const QFontMetrics fm(overlayFont());
-  // Label box first, then the dimension line.
-  for (int i = 0; i < pl.data.dims.size(); ++i) {
-    const auto& dim = pl.data.dims.at(i);
-    if (editableOnly && dim.id < 0) continue;
-    QRectF box = fm.boundingRect(dim.label).adjusted(-3, -2, 3, 2);
-    box.moveCenter(mapToWidget(pl, labelPosOf(dim)));
-    if (box.contains(pt)) return i;
+  // Label boxes first, across all standard views.
+  for (int p = 0; p < this->places.size(); ++p) {
+    const PlacedView& pl = this->places.at(p);
+    if (pl.viewIndex < 0) continue;
+    for (int i = 0; i < pl.data.dims.size(); ++i) {
+      const auto& d = pl.data.dims.at(i);
+      if (editableOnly && d.id < 0) continue;
+      QRectF box = fm.boundingRect(d.label).adjusted(-3, -2, 3, 2);
+      box.moveCenter(mapToWidget(pl, labelPosOf(d)));
+      if (box.contains(pt)) { place = p; dim = i; onLabel = true; return true; }
+    }
   }
-  for (int i = 0; i < pl.data.dims.size(); ++i) {
-    const auto& dim = pl.data.dims.at(i);
-    if (editableOnly && dim.id < 0) continue;
-    QPointF p0, p1;
-    dimLineEnds(dim, p0, p1);
-    if (distToSegment(pt, mapToWidget(pl, p0), mapToWidget(pl, p1)) < 8.0) return i;
+  // Then the nearest dimension line within the hit threshold.
+  double best = 8.0;
+  int bp = -1, bd = -1;
+  for (int p = 0; p < this->places.size(); ++p) {
+    const PlacedView& pl = this->places.at(p);
+    if (pl.viewIndex < 0) continue;
+    for (int i = 0; i < pl.data.dims.size(); ++i) {
+      const auto& d = pl.data.dims.at(i);
+      if (editableOnly && d.id < 0) continue;
+      QPointF p0, p1;
+      dimLineEnds(d, p0, p1);
+      const double dist = distToSegment(pt, mapToWidget(pl, p0), mapToWidget(pl, p1));
+      if (dist < best) { best = dist; bp = p; bd = i; }
+    }
   }
-  return -1;
+  if (bp >= 0) { place = bp; dim = bd; onLabel = false; return true; }
+  return false;
 }
 
 void DrawingSheetWidget::mouseDoubleClickEvent(QMouseEvent *event)
 {
-  const int pi = placementAt(event->position());
-  if (pi < 0 || this->places.at(pi).viewIndex < 0) return;
-  const PlacedView& pl = this->places.at(pi);
-  const int i = dimAt(pl, event->position());
-  if (i >= 0) emit dimensionDoubleClicked(pl.data.dims.at(i).id);
+  int hp, hd; bool onLabel;
+  if (hitDim(event->position(), /*editableOnly=*/true, hp, hd, onLabel))
+    emit dimensionDoubleClicked(this->places.at(hp).data.dims.at(hd).id);
 }
 
 void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
