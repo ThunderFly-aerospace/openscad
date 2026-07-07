@@ -253,10 +253,11 @@ void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
 
   painter.setFont(overlayFont());
 
-  // View title just above the tile (at its drawing-mm origin corner).
+  // View title above the tile, standing off the geometry by ~one font height
+  // (3 drawing-mm) so it doesn't crowd the image.
   if (!data.title.isEmpty()) {
     painter.setPen(Qt::black);
-    painter.drawText(map(QPointF(0, 0)) - QPointF(0, absPx(1.5)), data.title);
+    painter.drawText(map(QPointF(0, 0)) - QPointF(0, absPx(3.0)), data.title);
   }
 
   // Section cut-face hatching first, so edges sit on top of it.
@@ -1107,7 +1108,7 @@ void DrawingViewDock::rebuildSheet()
   std::vector<bool> sel(kViewCount, false);
   for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
   const double scale = exportScale();
-  const double marginMm = 10.0, gapMm = 16.0, titleMm = 5.0;
+  const double marginMm = 10.0, gapMm = 16.0, titleMm = 7.0;
   const QVector<SheetTile> tiles =
     collectSheetTiles(this->views, this->sectionViews, this->detailViews, sel, scale);
   const SheetLayoutResult lay = computeSheetLayout(tiles, marginMm, gapMm, titleMm);
@@ -1181,7 +1182,7 @@ void DrawingViewDock::exportDrawing()
 
   const double dpi = 96.0;
   const double mmToPx = dpi / 25.4;
-  const double marginMm = 10.0, gapMm = 16.0, titleMm = 5.0;
+  const double marginMm = 10.0, gapMm = 16.0, titleMm = 7.0;
   const double fontMm = 3.0, edgeMm = 0.3, dimMm = 0.25, witMm = 0.15, arrowMm = 2.5;
 
   struct Placement { const OrthoViewData *v; double ox, oy; QString slug; double drawScale; };
@@ -1200,7 +1201,7 @@ void DrawingViewDock::exportDrawing()
       auto map = [&](const QPointF& mp) {
       return QPointF(oxmm + mp.x() * sc, oymm + mp.y() * sc);  // -> drawing-mm
     };
-    titles.emplace_back(QPointF(oxmm, oymm - 1.5), v.title);
+    titles.emplace_back(QPointF(oxmm, oymm - fontMm), v.title);  // ~one font height off
     for (const auto& hh : v.hatch) hatchSegs.emplace_back(map(hh.p1()), map(hh.p2()));
     for (const auto& e : v.edges) edgeSegs.emplace_back(map(e.p1()), map(e.p2()));
     // Detail circles on this (parent) view: a 48-gon polyline + the letter.
