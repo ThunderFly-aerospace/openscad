@@ -3850,6 +3850,9 @@ void MainWindow::setupDrawingDock()
   // "Materialize kvóty" writes a // @dim kvota=… line for each kvota pair.
   QObject::connect(this->drawingDock, &DrawingViewDock::materializeRequested, this,
                    &MainWindow::onMaterializeKvotas);
+  // Drawing a detail circle over a view appends a // @detail line and reprojects.
+  QObject::connect(this->drawingDock, &DrawingViewDock::detailRequested, this,
+                   &MainWindow::onDetailRequested);
 }
 
 namespace {
@@ -3999,6 +4002,38 @@ void MainWindow::onDimensionDoubleClicked(int id)
   // reproject immediately instead of waiting for F5.
   refreshDrawingViews();
   this->statusBar()->showMessage(tr("Dimension updated."), 3000);
+}
+
+void MainWindow::onDetailRequested(int viewIndex, double cx, double cy, double r)
+{
+  if (!activeEditor || viewIndex < 0 || viewIndex > 5) return;
+  static const char *const keys[6] = {"front", "back", "left", "right", "top", "bottom"};
+  const QString text = activeEditor->toPlainText();
+
+  // Pick the next unused single-letter detail name (A, B, C, …).
+  static const QRegularExpression nameRe(R"(^\s*//\s*@detail\s+(\S+))");
+  std::set<QString> used;
+  for (const QString& ln : text.split('\n')) {
+    const auto m = nameRe.match(ln);
+    if (m.hasMatch()) used.insert(m.captured(1).toUpper());
+  }
+  QString name = "A";
+  for (char c = 'A'; c <= 'Z'; ++c)
+    if (!used.count(QString(QChar(c)))) { name = QString(QChar(c)); break; }
+
+  // scale=2 (2:1) is a sensible default enlargement; the user edits it afterwards.
+  const QString line = QString("// @detail %1 parent=%2 cx=%3 cy=%4 r=%5 scale=2")
+                         .arg(name, keys[viewIndex])
+                         .arg(cx, 0, 'g', 4).arg(cy, 0, 'g', 4).arg(r, 0, 'g', 4);
+  const QStringList lines = text.split('\n');
+  activeEditor->setCursorPosition(lines.size() - 1, lines.isEmpty() ? 0 : lines.last().length());
+  QString insertText;
+  if (!lines.isEmpty() && !lines.last().isEmpty()) insertText += "\n";
+  insertText += line + "\n";
+  activeEditor->insertOrReplaceText(insertText);
+  refreshDrawingViews();
+  this->statusBar()->showMessage(
+    tr("Detail %1 added — edit scale= to change the enlargement.").arg(name), 5000);
 }
 
 void MainWindow::onMaterializeKvotas()
@@ -4649,6 +4684,39 @@ void MainWindow::refreshDrawingViews()
   const char *const titleUtf8[6] = {"Front (nárys)", "Back (zadní)", "Left (levý bok)",
                                     "Right (pravý bok)", "Top (půdorys)", "Bottom (spodní)"};
 
+  // Parse // @detail lines (enlarged view of a circular region of a parent view):
+  //   // @detail A parent=front cx=.. cy=.. r=.. scale=..
+  // cx/cy/r are in the parent view's view-local model-mm; scale is the detail's own
+  // drawing-mm-per-model-mm (independent of the sheet scale). Unknown parent => the
+  // detail is skipped (soft, warned) rather than a ghost, like an unresolved @dim.
+  struct DetailSpec { QString name, parent; double cx{0}, cy{0}, r{0}, scale{2}; int line{-1}; };
+  std::vector<DetailSpec> details;
+  {
+    static const QRegularExpression detRe(R"(^\s*//\s*@detail\s+(.*\S)\s*$)");
+    const QStringList slines = source.split('\n');
+    for (int ln = 0; ln < slines.size(); ++ln) {
+      const auto m = detRe.match(slines.at(ln));
+      if (!m.hasMatch()) continue;
+      const QStringList toks =
+        m.captured(1).split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+      if (toks.isEmpty()) continue;
+      DetailSpec ds;
+      ds.name = toks.first();
+      ds.line = ln;
+      for (const QString& t : toks.mid(1)) {
+        const int eq = t.indexOf('=');
+        if (eq < 0) continue;
+        const QString k = t.left(eq), v = t.mid(eq + 1);
+        if (k == "parent") ds.parent = v.toLower();
+        else if (k == "cx") ds.cx = v.toDouble();
+        else if (k == "cy") ds.cy = v.toDouble();
+        else if (k == "r") ds.r = v.toDouble();
+        else if (k == "scale") ds.scale = v.toDouble();
+      }
+      if (ds.r > 1e-6 && !ds.parent.isEmpty()) details.push_back(ds);
+    }
+  }
+
   // Section markers, resolved once: world plane origin, unit normal (= viewing
   // direction) and label. Reused for the cutting-line annotation in every standard
   // view and for the section tiles below.
@@ -4793,6 +4861,11 @@ void MainWindow::refreshDrawingViews()
           sl.label = sr.label;
           vd.sectionLines.append(sl);
         }
+
+        // Detail circles whose parent is this view (same view-local mm frame).
+        for (const auto& ds : details)
+          if (ds.parent == key)
+            vd.detailMarks.append({QPointF(ds.cx, ds.cy), ds.r, ds.name});
       }
     }
     viewData.append(vd);
@@ -4803,6 +4876,7 @@ void MainWindow::refreshDrawingViews()
   // 5. Section views from section() markers: cut the mesh, project + hatch, and
   // hand each over as an extra tile "Řez A–A".
   QList<OrthoViewData> sectionData;
+  QHash<QString, int> sectionKey;  // "section<name>" (lower) -> index into sectionData
   for (const auto& info : sections) {
     if (!info.node) continue;
     const double hatchMm = info.node->hatch > 0 && scale > 1e-9 ? info.node->hatch / scale : -1.0;
@@ -4822,9 +4896,74 @@ void MainWindow::refreshDrawingViews()
     for (const auto& hh : sd.hatch) vd.hatch.append(QLineF(toLocal(hh.x0, hh.y0), toLocal(hh.x1, hh.y1)));
     const QString nm = QString::fromStdString(info.node->section_name);
     vd.title = nm.isEmpty() ? tr("Section") : tr("Section %1–%1").arg(nm);
+    if (!nm.isEmpty()) sectionKey.insert("section" + nm.toLower(), sectionData.size());
     sectionData.append(vd);
   }
   this->drawingDock->setSectionViews(sectionData);
+
+  // 6. Detail (enlargement) tiles: clip a parent view's edges/hatch to the
+  // // @detail circle and hand them over at the detail's own scale. A missing parent
+  // is skipped with a warning (soft), never a ghost tile — like an unresolved @dim.
+  auto clipToCircle = [](const QList<QLineF>& segs, const QPointF& C, double r) {
+    QList<QLineF> out;
+    const double r2 = r * r;
+    for (const auto& s : segs) {
+      const QPointF a = s.p1(), d = s.p2() - s.p1(), f = s.p1() - C;
+      const double A = d.x() * d.x() + d.y() * d.y();
+      if (A < 1e-12) {  // degenerate segment (a point)
+        const QPointF g = a - C;
+        if (g.x() * g.x() + g.y() * g.y() <= r2) out.append(s);
+        continue;
+      }
+      const double B = 2 * (f.x() * d.x() + f.y() * d.y());
+      const double Cc = f.x() * f.x() + f.y() * f.y() - r2;
+      const double disc = B * B - 4 * A * Cc;
+      if (disc < 0) continue;  // line misses the circle entirely
+      const double sd = std::sqrt(disc);
+      const double lo = std::max(0.0, (-B - sd) / (2 * A));
+      const double hi = std::min(1.0, (-B + sd) / (2 * A));
+      if (lo >= hi) continue;  // the in-circle span lies outside [0,1]
+      out.append(QLineF(a + d * lo, a + d * hi));
+    }
+    return out;
+  };
+  auto ratioStr = [](double s) {
+    return s >= 1.0 ? QString("%1:1").arg(QString::number(s, 'g', 3))
+                    : QString("1:%1").arg(QString::number(1.0 / s, 'g', 3));
+  };
+  static const char *const detailKeys[6] = {"front", "back", "left", "right", "top", "bottom"};
+  QList<OrthoViewData> detailData;
+  for (const auto& ds : details) {
+    const OrthoViewData *parent = nullptr;
+    for (int vi = 0; vi < 6; ++vi)
+      if (ds.parent == detailKeys[vi] && vi < viewData.size() && viewData[vi].valid()) {
+        parent = &viewData[vi];
+        break;
+      }
+    if (!parent) {  // a section parent ("section<name>")?
+      const auto it = sectionKey.constFind(ds.parent);
+      if (it != sectionKey.constEnd() && it.value() < sectionData.size())
+        parent = &sectionData[it.value()];
+    }
+    if (!parent) {
+      LOG(message_group::Warning, "Drawing: detail '%1$s' references unknown parent '%2$s'.",
+          ds.name.toStdString(), ds.parent.toStdString());
+      continue;
+    }
+    const QPointF C(ds.cx, ds.cy);
+    const QList<QLineF> ce = clipToCircle(parent->edges, C, ds.r);
+    const QList<QLineF> ch = clipToCircle(parent->hatch, C, ds.r);
+    if (ce.isEmpty() && ch.isEmpty()) continue;
+    const QPointF corner(ds.cx - ds.r, ds.cy - ds.r);
+    OrthoViewData dv;
+    for (const auto& e : ce) dv.edges.append(QLineF(e.p1() - corner, e.p2() - corner));
+    for (const auto& h : ch) dv.hatch.append(QLineF(h.p1() - corner, h.p2() - corner));
+    dv.sizeMm = QSizeF(2 * ds.r, 2 * ds.r);
+    dv.scale = ds.scale > 1e-9 ? ds.scale : 1.0;
+    dv.title = tr("Detail %1 (%2)").arg(ds.name, ratioStr(dv.scale));
+    detailData.append(dv);
+  }
+  this->drawingDock->setDetailViews(detailData);
 }
 
 /**

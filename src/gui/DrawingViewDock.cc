@@ -60,16 +60,22 @@ DrawingSheetWidget::DrawingSheetWidget(QWidget *parent) : QWidget(parent)
   setMouseTracking(false);
 }
 
-void DrawingSheetWidget::setSheet(const QVector<PlacedView>& placements, double newScale,
-                                  double wMm, double hMm)
+void DrawingSheetWidget::setSheet(const QVector<PlacedView>& placements, double wMm, double hMm)
 {
   this->places = placements;
-  this->scale = newScale > 1e-9 ? newScale : 1.0;
   this->sheetWmm = wMm;
   this->sheetHmm = hMm;
   this->dragPlace = -1;
   this->draggingDim = -1;
   this->draggingLabel = -1;
+  update();
+}
+
+void DrawingSheetWidget::setDetailMode(bool on)
+{
+  this->detailMode = on;
+  this->detailDragging = false;
+  setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
   update();
 }
 
@@ -120,16 +126,17 @@ QPointF DrawingSheetWidget::widgetToSheet(const QPointF& widgetPt) const
 
 QPointF DrawingSheetWidget::mapToWidget(const PlacedView& pl, const QPointF& viewLocalMm) const
 {
-  // view-local model-mm -> sheet drawing-mm -> widget px.
-  const QPointF sheetMm(pl.originMm.x() + viewLocalMm.x() * this->scale,
-                        pl.originMm.y() + viewLocalMm.y() * this->scale);
+  // view-local model-mm -> sheet drawing-mm (this tile's own scale) -> widget px.
+  const double sc = pl.drawScale > 1e-9 ? pl.drawScale : 1.0;
+  const QPointF sheetMm(pl.originMm.x() + viewLocalMm.x() * sc,
+                        pl.originMm.y() + viewLocalMm.y() * sc);
   return sheetToWidget(sheetMm);
 }
 
 QPointF DrawingSheetWidget::mapToViewLocal(const PlacedView& pl, const QPointF& widgetPt) const
 {
   const QPointF sheetMm = widgetToSheet(widgetPt);
-  const double sc = this->scale > 1e-9 ? this->scale : 1.0;
+  const double sc = pl.drawScale > 1e-9 ? pl.drawScale : 1.0;
   return QPointF((sheetMm.x() - pl.originMm.x()) / sc,
                  (sheetMm.y() - pl.originMm.y()) / sc);
 }
@@ -223,6 +230,18 @@ void DrawingSheetWidget::paintEvent(QPaintEvent *)
   recomputeFit();  // fit the whole sheet (drawing-mm) into the widget
   painter.setRenderHint(QPainter::Antialiasing, true);
   for (const auto& pl : this->places) paintPlacement(painter, pl);
+
+  // "New detail" rubber-band circle (widget space).
+  if (this->detailDragging) {
+    const double rpx = std::hypot(this->detailCur.x() - this->detailCenter.x(),
+                                  this->detailCur.y() - this->detailCenter.y());
+    QPen p(QColor(200, 60, 60));
+    p.setWidthF(1.5);
+    p.setStyle(Qt::DashLine);
+    painter.setPen(p);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawEllipse(this->detailCenter, rpx, rpx);
+  }
 }
 
 void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
@@ -255,6 +274,25 @@ void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
   painter.setPen(edgePen);
   for (const auto& e : data.edges) {
     painter.drawLine(map(e.p1()), map(e.p2()));
+  }
+
+  // Detail markers: a thin circle around each enlarged region, labelled with its
+  // letter (ISO 128-34). center/r are this view's view-local model-mm.
+  for (const auto& dm : data.detailMarks) {
+    const QPointF c = map(dm.center);
+    const QPointF rim = map(dm.center + QPointF(dm.r, 0));
+    const double rpx = std::hypot(rim.x() - c.x(), rim.y() - c.y());
+    QPen thin(QColor(20, 20, 20));
+    thin.setWidthF(std::max(0.6, absPx(0.3)));
+    painter.setPen(thin);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawEllipse(c, rpx, rpx);
+    QFont f = overlayFont();
+    f.setBold(true);
+    painter.setFont(f);
+    painter.setPen(QColor(20, 20, 20));
+    painter.drawText(c + QPointF(rpx * 0.72, -rpx * 0.72), dm.label);
+    painter.setFont(overlayFont());
   }
 
   // Cutting-plane lines (section markers seen edge-on in this view): a thick chain
@@ -497,6 +535,18 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
   const QPointF click = event->position();
   const int pi = placementAt(click);
 
+  // "New detail" mode: a left-drag on a standard view rubber-bands the circle.
+  if (this->detailMode && event->button() == Qt::LeftButton) {
+    if (pi >= 0 && this->places.at(pi).viewIndex >= 0) {
+      this->detailDragging = true;
+      this->detailPlace = pi;
+      this->detailCenter = click;
+      this->detailCur = click;
+      update();
+    }
+    return;
+  }
+
   // Right button: jump to the source of the dimension or dimref under the cursor.
   if (event->button() == Qt::RightButton) {
     if (pi >= 0) {
@@ -576,6 +626,13 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
 
 void DrawingSheetWidget::mouseMoveEvent(QMouseEvent *event)
 {
+  // "New detail" rubber-band: grow the circle from its centre.
+  if (this->detailDragging) {
+    this->detailCur = event->position();
+    update();
+    return;
+  }
+
   // Pan: translate the sheet by the mouse delta (widget space).
   if (this->panning) {
     this->userPan += event->position() - this->panLast;
@@ -664,6 +721,29 @@ void DrawingSheetWidget::mouseDoubleClickEvent(QMouseEvent *event)
 
 void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
 {
+  // Finish a "new detail" gesture: emit the circle in the parent view's local mm.
+  if (this->detailDragging) {
+    const int pi = this->detailPlace;
+    if (pi >= 0 && pi < this->places.size() && this->places.at(pi).viewIndex >= 0) {
+      const PlacedView& pl = this->places.at(pi);
+      const double rpx = std::hypot(this->detailCur.x() - this->detailCenter.x(),
+                                    this->detailCur.y() - this->detailCenter.y());
+      if (rpx > 4.0) {
+        const QPointF c = mapToViewLocal(pl, this->detailCenter);
+        const QPointF rimPt = mapToViewLocal(pl, this->detailCur);
+        const double r = std::hypot(rimPt.x() - c.x(), rimPt.y() - c.y());
+        emit detailRequested(pl.viewIndex, c.x(), c.y(), r);
+      }
+    }
+    this->detailDragging = false;
+    this->detailMode = false;
+    this->detailPlace = -1;
+    setCursor(Qt::ArrowCursor);
+    emit detailModeFinished();
+    update();
+    return;
+  }
+
   if (this->panning) {
     this->panning = false;
     return;
@@ -732,32 +812,49 @@ constexpr bool kViewDefault[kViewCount] = {true, false, false, true, true, false
 const char *const kViewSlug[kViewCount] = {"front", "back", "left", "right", "top", "bottom"};
 
 // One tile to place on the sheet: its data, its first-angle grid cell, a filename
-// slug, the interactive view index (0..5, or -1 for display-only section tiles),
-// and whether it is a section tile.
+// slug, the interactive view index (0..5, or -1 for display-only section / detail
+// tiles), whether it is a section tile, and its drawing-mm-per-model-mm scale (the
+// sheet scale for standard / section tiles, the detail's own scale for a detail).
 struct SheetTile {
   const OrthoViewData *v;
   int gridR, gridC;
   QString slug;
   int viewIndex;
   bool isSection;
+  double drawScale;
 };
 
 // The selected standard views (at their first-angle cells) plus the valid section
-// tiles (rows below the 3-row grid, four per row). Shared by the interactive canvas
-// and the composed export so both lay out identically.
+// tiles and detail tiles (rows below the 3-row grid, four per row). Shared by the
+// interactive canvas and the composed export so both lay out identically. Standard
+// and section tiles draw at `sheetScale`; each detail tile draws at its own scale
+// (data.scale), so it appears enlarged on the sheet.
 QVector<SheetTile> collectSheetTiles(const QList<OrthoViewData>& views,
                                      const QList<OrthoViewData>& sections,
-                                     const std::vector<bool>& viewSelected)
+                                     const QList<OrthoViewData>& details,
+                                     const std::vector<bool>& viewSelected,
+                                     double sheetScale)
 {
   QVector<SheetTile> tiles;
   for (int i = 0; i < views.size() && i < kViewCount; ++i)
     if (i < static_cast<int>(viewSelected.size()) && viewSelected[i] && views.at(i).valid())
-      tiles.push_back({&views.at(i), kGridPos[i][0], kGridPos[i][1], kViewSlug[i], i, false});
-  for (int i = 0, cell = 0; i < sections.size(); ++i) {
+      tiles.push_back({&views.at(i), kGridPos[i][0], kGridPos[i][1], kViewSlug[i], i, false,
+                       sheetScale});
+  int cell = 0;
+  for (int i = 0; i < sections.size(); ++i) {
     if (!sections.at(i).valid()) continue;
     tiles.push_back({&sections.at(i), 3 + cell / 4, cell % 4,
-                     QString("section%1").arg(i + 1), -1, true});
+                     QString("section%1").arg(i + 1), -1, true, sheetScale});
     ++cell;
+  }
+  // Details continue in the rows after the sections (never sharing a row with them).
+  const int detailRowBase = 3 + (cell + 3) / 4;
+  for (int i = 0, dcell = 0; i < details.size(); ++i) {
+    if (!details.at(i).valid()) continue;
+    const double ds = details.at(i).scale > 1e-9 ? details.at(i).scale : 1.0;
+    tiles.push_back({&details.at(i), detailRowBase + dcell / 4, dcell % 4,
+                     QString("detail%1").arg(i + 1), -1, false, ds});
+    ++dcell;
   }
   return tiles;
 }
@@ -765,10 +862,10 @@ QVector<SheetTile> collectSheetTiles(const QList<OrthoViewData>& views,
 // First-angle sheet layout: origin (drawing-mm top-left of the view content) per
 // tile plus the total sheet size. Same-axis views share equal-width/height cells so
 // centring aligns them (top under front, sides level). Row height includes a title
-// band. Result origins are parallel to `tiles`.
+// band. Each tile is sized by its own drawScale. Result origins parallel `tiles`.
 struct SheetLayoutResult { QVector<QPointF> origins; double wMm; double hMm; };
 
-SheetLayoutResult computeSheetLayout(const QVector<SheetTile>& tiles, double scale,
+SheetLayoutResult computeSheetLayout(const QVector<SheetTile>& tiles,
                                      double marginMm, double gapMm, double titleMm)
 {
   SheetLayoutResult r;
@@ -777,8 +874,8 @@ SheetLayoutResult computeSheetLayout(const QVector<SheetTile>& tiles, double sca
   for (const auto& t : tiles) maxR = std::max(maxR, t.gridR);
   std::vector<double> colW(4, 0.0), rowH(maxR + 1, 0.0), colX(4, 0.0), rowY(maxR + 1, 0.0);
   for (const auto& t : tiles) {
-    colW[t.gridC] = std::max(colW[t.gridC], t.v->sizeMm.width() * scale);
-    rowH[t.gridR] = std::max(rowH[t.gridR], t.v->sizeMm.height() * scale);
+    colW[t.gridC] = std::max(colW[t.gridC], t.v->sizeMm.width() * t.drawScale);
+    rowH[t.gridR] = std::max(rowH[t.gridR], t.v->sizeMm.height() * t.drawScale);
   }
   double x = marginMm, y = marginMm;
   for (int c = 0; c < 4; ++c) { colX[c] = x; if (colW[c] > 0) x += colW[c] + gapMm; }
@@ -787,7 +884,7 @@ SheetLayoutResult computeSheetLayout(const QVector<SheetTile>& tiles, double sca
   r.hMm = std::max(2 * marginMm, y - gapMm + marginMm);
   for (int i = 0; i < tiles.size(); ++i) {
     const auto& t = tiles.at(i);
-    const double w = t.v->sizeMm.width() * scale, h = t.v->sizeMm.height() * scale;
+    const double w = t.v->sizeMm.width() * t.drawScale, h = t.v->sizeMm.height() * t.drawScale;
     r.origins[i] = QPointF(colX[t.gridC] + (colW[t.gridC] - w) / 2.0,
                            rowY[t.gridR] + titleMm + (rowH[t.gridR] - h) / 2.0);
   }
@@ -817,6 +914,8 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
           &DrawingViewDock::dimensionDoubleClicked);
   connect(this->sheet, &DrawingSheetWidget::jumpToSource, this,
           &DrawingViewDock::jumpToSource);
+  connect(this->sheet, &DrawingSheetWidget::detailRequested, this,
+          &DrawingViewDock::detailRequested);
 
   // Row of per-view enable checkboxes. Toggling reprojects (viewSelectionChanged →
   // owner reprojects → setViews) and rebuilds the sheet around the ticked views.
@@ -857,6 +956,11 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->materializeButton->setToolTip(
     tr("Write a // @dim line for each kvota= pair, making them editable."));
 
+  this->detailButton = new QPushButton(tr("New detail"), central);
+  this->detailButton->setCheckable(true);
+  this->detailButton->setToolTip(
+    tr("Draw a circle over a view to add an enlarged detail (writes a // @detail line)."));
+
   this->scaleSpin = new QDoubleSpinBox(central);
   this->scaleSpin->setPrefix(tr("Scale 1:"));
   this->scaleSpin->setRange(0.01, 10000.0);
@@ -878,6 +982,7 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   auto *buttonLayout = new QHBoxLayout(buttonRow);
   buttonLayout->setContentsMargins(0, 0, 0, 0);
   buttonLayout->addWidget(this->materializeButton);
+  buttonLayout->addWidget(this->detailButton);
   buttonLayout->addWidget(this->saveButton);
 
   auto *checkRow = new QWidget(central);
@@ -900,6 +1005,11 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   connect(this->exportButton, &QPushButton::clicked, this, &DrawingViewDock::exportDrawing);
   connect(this->materializeButton, &QPushButton::clicked, this,
           &DrawingViewDock::materializeRequested);
+  connect(this->detailButton, &QPushButton::toggled, this,
+          [this](bool on) { if (this->sheet) this->sheet->setDetailMode(on); });
+  // The gesture (or a cancel) turns the mode off; sync the button back.
+  connect(this->sheet, &DrawingSheetWidget::detailModeFinished, this,
+          [this] { this->detailButton->setChecked(false); });
   connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
   // The scale changes the sheet layout (view sizes and spacing) but not the
   // geometry, so just recompute the layout — no reprojection / re-render.
@@ -937,6 +1047,13 @@ void DrawingViewDock::setSectionViews(const QList<OrthoViewData>& sections)
   updateExportEnabled();
 }
 
+void DrawingViewDock::setDetailViews(const QList<OrthoViewData>& details)
+{
+  this->detailViews = details;
+  rebuildSheet();
+  updateExportEnabled();
+}
+
 void DrawingViewDock::rebuildSheet()
 {
   if (!this->sheet) return;
@@ -944,8 +1061,9 @@ void DrawingViewDock::rebuildSheet()
   for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
   const double scale = exportScale();
   const double marginMm = 10.0, gapMm = 12.0, titleMm = 5.0;
-  const QVector<SheetTile> tiles = collectSheetTiles(this->views, this->sectionViews, sel);
-  const SheetLayoutResult lay = computeSheetLayout(tiles, scale, marginMm, gapMm, titleMm);
+  const QVector<SheetTile> tiles =
+    collectSheetTiles(this->views, this->sectionViews, this->detailViews, sel, scale);
+  const SheetLayoutResult lay = computeSheetLayout(tiles, marginMm, gapMm, titleMm);
   QVector<PlacedView> places;
   places.reserve(tiles.size());
   for (int i = 0; i < tiles.size(); ++i) {
@@ -954,9 +1072,10 @@ void DrawingViewDock::rebuildSheet()
     pv.originMm = lay.origins.at(i);
     pv.viewIndex = tiles.at(i).viewIndex;
     pv.isSection = tiles.at(i).isSection;
+    pv.drawScale = tiles.at(i).drawScale;
     places.push_back(pv);
   }
-  this->sheet->setSheet(places, scale, lay.wMm, lay.hMm);
+  this->sheet->setSheet(places, lay.wMm, lay.hMm);
 }
 
 bool DrawingViewDock::isViewSelected(int viewIndex) const
@@ -972,6 +1091,8 @@ void DrawingViewDock::updateExportEnabled()
     if (isViewSelected(i) && this->views.at(i).valid()) any = true;
   for (const auto& s : this->sectionViews)
     if (s.valid()) any = true;
+  for (const auto& d : this->detailViews)
+    if (d.valid()) any = true;
   this->saveButton->setEnabled(any);
   this->exportButton->setEnabled(any);
   this->placeholder->setVisible(!any);
@@ -981,6 +1102,7 @@ void DrawingViewDock::clearViews()
 {
   setViews({}, {});
   setSectionViews({});
+  setDetailViews({});
 }
 
 void DrawingViewDock::saveSheet()
@@ -1015,7 +1137,7 @@ void DrawingViewDock::exportDrawing()
   const double marginMm = 10.0, gapMm = 12.0, titleMm = 5.0;
   const double fontMm = 3.0, edgeMm = 0.3, dimMm = 0.25, witMm = 0.15, arrowMm = 2.5;
 
-  struct Placement { const OrthoViewData *v; double ox, oy; QString slug; };
+  struct Placement { const OrthoViewData *v; double ox, oy; QString slug; double drawScale; };
   // Build the placed views' primitives (drawing-mm, y-down) and render to `path`.
   // Both the QPainter (SVG/PDF) and the DXF writer consume the same primitives, so
   // every format is truly WYSIWYG.
@@ -1027,12 +1149,24 @@ void DrawingViewDock::exportDrawing()
     for (const auto& pl : places) {
       const auto& v = *pl.v;
       const double oxmm = pl.ox, oymm = pl.oy;
+      const double sc = pl.drawScale > 1e-9 ? pl.drawScale : 1.0;  // this tile's scale
       auto map = [&](const QPointF& mp) {
-      return QPointF(oxmm + mp.x() * scale, oymm + mp.y() * scale);  // -> drawing-mm
+      return QPointF(oxmm + mp.x() * sc, oymm + mp.y() * sc);  // -> drawing-mm
     };
     titles.emplace_back(QPointF(oxmm, oymm - 1.5), v.title);
     for (const auto& hh : v.hatch) hatchSegs.emplace_back(map(hh.p1()), map(hh.p2()));
     for (const auto& e : v.edges) edgeSegs.emplace_back(map(e.p1()), map(e.p2()));
+    // Detail circles on this (parent) view: a 48-gon polyline + the letter.
+    for (const auto& dm : v.detailMarks) {
+      QPointF prev;
+      for (int k = 0; k <= 48; ++k) {
+        const double a = k * (2.0 * M_PI / 48.0);
+        const QPointF p = map(dm.center + QPointF(std::cos(a) * dm.r, std::sin(a) * dm.r));
+        if (k > 0) edgeSegs.emplace_back(prev, p);
+        prev = p;
+      }
+      titles.emplace_back(map(dm.center + QPointF(dm.r * 0.72, -dm.r * 0.72)), dm.label);
+    }
 
     auto addArrow = [&](const QPointF& tip, const QPointF& along, const QPointF& nrm) {
       QPolygonF h;
@@ -1215,30 +1349,31 @@ void DrawingViewDock::exportDrawing()
   };  // renderToFile
 
   // Tiles to export: the selected standard views at their first-angle cells plus
-  // the valid section tiles — the very same layout the interactive canvas uses.
+  // the valid section and detail tiles — the very same layout the canvas uses.
   std::vector<bool> sel(kViewCount, false);
   for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
-  const QVector<SheetTile> tiles = collectSheetTiles(this->views, this->sectionViews, sel);
+  const QVector<SheetTile> tiles =
+    collectSheetTiles(this->views, this->sectionViews, this->detailViews, sel, scale);
   if (tiles.isEmpty()) return;
 
   if (this->separateFilesCheck->isChecked()) {
     // One file per tile (name_slug.ext), each a single-view sheet.
     for (const auto& t : tiles) {
-      const double w = t.v->sizeMm.width() * scale, h = t.v->sizeMm.height() * scale;
+      const double w = t.v->sizeMm.width() * t.drawScale, h = t.v->sizeMm.height() * t.drawScale;
       QString path = filename;
       const int dot = path.lastIndexOf('.');
       const QString slug = "_" + t.slug;
       if (dot >= 0) path.insert(dot, slug); else path += slug;
-      renderToFile({{t.v, marginMm, marginMm + titleMm, t.slug}}, w + 2 * marginMm,
+      renderToFile({{t.v, marginMm, marginMm + titleMm, t.slug, t.drawScale}}, w + 2 * marginMm,
                    h + titleMm + 2 * marginMm, path);
     }
   } else {
     // Composed first-angle sheet, laid out by the shared engine.
-    const SheetLayoutResult lay = computeSheetLayout(tiles, scale, marginMm, gapMm, titleMm);
+    const SheetLayoutResult lay = computeSheetLayout(tiles, marginMm, gapMm, titleMm);
     QVector<Placement> places;
     for (int i = 0; i < tiles.size(); ++i)
       places.push_back({tiles.at(i).v, lay.origins.at(i).x(), lay.origins.at(i).y(),
-                        tiles.at(i).slug});
+                        tiles.at(i).slug, tiles.at(i).drawScale});
     renderToFile(places, lay.wMm, lay.hMm, filename);
   }
 }

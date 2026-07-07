@@ -93,6 +93,15 @@ struct OrthoSectionLine {
   QString label;
 };
 
+// A detail marker drawn on a parent view: a thin circle around the region that a
+// // @detail enlarges, labelled with its letter. center/r are in the parent view's
+// view-local model-mm.
+struct OrthoDetailMark {
+  QPointF center;
+  double r{0.0};
+  QString label;
+};
+
 // Everything needed to render one ortho view as a vector line drawing with its
 // dimension overlay. All 2D coordinates are view-local model millimetres, y-down,
 // with the origin at the view's bounding-box top-left corner (see
@@ -106,6 +115,7 @@ struct OrthoViewData {
   QList<OrthoDimension> dims;
   QList<OrthoAngle> angles;
   QList<OrthoSectionLine> sectionLines;
+  QList<OrthoDetailMark> detailMarks;  // detail circles drawn on this (parent) view
   QString title;
   // Drawing scale (drawing-mm per model-mm). Geometry is drawn in model-mm; text
   // and line weights are absolute drawing-mm, so their size relative to the
@@ -123,6 +133,9 @@ struct PlacedView {
   QPointF originMm;
   int viewIndex{-1};
   bool isSection{false};
+  // Drawing-mm per model-mm for THIS tile: the sheet scale for standard / section
+  // views, the detail's own (enlarged) scale for a detail tile.
+  double drawScale{1.0};
 };
 
 /*!
@@ -142,16 +155,24 @@ class DrawingSheetWidget : public QWidget
 public:
   DrawingSheetWidget(QWidget *parent = nullptr);
 
-  // Replace the whole sheet: placed views, drawing scale (drawing-mm per model-mm)
-  // and sheet size in drawing-mm. Zoom/pan are preserved across refreshes.
-  void setSheet(const QVector<PlacedView>& placements, double scale,
-                double sheetWmm, double sheetHmm);
+  // Replace the whole sheet: placed views (each carrying its own drawScale) and the
+  // sheet size in drawing-mm. Zoom/pan are preserved across refreshes.
+  void setSheet(const QVector<PlacedView>& placements, double sheetWmm, double sheetHmm);
   void clear();
   void setShowAnchors(bool show);
+  // Enter/leave "new detail" mode: while on, a left-drag on a standard view rubber-
+  // bands a circle and emits detailRequested() on release (then mode turns off).
+  void setDetailMode(bool on);
   bool hasContent() const { return !this->places.isEmpty(); }
 
 signals:
   void anchorClicked(int viewIndex, const QString& name);
+  // Emitted when a detail circle is drawn over standard view `viewIndex`: centre and
+  // radius in that view's view-local model-mm.
+  void detailRequested(int viewIndex, double cx, double cy, double r);
+  // Emitted when the detail rubber-band gesture ends (so the owner can untick the
+  // toolbar button), regardless of whether a detail was created.
+  void detailModeFinished();
   // Emitted while dragging a dimension line and once more on release, with the hit
   // view index, the dimension id and its new perpendicular offset in model-mm.
   void dimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
@@ -193,7 +214,6 @@ private:
   void paintPlacement(QPainter& painter, const PlacedView& pl);
 
   QVector<PlacedView> places;
-  double scale{1.0};
   double sheetWmm{0.0}, sheetHmm{0.0};
   // Fit transform (recomputed each paint): widget = sheetMm*(fitScale*userZoom) +
   // fitOffset + userPan.
@@ -208,6 +228,12 @@ private:
   bool panning{false};
   QPointF panLast;
   bool showAnchors{true};
+  // "New detail" rubber-band gesture.
+  bool detailMode{false};
+  bool detailDragging{false};
+  int detailPlace{-1};     // placement being drawn over
+  QPointF detailCenter;    // press point (widget px)
+  QPointF detailCur;       // current point (widget px)
 };
 
 /*!
@@ -228,6 +254,9 @@ public:
   // Section-view tiles ("Řez A–A"), shown below the standard views and appended
   // to the export. Each carries edges + cut-face hatch; titles come from the data.
   void setSectionViews(const QList<OrthoViewData>& sections);
+  // Detail (enlargement) tiles ("Detail A (5:1)"), shown below the section tiles.
+  // Each carries the clipped edges/hatch and its own (enlarged) scale in data.scale.
+  void setDetailViews(const QList<OrthoViewData>& details);
   void clearViews();
   // Drawing scale as drawing-mm per model-mm (1/denominator from the spinbox).
   double exportScale() const;
@@ -255,6 +284,9 @@ signals:
   // Emitted when the set of shown views changes (a view checkbox toggled), so the
   // owner can reproject only the now-visible views.
   void viewSelectionChanged();
+  // Emitted when a detail circle is drawn over standard view `viewIndex`: centre and
+  // radius in that view's view-local model-mm. The owner writes a // @detail line.
+  void detailRequested(int viewIndex, double cx, double cy, double r);
 
 private slots:
   void saveSheet();
@@ -273,9 +305,11 @@ private:
   DrawingSheetWidget *sheet{nullptr};
   QVector<class QCheckBox *> viewChecks;  // per-view enable (0..5)
   QList<OrthoViewData> sectionViews;
+  QList<OrthoViewData> detailViews;
   QLabel *placeholder;
   QPushButton *saveButton;
   QPushButton *materializeButton;
+  QPushButton *detailButton;  // checkable "New detail" mode
   QPushButton *exportButton;
   QCheckBox *showRefsCheck;
   QCheckBox *separateFilesCheck;

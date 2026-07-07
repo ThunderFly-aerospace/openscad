@@ -177,6 +177,8 @@ private:
   void onLabelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx, bool finished);
   void onDimensionDoubleClicked(int id);
   void onMaterializeKvotas();
+  // A detail circle was drawn over a standard view: append a // @detail line.
+  void onDetailRequested(int viewIndex, double cx, double cy, double r);
 
   // Interactive dimension creation: the first anchor clicked in the drawing
   // dock, pending the second. Empty = no pending pick.
