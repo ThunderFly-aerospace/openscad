@@ -114,38 +114,52 @@ struct OrthoViewData {
   bool valid() const { return sizeMm.isValid() && sizeMm.width() > 0 && sizeMm.height() > 0; }
 };
 
+// One placed view on the drawing sheet: its data plus the drawing-mm origin where
+// its view-local (0,0) sits, which standard view it is (0..5 for the interactive
+// standard views, -1 for display-only section / detail tiles), and whether it is a
+// section tile.
+struct PlacedView {
+  OrthoViewData data;
+  QPointF originMm;
+  int viewIndex{-1};
+  bool isSection{false};
+};
+
 /*!
-   Widget that shows one orthographic view (the rendered image) with a dimension
-   overlay drawn on top: dimref anchor dots and dimension lines with labels. The
-   image is scaled to fit while keeping aspect; overlay coordinates are given in
-   the render image's native pixel space and mapped through the same fit
-   transform. Clicking near an anchor emits anchorClicked() (used in Phase 2B-3).
+   Single-canvas widget that paints the whole drawing sheet: every selected view
+   (plus section / detail tiles) placed at its first-angle position, all sharing
+   one fit + zoom/pan — a true WYSIWYG of the vector export. Sheet coordinates are
+   drawing-mm; each PlacedView's view-local model-mm points map onto the sheet
+   through its origin and the drawing scale. Mouse interaction (drag dimension /
+   label, rotate ⌀/R, click anchor, right-click jump, double-click edit) is
+   dispatched to whichever standard view sits under the cursor; section / detail
+   tiles are display-only. Signals carry the hit view's index directly.
  */
-class OrthoViewWidget : public QWidget
+class DrawingSheetWidget : public QWidget
 {
   Q_OBJECT
 
 public:
-  OrthoViewWidget(QWidget *parent = nullptr);
+  DrawingSheetWidget(QWidget *parent = nullptr);
 
-  void setData(const OrthoViewData& data);
+  // Replace the whole sheet: placed views, drawing scale (drawing-mm per model-mm)
+  // and sheet size in drawing-mm. Zoom/pan are preserved across refreshes.
+  void setSheet(const QVector<PlacedView>& placements, double scale,
+                double sheetWmm, double sheetHmm);
   void clear();
   void setShowAnchors(bool show);
-  // Update only the drawing scale (drawing-mm per model-mm) and repaint; used
-  // when the user changes the scale spinbox without re-rendering the geometry.
-  void setScale(double scale);
+  bool hasContent() const { return !this->places.isEmpty(); }
 
 signals:
-  void anchorClicked(const QString& name);
-  // Emitted while dragging a dimension line and once more on release, with the
-  // dimension id and its new perpendicular offset in image pixels.
-  void dimensionOffsetChanged(int id, double offsetPx, bool finished);
-  // Emitted while rotating a radial (⌀/R) dimension and once more on release,
-  // with the dimension id and the new angle in degrees.
-  void dimensionAngleChanged(int id, double angleDeg, bool finished);
-  // Emitted while dragging a dimension's label, with the new label offset in the
-  // dimension's (along, perp) frame in image pixels.
-  void labelOffsetChanged(int id, double alongPx, double perpPx, bool finished);
+  void anchorClicked(int viewIndex, const QString& name);
+  // Emitted while dragging a dimension line and once more on release, with the hit
+  // view index, the dimension id and its new perpendicular offset in model-mm.
+  void dimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
+  // Emitted while rotating a radial (⌀/R) dimension and once more on release.
+  void dimensionAngleChanged(int viewIndex, int id, double angleDeg, bool finished);
+  // Emitted while dragging a dimension's label (offset in the dimension's own
+  // along/perp frame, model-mm).
+  void labelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx, bool finished);
   // Emitted on double-click of a dimension line or label (its source id).
   void dimensionDoubleClicked(int id);
   // Emitted on right-click of a dimref anchor or dimension: 0-based source line.
@@ -160,46 +174,39 @@ protected:
   void wheelEvent(QWheelEvent *event) override;
 
 private:
-  // Index of the dimension under a widget point (label or line), or -1. When
-  // editableOnly is true only draggable // @dim dimensions are considered (used
-  // for double-click / drag); false also matches kvota= dims (used for the
-  // right-click jump-to-source).
-  int dimAt(const QPointF& widgetPt, bool editableOnly = true) const;
-  // Widget pixels per model-mm at the current fit + zoom.
-  double mmToPx() const;
-  // An absolute drawing-mm size in widget pixels (drawing-mm -> model-mm via the
-  // scale, then model-mm -> widget px). Used for pen widths, arrows and fonts so
-  // they read at a fixed size relative to the scaled drawing.
+  void recomputeFit();
+  // Sheet drawing-mm <-> widget px (shared fit + zoom/pan).
+  QPointF sheetToWidget(const QPointF& sheetMm) const;
+  QPointF widgetToSheet(const QPointF& widgetPt) const;
+  // View-local model-mm <-> widget px, through a placement's origin and the scale.
+  QPointF mapToWidget(const PlacedView& pl, const QPointF& viewLocalMm) const;
+  QPointF mapToViewLocal(const PlacedView& pl, const QPointF& widgetPt) const;
+  // A drawing-mm length in widget px (pen widths, arrows, fonts).
   double absPx(double drawingMm) const;
-  // The dimension-label font at the current zoom/scale.
   QFont overlayFont() const;
+  // Index of the placement whose content box contains the widget point, or -1.
+  // Prefers interactive standard views over display-only tiles on overlap.
+  int placementAt(const QPointF& widgetPt) const;
+  // Index of the dimension under a widget point within placement pl (label or
+  // line). editableOnly restricts to draggable // @dim dims (id >= 0).
+  int dimAt(const PlacedView& pl, const QPointF& widgetPt, bool editableOnly = true) const;
+  void paintPlacement(QPainter& painter, const PlacedView& pl);
 
-private:
-  // Maps a view-local model-mm point to a widget point using the current fit.
-  QPointF mapToWidget(const QPointF& imgPt) const;
-  QPointF mapToImage(const QPointF& widgetPt) const;
-  // Unit perpendicular (image space) of dimension i, pointing along +offset.
-  QPointF dimPerp(const OrthoDimension& d) const;
-  // Label anchor point (image space): midpoint of the offset dimension line plus
-  // the label's own along/perp offset.
-  QPointF dimLabelPos(const OrthoDimension& d) const;
-
-  OrthoViewData data;
-  // Fit transform (recomputed each paint): widget = image*(fitScale*userZoom) +
-  // fitOffset + userPan. fitScale/fitOffset fit the image; userZoom/userPan are
-  // the user's wheel-zoom and drag-pan on top.
+  QVector<PlacedView> places;
+  double scale{1.0};
+  double sheetWmm{0.0}, sheetHmm{0.0};
+  // Fit transform (recomputed each paint): widget = sheetMm*(fitScale*userZoom) +
+  // fitOffset + userPan.
   double fitScale{1.0};
   QPointF fitOffset;
   double userZoom{1.0};
   QPointF userPan;
-  // Index into data.dims currently being dragged (line), or -1.
+  // Drag state: which placement (index into places) + which dim index within it.
+  int dragPlace{-1};
   int draggingDim{-1};
-  // Index into data.dims whose label is being dragged, or -1.
   int draggingLabel{-1};
-  // Panning the view with an empty-area left drag.
   bool panning{false};
   QPointF panLast;
-  // Whether to draw reference-point dots and their names.
   bool showAnchors{true};
 };
 
@@ -255,21 +262,17 @@ private slots:
   void setShowAnchors(bool show);
 
 private:
-  // Enable/disable the export + save buttons based on whether any shown view has
-  // content.
+  // Enable/disable the export + save buttons (and toggle the placeholder) based on
+  // whether any shown view has content.
   void updateExportEnabled();
-  // Give grid rows/columns stretch only where a visible tile sits, so unticked
-  // views leave no blank space.
-  void relayoutViews();
+  // Recompute the first-angle sheet layout from the stored views + section tiles at
+  // the current scale and selection, and hand the placed views to the canvas. Cheap
+  // (no reprojection): called after setViews / setSectionViews and on scale change.
+  void rebuildSheet();
 
-  QVector<OrthoViewWidget *> viewWidgets;
-  QVector<class QGroupBox *> viewBoxes;  // parallel to viewWidgets
-  QVector<class QCheckBox *> viewChecks;  // per-view enable, parallel to viewWidgets
-  QVector<OrthoViewWidget *> sectionWidgets;  // dynamic; one per section() marker
-  QVector<class QGroupBox *> sectionBoxes;
+  DrawingSheetWidget *sheet{nullptr};
+  QVector<class QCheckBox *> viewChecks;  // per-view enable (0..5)
   QList<OrthoViewData> sectionViews;
-  class QGridLayout *sheetGrid{nullptr};  // to add section tiles below the standard grid
-  class QWidget *sheetWidget{nullptr};
   QLabel *placeholder;
   QPushButton *saveButton;
   QPushButton *materializeButton;

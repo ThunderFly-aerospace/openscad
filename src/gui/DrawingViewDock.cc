@@ -29,7 +29,7 @@
 #include <QWidget>
 
 // ---------------------------------------------------------------------------
-// OrthoViewWidget
+// DrawingSheetWidget
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -54,68 +54,63 @@ double distToSegment(const QPointF& p, const QPointF& a, const QPointF& b)
 }
 }  // namespace
 
-OrthoViewWidget::OrthoViewWidget(QWidget *parent) : QWidget(parent)
+DrawingSheetWidget::DrawingSheetWidget(QWidget *parent) : QWidget(parent)
 {
-  setMinimumSize(120, 90);
+  setMinimumSize(160, 120);
   setMouseTracking(false);
 }
 
-void OrthoViewWidget::setData(const OrthoViewData& newData)
+void DrawingSheetWidget::setSheet(const QVector<PlacedView>& placements, double newScale,
+                                  double wMm, double hMm)
 {
-  this->data = newData;
+  this->places = placements;
+  this->scale = newScale > 1e-9 ? newScale : 1.0;
+  this->sheetWmm = wMm;
+  this->sheetHmm = hMm;
+  this->dragPlace = -1;
   this->draggingDim = -1;
   this->draggingLabel = -1;
   update();
 }
 
-void OrthoViewWidget::clear()
+void DrawingSheetWidget::clear()
 {
-  this->data = OrthoViewData{};
-  this->draggingDim = -1;
-  this->draggingLabel = -1;
+  this->places.clear();
+  this->sheetWmm = this->sheetHmm = 0.0;
+  this->userZoom = 1.0;
+  this->userPan = QPointF();
+  this->dragPlace = this->draggingDim = this->draggingLabel = -1;
   update();
 }
 
-void OrthoViewWidget::setShowAnchors(bool show)
+void DrawingSheetWidget::setShowAnchors(bool show)
 {
   this->showAnchors = show;
   update();
 }
 
-void OrthoViewWidget::setScale(double scale)
+void DrawingSheetWidget::recomputeFit()
 {
-  this->data.scale = scale;
-  update();
+  if (this->sheetWmm <= 1e-9 || this->sheetHmm <= 1e-9) {
+    this->fitScale = 1.0;
+    this->fitOffset = QPointF();
+    return;
+  }
+  this->fitScale = std::min(static_cast<double>(width()) / this->sheetWmm,
+                            static_cast<double>(height()) / this->sheetHmm);
+  const double drawW = this->sheetWmm * this->fitScale;
+  const double drawH = this->sheetHmm * this->fitScale;
+  this->fitOffset = QPointF((width() - drawW) / 2.0, (height() - drawH) / 2.0);
 }
 
-double OrthoViewWidget::mmToPx() const
-{
-  return this->fitScale * this->userZoom;
-}
-
-double OrthoViewWidget::absPx(double drawingMm) const
-{
-  const double sc = this->data.scale > 1e-9 ? this->data.scale : 1.0;
-  return drawingMm / sc * mmToPx();
-}
-
-QFont OrthoViewWidget::overlayFont() const
-{
-  // Dimension text ~3 mm on the drawing (a common technical-drawing text height).
-  QFont f = font();
-  const double px = absPx(3.0);
-  f.setPixelSize(std::max(1, static_cast<int>(std::round(px))));
-  return f;
-}
-
-QPointF OrthoViewWidget::mapToWidget(const QPointF& imgPt) const
+QPointF DrawingSheetWidget::sheetToWidget(const QPointF& sheetMm) const
 {
   const double s = this->fitScale * this->userZoom;
-  return QPointF(imgPt.x() * s + this->fitOffset.x() + this->userPan.x(),
-                 imgPt.y() * s + this->fitOffset.y() + this->userPan.y());
+  return QPointF(sheetMm.x() * s + this->fitOffset.x() + this->userPan.x(),
+                 sheetMm.y() * s + this->fitOffset.y() + this->userPan.y());
 }
 
-QPointF OrthoViewWidget::mapToImage(const QPointF& widgetPt) const
+QPointF DrawingSheetWidget::widgetToSheet(const QPointF& widgetPt) const
 {
   const double s = this->fitScale * this->userZoom;
   if (s < 1e-9) return QPointF();
@@ -123,13 +118,36 @@ QPointF OrthoViewWidget::mapToImage(const QPointF& widgetPt) const
                  (widgetPt.y() - this->fitOffset.y() - this->userPan.y()) / s);
 }
 
-QPointF OrthoViewWidget::dimPerp(const OrthoDimension& d) const
+QPointF DrawingSheetWidget::mapToWidget(const PlacedView& pl, const QPointF& viewLocalMm) const
 {
-  QPointF dir = d.dir;
-  const double len = std::hypot(dir.x(), dir.y());
-  if (len < 1e-9) return QPointF(0, -1);
-  dir /= len;
-  return QPointF(dir.y(), -dir.x());  // rotate -90°
+  // view-local model-mm -> sheet drawing-mm -> widget px.
+  const QPointF sheetMm(pl.originMm.x() + viewLocalMm.x() * this->scale,
+                        pl.originMm.y() + viewLocalMm.y() * this->scale);
+  return sheetToWidget(sheetMm);
+}
+
+QPointF DrawingSheetWidget::mapToViewLocal(const PlacedView& pl, const QPointF& widgetPt) const
+{
+  const QPointF sheetMm = widgetToSheet(widgetPt);
+  const double sc = this->scale > 1e-9 ? this->scale : 1.0;
+  return QPointF((sheetMm.x() - pl.originMm.x()) / sc,
+                 (sheetMm.y() - pl.originMm.y()) / sc);
+}
+
+double DrawingSheetWidget::absPx(double drawingMm) const
+{
+  // Sheet coordinates are drawing-mm, so a drawing-mm length is just scaled by the
+  // current px-per-drawing-mm (fit * zoom).
+  return drawingMm * this->fitScale * this->userZoom;
+}
+
+QFont DrawingSheetWidget::overlayFont() const
+{
+  // Dimension text ~3 mm on the drawing (a common technical-drawing text height).
+  QFont f = font();
+  const double px = absPx(3.0);
+  f.setPixelSize(std::max(1, static_cast<int>(std::round(px))));
+  return f;
 }
 
 // Foot of an image-space point projected onto the (offset) dimension line: the
@@ -191,41 +209,43 @@ static QPointF labelPosOf(const OrthoDimension& d)
   return mid + dir * d.labAlongPx + perp * d.labPerpPx;
 }
 
-QPointF OrthoViewWidget::dimLabelPos(const OrthoDimension& d) const
-{
-  return labelPosOf(d);
-}
-
-void OrthoViewWidget::paintEvent(QPaintEvent *)
+void DrawingSheetWidget::paintEvent(QPaintEvent *)
 {
   QPainter painter(this);
   painter.fillRect(rect(), Qt::white);
 
-  if (!this->data.valid()) {
+  if (this->places.isEmpty()) {
     painter.setPen(Qt::gray);
     painter.drawText(rect(), Qt::AlignCenter, tr("(no preview)"));
     return;
   }
 
-  // Fit the view's model-mm bounding box into the widget keeping aspect, centered;
-  // the user's wheel-zoom and drag-pan are applied on top (see mapToWidget).
-  const QSizeF sz = this->data.sizeMm;
-  this->fitScale = std::min(static_cast<double>(width()) / sz.width(),
-                            static_cast<double>(height()) / sz.height());
-  const double drawW = sz.width() * this->fitScale;
-  const double drawH = sz.height() * this->fitScale;
-  this->fitOffset = QPointF((width() - drawW) / 2.0, (height() - drawH) / 2.0);
-
+  recomputeFit();  // fit the whole sheet (drawing-mm) into the widget
   painter.setRenderHint(QPainter::Antialiasing, true);
+  for (const auto& pl : this->places) paintPlacement(painter, pl);
+}
+
+void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
+{
+  const OrthoViewData& data = pl.data;
+  if (!data.valid()) return;
+  auto map = [&](const QPointF& p) { return mapToWidget(pl, p); };
+
   painter.setFont(overlayFont());
 
+  // View title just above the tile (at its drawing-mm origin corner).
+  if (!data.title.isEmpty()) {
+    painter.setPen(Qt::black);
+    painter.drawText(map(QPointF(0, 0)) - QPointF(0, absPx(1.5)), data.title);
+  }
+
   // Section cut-face hatching first, so edges sit on top of it.
-  if (!this->data.hatch.isEmpty()) {
+  if (!data.hatch.isEmpty()) {
     QPen hatchPen(QColor(90, 90, 90));
     hatchPen.setWidthF(std::max(0.4, absPx(0.13)));
     painter.setPen(hatchPen);
-    for (const auto& hh : this->data.hatch)
-      painter.drawLine(mapToWidget(hh.p1()), mapToWidget(hh.p2()));
+    for (const auto& hh : data.hatch)
+      painter.drawLine(map(hh.p1()), map(hh.p2()));
   }
 
   // The line drawing itself: silhouette + feature edges (model-mm -> widget).
@@ -233,14 +253,14 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
   edgePen.setWidthF(std::max(0.6, absPx(0.3)));
   edgePen.setCapStyle(Qt::RoundCap);
   painter.setPen(edgePen);
-  for (const auto& e : this->data.edges) {
-    painter.drawLine(mapToWidget(e.p1()), mapToWidget(e.p2()));
+  for (const auto& e : data.edges) {
+    painter.drawLine(map(e.p1()), map(e.p2()));
   }
 
   // Cutting-plane lines (section markers seen edge-on in this view): a thick chain
   // line across the view with arrowheads and the section letter at both ends.
-  for (const auto& sl : this->data.sectionLines) {
-    const QPointF a = mapToWidget(sl.p0), b = mapToWidget(sl.p1);
+  for (const auto& sl : data.sectionLines) {
+    const QPointF a = map(sl.p0), b = map(sl.p1);
     QPen chain(QColor(20, 20, 20));
     chain.setWidthF(std::max(0.8, absPx(0.5)));
     chain.setStyle(Qt::DashDotLine);
@@ -315,11 +335,11 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
   };
 
   // Radial (⌀ / R) dimensions: line straight through the centre, no witness lines.
-  for (const auto& dim : this->data.dims) {
+  for (const auto& dim : data.dims) {
     if (!dim.radial) continue;
     QPointF p0, p1;
     dimLineEnds(dim, p0, p1);
-    const QPointF a2 = mapToWidget(p0), b2 = mapToWidget(p1);
+    const QPointF a2 = map(p0), b2 = map(p1);
     QPointF dir = b2 - a2;
     const double len = std::hypot(dir.x(), dir.y());
     if (len < 1e-6) continue;
@@ -341,18 +361,18 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
       drawArrow(b2, -dir, nrm);                    // head at the rim, pointing out
       if (!dim.radiusHalf) drawArrow(a2, dir, nrm);  // diameter: head at both rims
     }
-    drawLabel(mapToWidget(dimLabelPos(dim)), dim.label, a2, b2, dim.leader);
+    drawLabel(map(labelPosOf(dim)), dim.label, a2, b2, dim.leader);
   }
 
-  for (const auto& dim : this->data.dims) {
+  for (const auto& dim : data.dims) {
     if (dim.radial) continue;
-    const QPointF a = mapToWidget(dim.a);
-    const QPointF b = mapToWidget(dim.b);
-    const QPointF perp = dimPerp(dim);
+    const QPointF a = map(dim.a);
+    const QPointF b = map(dim.b);
+    const QPointF perp = perpOf(dim);
     // Endpoints of the dimension line: feet of the anchors on the offset line
     // along the measurement direction (image space, then mapped to widget).
-    const QPointF a2 = mapToWidget(dimFoot(dim, perp, dim.a));
-    const QPointF b2 = mapToWidget(dimFoot(dim, perp, dim.b));
+    const QPointF a2 = map(dimFoot(dim, perp, dim.a));
+    const QPointF b2 = map(dimFoot(dim, perp, dim.b));
 
     // Witness (extension) lines from each anchor to its foot on the dimension
     // line (skip the degenerate case where the foot coincides with the anchor).
@@ -393,14 +413,14 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
 
     // Label at its own position (dimension midpoint plus label offset), with a
     // leader to the dimension line when it has been dragged away.
-    drawLabel(mapToWidget(dimLabelPos(dim)), dim.label, a2, b2, dim.leader);
+    drawLabel(map(labelPosOf(dim)), dim.label, a2, b2, dim.leader);
   }
 
   // Angle dimensions: two rays from the vertex, an arc between them, and a label.
-  for (const auto& ang : this->data.angles) {
-    const QPointF v = mapToWidget(ang.vertex);
-    const QPointF a = mapToWidget(ang.a);
-    const QPointF b = mapToWidget(ang.b);
+  for (const auto& ang : data.angles) {
+    const QPointF v = map(ang.vertex);
+    const QPointF a = map(ang.a);
+    const QPointF b = map(ang.b);
     QPointF ua = a - v, ub = b - v;
     const double la = std::hypot(ua.x(), ua.y());
     const double lb = std::hypot(ub.x(), ub.y());
@@ -443,8 +463,8 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
 
   // Anchor dots with names (reference points) — optional.
   if (this->showAnchors)
-  for (const auto& anchor : this->data.anchors) {
-    const QPointF p = mapToWidget(anchor.pos);
+  for (const auto& anchor : data.anchors) {
+    const QPointF p = map(anchor.pos);
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(30, 90, 200));
     painter.drawEllipse(p, 3.5, 3.5);
@@ -453,132 +473,142 @@ void OrthoViewWidget::paintEvent(QPaintEvent *)
   }
 }
 
-void OrthoViewWidget::mousePressEvent(QMouseEvent *event)
+int DrawingSheetWidget::placementAt(const QPointF& widgetPt) const
 {
-  if (!this->data.valid()) return;
-  const QPointF click = event->position();
+  int anyHit = -1;
+  for (int i = 0; i < this->places.size(); ++i) {
+    const PlacedView& pl = this->places.at(i);
+    if (!pl.data.valid()) continue;
+    const QPointF a = mapToWidget(pl, QPointF(0, 0));
+    const QPointF b = mapToWidget(pl, QPointF(pl.data.sizeMm.width(), pl.data.sizeMm.height()));
+    // A small margin so anchors sitting exactly on the outline stay grabbable.
+    const QRectF box = QRectF(a, b).normalized().adjusted(-8, -8, 8, 8);
+    if (box.contains(widgetPt)) {
+      if (pl.viewIndex >= 0) return i;  // prefer interactive standard views on overlap
+      if (anyHit < 0) anyHit = i;
+    }
+  }
+  return anyHit;
+}
 
-  // Right button: jump to the source of the dimension or dimref under the cursor
-  // (left button stays reserved for creating/dragging dimensions and panning).
+void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
+{
+  if (this->places.isEmpty()) return;
+  const QPointF click = event->position();
+  const int pi = placementAt(click);
+
+  // Right button: jump to the source of the dimension or dimref under the cursor.
   if (event->button() == Qt::RightButton) {
-    const int di = dimAt(click, /*editableOnly=*/false);
-    if (di >= 0 && this->data.dims.at(di).jumpLine >= 0) {
-      emit jumpToSource(this->data.dims.at(di).jumpLine);
-      return;
+    if (pi >= 0) {
+      const PlacedView& pl = this->places.at(pi);
+      const int di = dimAt(pl, click, /*editableOnly=*/false);
+      if (di >= 0 && pl.data.dims.at(di).jumpLine >= 0) {
+        emit jumpToSource(pl.data.dims.at(di).jumpLine);
+        return;
+      }
+      double best = 12.0;
+      int line = -1;
+      for (const auto& anchor : pl.data.anchors) {
+        const QPointF p = mapToWidget(pl, anchor.pos);
+        const double d = std::hypot(p.x() - click.x(), p.y() - click.y());
+        if (d <= best && anchor.sourceLine >= 0) { best = d; line = anchor.sourceLine; }
+      }
+      if (line >= 0) emit jumpToSource(line);
     }
-    double best = 12.0;
-    int line = -1;
-    for (const auto& anchor : this->data.anchors) {
-      const QPointF p = mapToWidget(anchor.pos);
-      const double d = std::hypot(p.x() - click.x(), p.y() - click.y());
-      if (d <= best && anchor.sourceLine >= 0) { best = d; line = anchor.sourceLine; }
-    }
-    if (line >= 0) emit jumpToSource(line);
     return;
   }
   if (event->button() != Qt::LeftButton) return;
 
-  // First: start dragging a label if the click is on one (editable dims only).
-  const QFontMetrics fm(overlayFont());
-  for (int i = 0; i < this->data.dims.size(); ++i) {
-    const auto& dim = this->data.dims.at(i);
-    if (dim.id < 0) continue;
-    QRectF box = fm.boundingRect(dim.label).adjusted(-3, -2, 3, 2);
-    box.moveCenter(mapToWidget(dimLabelPos(dim)));
-    if (box.contains(click)) {
-      this->draggingLabel = i;
-      return;
-    }
-  }
+  // Interactive editing only on standard-view placements; section / detail tiles
+  // and empty space fall through to panning the whole sheet.
+  if (pi >= 0 && this->places.at(pi).viewIndex >= 0) {
+    const PlacedView& pl = this->places.at(pi);
 
-  // Next: start dragging a dimension line if the click is near one (editable
-  // dimensions only, i.e. those with a source id).
-  double bestLine = 8.0;
-  int hitDim = -1;
-  for (int i = 0; i < this->data.dims.size(); ++i) {
-    const auto& dim = this->data.dims.at(i);
-    if (dim.id < 0) continue;
-    QPointF p0, p1;
-    dimLineEnds(dim, p0, p1);
-    const double d = distToSegment(click, mapToWidget(p0), mapToWidget(p1));
-    if (d < bestLine) {
-      bestLine = d;
-      hitDim = i;
+    // First: start dragging a label if the click is on one (editable dims only).
+    const QFontMetrics fm(overlayFont());
+    for (int i = 0; i < pl.data.dims.size(); ++i) {
+      const auto& dim = pl.data.dims.at(i);
+      if (dim.id < 0) continue;
+      QRectF box = fm.boundingRect(dim.label).adjusted(-3, -2, 3, 2);
+      box.moveCenter(mapToWidget(pl, labelPosOf(dim)));
+      if (box.contains(click)) { this->dragPlace = pi; this->draggingLabel = i; return; }
     }
-  }
-  if (hitDim >= 0) {
-    this->draggingDim = hitDim;
-    return;
-  }
 
-  // Next: report an anchor click (used to create dimensions). Hidden reference
-  // points are not clickable, so clicking then just pans.
-  if (this->showAnchors) {
-    const double radius = 12.0;
-    QStringList hits;  // distinct anchor refs within the hit radius
-    for (const auto& anchor : this->data.anchors) {
-      const QPointF p = mapToWidget(anchor.pos);
-      if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= radius &&
-          !hits.contains(anchor.ref)) {
-        hits << anchor.ref;
+    // Next: start dragging a dimension line if the click is near one.
+    double bestLine = 8.0;
+    int hitDim = -1;
+    for (int i = 0; i < pl.data.dims.size(); ++i) {
+      const auto& dim = pl.data.dims.at(i);
+      if (dim.id < 0) continue;
+      QPointF p0, p1;
+      dimLineEnds(dim, p0, p1);
+      const double d = distToSegment(click, mapToWidget(pl, p0), mapToWidget(pl, p1));
+      if (d < bestLine) { bestLine = d; hitDim = i; }
+    }
+    if (hitDim >= 0) { this->dragPlace = pi; this->draggingDim = hitDim; return; }
+
+    // Next: report an anchor click (used to create dimensions).
+    if (this->showAnchors) {
+      const double radius = 12.0;
+      QStringList hits;  // distinct anchor refs within the hit radius
+      for (const auto& anchor : pl.data.anchors) {
+        const QPointF p = mapToWidget(pl, anchor.pos);
+        if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= radius &&
+            !hits.contains(anchor.ref)) {
+          hits << anchor.ref;
+        }
+      }
+      if (hits.size() == 1) { emit anchorClicked(pl.viewIndex, hits.first()); return; }
+      if (hits.size() > 1) {
+        QMenu menu(this);
+        for (const QString& ref : hits) menu.addAction(ref);
+        if (QAction *chosen = menu.exec(event->globalPosition().toPoint()))
+          emit anchorClicked(pl.viewIndex, chosen->text());
+        return;
       }
     }
-    if (hits.size() == 1) {
-      emit anchorClicked(hits.first());
-      return;
-    }
-    if (hits.size() > 1) {
-      // Several reference points coincide here: let the user pick which one (the
-      // menu shows the ref token, e.g. A#0 / A#1, so duplicates are distinguishable).
-      QMenu menu(this);
-      for (const QString& ref : hits) menu.addAction(ref);
-      if (QAction *chosen = menu.exec(event->globalPosition().toPoint())) {
-        emit anchorClicked(chosen->text());
-      }
-      return;
-    }
   }
 
-  // Otherwise the click is on empty space: start panning the view.
+  // Otherwise the click is on empty space / a display-only tile: pan the sheet.
   this->panning = true;
   this->panLast = click;
 }
 
-void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
+void DrawingSheetWidget::mouseMoveEvent(QMouseEvent *event)
 {
-  // Pan: translate the view by the mouse delta (widget space).
+  // Pan: translate the sheet by the mouse delta (widget space).
   if (this->panning) {
     this->userPan += event->position() - this->panLast;
     this->panLast = event->position();
     update();
     return;
   }
+  if (this->dragPlace < 0 || this->dragPlace >= this->places.size()) return;
+  PlacedView& pl = this->places[this->dragPlace];
 
   // Label drag: decompose the mouse position (relative to the dimension-line
   // midpoint) into the along/perp frame of the dimension.
-  if (this->draggingLabel >= 0 && this->draggingLabel < this->data.dims.size()) {
-    OrthoDimension& dim = this->data.dims[this->draggingLabel];
-    const QPointF perp = dimPerp(dim);
+  if (this->draggingLabel >= 0 && this->draggingLabel < pl.data.dims.size()) {
+    OrthoDimension& dim = pl.data.dims[this->draggingLabel];
+    const QPointF perp = perpOf(dim);
     QPointF dir = dim.dir;
     const double len = std::hypot(dir.x(), dir.y());
     if (len > 1e-9) dir /= len;
     else dir = QPointF(1, 0);
     const QPointF base = (dim.a + dim.b) / 2.0 + perp * dim.offsetPx;
-    const QPointF rel = mapToImage(event->position()) - base;
+    const QPointF rel = mapToViewLocal(pl, event->position()) - base;
     dim.labAlongPx = rel.x() * dir.x() + rel.y() * dir.y();
     dim.labPerpPx = rel.x() * perp.x() + rel.y() * perp.y();
     update();
-    emit labelOffsetChanged(dim.id, dim.labAlongPx, dim.labPerpPx, false);
+    emit labelOffsetChanged(pl.viewIndex, dim.id, dim.labAlongPx, dim.labPerpPx, false);
     return;
   }
 
-  if (this->draggingDim < 0 || this->draggingDim >= this->data.dims.size()) return;
-  OrthoDimension& dim = this->data.dims[this->draggingDim];
-  const QPointF mouseImg = mapToImage(event->position());
+  if (this->draggingDim < 0 || this->draggingDim >= pl.data.dims.size()) return;
+  OrthoDimension& dim = pl.data.dims[this->draggingDim];
+  const QPointF mouseImg = mapToViewLocal(pl, event->position());
 
-  // Radial dimension: dragging rotates the line about the feature centre, keeping
-  // the rim radius. The source angle is the screen angle negated (view-local y is
-  // down, source angle is measured CCW in the y-up view plane).
+  // Radial dimension: dragging rotates the line about the feature centre.
   if (dim.radial) {
     QPointF rel = mouseImg - dim.center;
     const double L = std::hypot(rel.x(), rel.y());
@@ -590,81 +620,88 @@ void OrthoViewWidget::mouseMoveEvent(QMouseEvent *event)
     dim.a = dim.radiusHalf ? dim.center : dim.center - u * r;
     update();
     const double angleDeg = -std::atan2(u.y(), u.x()) * 180.0 / M_PI;
-    emit dimensionAngleChanged(dim.id, angleDeg, false);
+    emit dimensionAngleChanged(pl.viewIndex, dim.id, angleDeg, false);
     return;
   }
 
-  const QPointF perp = dimPerp(dim);
+  const QPointF perp = perpOf(dim);
   const QPointF mid = (dim.a + dim.b) / 2.0;
   const QPointF rel = mouseImg - mid;
   dim.offsetPx = rel.x() * perp.x() + rel.y() * perp.y();  // project onto perp
   update();
-  emit dimensionOffsetChanged(dim.id, dim.offsetPx, false);
+  emit dimensionOffsetChanged(pl.viewIndex, dim.id, dim.offsetPx, false);
 }
 
-int OrthoViewWidget::dimAt(const QPointF& pt, bool editableOnly) const
+int DrawingSheetWidget::dimAt(const PlacedView& pl, const QPointF& pt, bool editableOnly) const
 {
   const QFontMetrics fm(overlayFont());
   // Label box first, then the dimension line.
-  for (int i = 0; i < this->data.dims.size(); ++i) {
-    const auto& dim = this->data.dims.at(i);
+  for (int i = 0; i < pl.data.dims.size(); ++i) {
+    const auto& dim = pl.data.dims.at(i);
     if (editableOnly && dim.id < 0) continue;
     QRectF box = fm.boundingRect(dim.label).adjusted(-3, -2, 3, 2);
-    box.moveCenter(mapToWidget(dimLabelPos(dim)));
+    box.moveCenter(mapToWidget(pl, labelPosOf(dim)));
     if (box.contains(pt)) return i;
   }
-  for (int i = 0; i < this->data.dims.size(); ++i) {
-    const auto& dim = this->data.dims.at(i);
+  for (int i = 0; i < pl.data.dims.size(); ++i) {
+    const auto& dim = pl.data.dims.at(i);
     if (editableOnly && dim.id < 0) continue;
     QPointF p0, p1;
     dimLineEnds(dim, p0, p1);
-    if (distToSegment(pt, mapToWidget(p0), mapToWidget(p1)) < 8.0) return i;
+    if (distToSegment(pt, mapToWidget(pl, p0), mapToWidget(pl, p1)) < 8.0) return i;
   }
   return -1;
 }
 
-void OrthoViewWidget::mouseDoubleClickEvent(QMouseEvent *event)
+void DrawingSheetWidget::mouseDoubleClickEvent(QMouseEvent *event)
 {
-  if (!this->data.valid()) return;
-  const int i = dimAt(event->position());
-  if (i >= 0) emit dimensionDoubleClicked(this->data.dims.at(i).id);
+  const int pi = placementAt(event->position());
+  if (pi < 0 || this->places.at(pi).viewIndex < 0) return;
+  const PlacedView& pl = this->places.at(pi);
+  const int i = dimAt(pl, event->position());
+  if (i >= 0) emit dimensionDoubleClicked(pl.data.dims.at(i).id);
 }
 
-void OrthoViewWidget::mouseReleaseEvent(QMouseEvent *)
+void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
 {
   if (this->panning) {
     this->panning = false;
     return;
   }
-  if (this->draggingLabel >= 0 && this->draggingLabel < this->data.dims.size()) {
-    const OrthoDimension& dim = this->data.dims[this->draggingLabel];
-    emit labelOffsetChanged(dim.id, dim.labAlongPx, dim.labPerpPx, true);
-    this->draggingLabel = -1;
+  if (this->dragPlace < 0 || this->dragPlace >= this->places.size()) {
+    this->draggingLabel = this->draggingDim = -1;
     return;
   }
-  if (this->draggingDim < 0 || this->draggingDim >= this->data.dims.size()) return;
-  const OrthoDimension& dim = this->data.dims[this->draggingDim];
-  if (dim.radial) {
-    const QPointF u = unitDirOf(dim);
-    emit dimensionAngleChanged(dim.id, -std::atan2(u.y(), u.x()) * 180.0 / M_PI, true);
-  } else {
-    emit dimensionOffsetChanged(dim.id, dim.offsetPx, true);
+  PlacedView& pl = this->places[this->dragPlace];
+  if (this->draggingLabel >= 0 && this->draggingLabel < pl.data.dims.size()) {
+    const OrthoDimension& dim = pl.data.dims[this->draggingLabel];
+    emit labelOffsetChanged(pl.viewIndex, dim.id, dim.labAlongPx, dim.labPerpPx, true);
+  } else if (this->draggingDim >= 0 && this->draggingDim < pl.data.dims.size()) {
+    const OrthoDimension& dim = pl.data.dims[this->draggingDim];
+    if (dim.radial) {
+      const QPointF u = unitDirOf(dim);
+      emit dimensionAngleChanged(pl.viewIndex, dim.id,
+                                 -std::atan2(u.y(), u.x()) * 180.0 / M_PI, true);
+    } else {
+      emit dimensionOffsetChanged(pl.viewIndex, dim.id, dim.offsetPx, true);
+    }
   }
-  this->draggingDim = -1;
+  this->dragPlace = this->draggingLabel = this->draggingDim = -1;
 }
 
-void OrthoViewWidget::wheelEvent(QWheelEvent *event)
+void DrawingSheetWidget::wheelEvent(QWheelEvent *event)
 {
-  if (!this->data.valid()) return;
+  if (this->places.isEmpty()) return;
   const double steps = event->angleDelta().y() / 120.0;
   if (steps == 0.0) return;
+  recomputeFit();
   const QPointF cursor = event->position();
-  const QPointF imgAt = mapToImage(cursor);  // image point under the cursor (old zoom)
+  const QPointF sheetAt = widgetToSheet(cursor);  // sheet-mm under the cursor (old zoom)
   const double factor = std::pow(1.2, steps);
-  this->userZoom = std::clamp(this->userZoom * factor, 0.2, 20.0);
-  // Keep imgAt under the cursor: solve userPan from mapToWidget(imgAt) == cursor.
+  this->userZoom = std::clamp(this->userZoom * factor, 0.2, 40.0);
+  // Keep sheetAt under the cursor: solve userPan from sheetToWidget(sheetAt) == cursor.
   const double s = this->fitScale * this->userZoom;
-  this->userPan = cursor - this->fitOffset - imgAt * s;
+  this->userPan = cursor - this->fitOffset - sheetAt * s;
   update();
 }
 
@@ -693,6 +730,69 @@ constexpr int kGridPos[kViewCount][2] = {
 constexpr bool kViewDefault[kViewCount] = {true, false, false, true, true, false};
 // Filename slug per view (for the "separate files" export).
 const char *const kViewSlug[kViewCount] = {"front", "back", "left", "right", "top", "bottom"};
+
+// One tile to place on the sheet: its data, its first-angle grid cell, a filename
+// slug, the interactive view index (0..5, or -1 for display-only section tiles),
+// and whether it is a section tile.
+struct SheetTile {
+  const OrthoViewData *v;
+  int gridR, gridC;
+  QString slug;
+  int viewIndex;
+  bool isSection;
+};
+
+// The selected standard views (at their first-angle cells) plus the valid section
+// tiles (rows below the 3-row grid, four per row). Shared by the interactive canvas
+// and the composed export so both lay out identically.
+QVector<SheetTile> collectSheetTiles(const QList<OrthoViewData>& views,
+                                     const QList<OrthoViewData>& sections,
+                                     const std::vector<bool>& viewSelected)
+{
+  QVector<SheetTile> tiles;
+  for (int i = 0; i < views.size() && i < kViewCount; ++i)
+    if (i < static_cast<int>(viewSelected.size()) && viewSelected[i] && views.at(i).valid())
+      tiles.push_back({&views.at(i), kGridPos[i][0], kGridPos[i][1], kViewSlug[i], i, false});
+  for (int i = 0, cell = 0; i < sections.size(); ++i) {
+    if (!sections.at(i).valid()) continue;
+    tiles.push_back({&sections.at(i), 3 + cell / 4, cell % 4,
+                     QString("section%1").arg(i + 1), -1, true});
+    ++cell;
+  }
+  return tiles;
+}
+
+// First-angle sheet layout: origin (drawing-mm top-left of the view content) per
+// tile plus the total sheet size. Same-axis views share equal-width/height cells so
+// centring aligns them (top under front, sides level). Row height includes a title
+// band. Result origins are parallel to `tiles`.
+struct SheetLayoutResult { QVector<QPointF> origins; double wMm; double hMm; };
+
+SheetLayoutResult computeSheetLayout(const QVector<SheetTile>& tiles, double scale,
+                                     double marginMm, double gapMm, double titleMm)
+{
+  SheetLayoutResult r;
+  r.origins.resize(tiles.size());
+  int maxR = 2;
+  for (const auto& t : tiles) maxR = std::max(maxR, t.gridR);
+  std::vector<double> colW(4, 0.0), rowH(maxR + 1, 0.0), colX(4, 0.0), rowY(maxR + 1, 0.0);
+  for (const auto& t : tiles) {
+    colW[t.gridC] = std::max(colW[t.gridC], t.v->sizeMm.width() * scale);
+    rowH[t.gridR] = std::max(rowH[t.gridR], t.v->sizeMm.height() * scale);
+  }
+  double x = marginMm, y = marginMm;
+  for (int c = 0; c < 4; ++c) { colX[c] = x; if (colW[c] > 0) x += colW[c] + gapMm; }
+  for (int rr = 0; rr <= maxR; ++rr) { rowY[rr] = y; if (rowH[rr] > 0) y += titleMm + rowH[rr] + gapMm; }
+  r.wMm = std::max(2 * marginMm, x - gapMm + marginMm);
+  r.hMm = std::max(2 * marginMm, y - gapMm + marginMm);
+  for (int i = 0; i < tiles.size(); ++i) {
+    const auto& t = tiles.at(i);
+    const double w = t.v->sizeMm.width() * scale, h = t.v->sizeMm.height() * scale;
+    r.origins[i] = QPointF(colX[t.gridC] + (colW[t.gridC] - w) / 2.0,
+                           rowY[t.gridR] + titleMm + (rowH[t.gridR] - h) / 2.0);
+  }
+  return r;
+}
 }  // namespace
 
 DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
@@ -701,49 +801,25 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   auto *layout = new QVBoxLayout(central);
   layout->setContentsMargins(4, 4, 4, 4);
 
-  auto *sheet = new QWidget(central);
-  auto *grid = new QGridLayout(sheet);
-  grid->setContentsMargins(0, 0, 0, 0);
-  this->sheetGrid = grid;
-  this->sheetWidget = sheet;
+  // Single canvas: the whole first-angle sheet with one shared fit + zoom/pan.
+  // A WYSIWYG of the vector export. Its signals already carry the hit view index,
+  // so they forward straight through to the dock's own signals.
+  this->sheet = new DrawingSheetWidget(central);
+  connect(this->sheet, &DrawingSheetWidget::anchorClicked, this,
+          &DrawingViewDock::anchorClicked);
+  connect(this->sheet, &DrawingSheetWidget::dimensionOffsetChanged, this,
+          &DrawingViewDock::dimensionOffsetChanged);
+  connect(this->sheet, &DrawingSheetWidget::dimensionAngleChanged, this,
+          &DrawingViewDock::dimensionAngleChanged);
+  connect(this->sheet, &DrawingSheetWidget::labelOffsetChanged, this,
+          &DrawingViewDock::labelOffsetChanged);
+  connect(this->sheet, &DrawingSheetWidget::dimensionDoubleClicked, this,
+          &DrawingViewDock::dimensionDoubleClicked);
+  connect(this->sheet, &DrawingSheetWidget::jumpToSource, this,
+          &DrawingViewDock::jumpToSource);
 
-  const char *defaultTitles[kViewCount] = {
-    QT_TR_NOOP("Front (nárys)"), QT_TR_NOOP("Back (zadní)"), QT_TR_NOOP("Left (levý bok)"),
-    QT_TR_NOOP("Right (pravý bok)"), QT_TR_NOOP("Top (půdorys)"), QT_TR_NOOP("Bottom (spodní)")};
-
-  for (int i = 0; i < kViewCount; ++i) {
-    auto *box = new QGroupBox(tr(defaultTitles[i]), sheet);
-    auto *boxLayout = new QVBoxLayout(box);
-    boxLayout->setContentsMargins(2, 2, 2, 2);
-    auto *view = new OrthoViewWidget(box);
-    boxLayout->addWidget(view);
-    grid->addWidget(box, kGridPos[i][0], kGridPos[i][1]);
-    box->setVisible(kViewDefault[i]);  // shown only when its checkbox is ticked
-    this->viewWidgets.append(view);
-    this->viewBoxes.append(box);
-
-    connect(view, &OrthoViewWidget::anchorClicked, this,
-            [this, i](const QString& name) { emit anchorClicked(i, name); });
-    connect(view, &OrthoViewWidget::dimensionOffsetChanged, this,
-            [this, i](int id, double offsetPx, bool finished) {
-              emit dimensionOffsetChanged(i, id, offsetPx, finished);
-            });
-    connect(view, &OrthoViewWidget::dimensionAngleChanged, this,
-            [this, i](int id, double angleDeg, bool finished) {
-              emit dimensionAngleChanged(i, id, angleDeg, finished);
-            });
-    connect(view, &OrthoViewWidget::labelOffsetChanged, this,
-            [this, i](int id, double alongPx, double perpPx, bool finished) {
-              emit labelOffsetChanged(i, id, alongPx, perpPx, finished);
-            });
-    connect(view, &OrthoViewWidget::dimensionDoubleClicked, this,
-            &DrawingViewDock::dimensionDoubleClicked);
-    connect(view, &OrthoViewWidget::jumpToSource, this, &DrawingViewDock::jumpToSource);
-  }
-  relayoutViews();  // only occupied rows/cols take space (no empty tiles)
-
-  // Row of per-view enable checkboxes: only the ticked views are shown, and the
-  // sheet collapses around them (no blank cells).
+  // Row of per-view enable checkboxes. Toggling reprojects (viewSelectionChanged →
+  // owner reprojects → setViews) and rebuilds the sheet around the ticked views.
   const char *viewNames[kViewCount] = {QT_TR_NOOP("Front"), QT_TR_NOOP("Back"),
                                        QT_TR_NOOP("Left"),  QT_TR_NOOP("Right"),
                                        QT_TR_NOOP("Top"),   QT_TR_NOOP("Bottom")};
@@ -754,9 +830,7 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   for (int i = 0; i < kViewCount; ++i) {
     auto *cb = new QCheckBox(tr(viewNames[i]), viewsRow);
     cb->setChecked(kViewDefault[i]);
-    connect(cb, &QCheckBox::toggled, this, [this, i](bool on) {
-      this->viewBoxes.at(i)->setVisible(on);
-      relayoutViews();
+    connect(cb, &QCheckBox::toggled, this, [this](bool) {
       emit viewSelectionChanged();
       updateExportEnabled();
     });
@@ -816,7 +890,7 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   checkLayout->addWidget(this->exportButton);
 
   layout->addWidget(viewsRow);
-  layout->addWidget(sheet, 1);
+  layout->addWidget(this->sheet, 1);
   layout->addWidget(this->placeholder);
   layout->addWidget(checkRow);
   layout->addWidget(buttonRow);
@@ -827,13 +901,10 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   connect(this->materializeButton, &QPushButton::clicked, this,
           &DrawingViewDock::materializeRequested);
   connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
-  // Changing the scale only affects text / line-weight sizing relative to the
-  // geometry (and the export size), so push it to the views without a re-render.
+  // The scale changes the sheet layout (view sizes and spacing) but not the
+  // geometry, so just recompute the layout — no reprojection / re-render.
   connect(this->scaleSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-          [this](double) {
-            for (auto *view : this->viewWidgets) view->setScale(exportScale());
-            for (auto *view : this->sectionWidgets) view->setScale(exportScale());
-          });
+          [this](double) { rebuildSheet(); });
 }
 
 double DrawingViewDock::exportScale() const
@@ -844,7 +915,7 @@ double DrawingViewDock::exportScale() const
 
 void DrawingViewDock::setShowAnchors(bool show)
 {
-  for (auto *view : this->viewWidgets) view->setShowAnchors(show);
+  if (this->sheet) this->sheet->setShowAnchors(show);
 }
 
 DrawingViewDock::~DrawingViewDock() = default;
@@ -852,69 +923,40 @@ DrawingViewDock::~DrawingViewDock() = default;
 void DrawingViewDock::setViews(const QList<OrthoViewData>& newViews, const QStringList& titles)
 {
   this->views = newViews;
-
-  for (int i = 0; i < this->viewWidgets.size(); ++i) {
-    if (i < this->views.size()) {
-      this->viewWidgets.at(i)->setData(this->views.at(i));
-    } else {
-      this->viewWidgets.at(i)->clear();
-    }
-    if (i < titles.size() && !titles.at(i).isEmpty()) {
-      if (auto *box = qobject_cast<QGroupBox *>(this->viewWidgets.at(i)->parentWidget())) {
-        box->setTitle(titles.at(i));
-      }
-    }
-  }
-
+  // Titles (parallel to the views) become the tile captions drawn on the sheet.
+  for (int i = 0; i < this->views.size() && i < titles.size(); ++i)
+    if (!titles.at(i).isEmpty()) this->views[i].title = titles.at(i);
+  rebuildSheet();
   updateExportEnabled();
 }
 
 void DrawingViewDock::setSectionViews(const QList<OrthoViewData>& sections)
 {
   this->sectionViews = sections;
-  // Grow the pool of section tiles as needed; place them in rows below the
-  // standard 3-row grid, four per row.
-  while (this->sectionWidgets.size() < sections.size()) {
-    const int i = this->sectionWidgets.size();
-    auto *box = new QGroupBox(this->sheetWidget);
-    auto *boxLayout = new QVBoxLayout(box);
-    boxLayout->setContentsMargins(2, 2, 2, 2);
-    auto *view = new OrthoViewWidget(box);
-    boxLayout->addWidget(view);
-    this->sheetGrid->addWidget(box, 3 + i / 4, i % 4);
-    this->sectionWidgets.append(view);
-    this->sectionBoxes.append(box);
-  }
-  for (int i = 0; i < this->sectionWidgets.size(); ++i) {
-    const bool shown = i < sections.size();
-    this->sectionBoxes.at(i)->setVisible(shown);
-    if (shown) {
-      this->sectionBoxes.at(i)->setTitle(sections.at(i).title);
-      this->sectionWidgets.at(i)->setData(sections.at(i));
-    } else {
-      this->sectionWidgets.at(i)->clear();
-    }
-  }
-  relayoutViews();
+  rebuildSheet();
   updateExportEnabled();
 }
 
-void DrawingViewDock::relayoutViews()
+void DrawingViewDock::rebuildSheet()
 {
-  // Give a grid row/column stretch only if it holds a visible tile, so hidden
-  // views (and empty section rows) collapse to nothing.
-  const int rows = this->sheetGrid->rowCount(), cols = this->sheetGrid->columnCount();
-  std::vector<bool> rowUsed(rows, false), colUsed(cols, false);
-  for (int idx = 0; idx < this->sheetGrid->count(); ++idx) {
-    auto *item = this->sheetGrid->itemAt(idx);
-    if (!item || !item->widget() || !item->widget()->isVisible()) continue;
-    int r, c, rs, cs;
-    this->sheetGrid->getItemPosition(idx, &r, &c, &rs, &cs);
-    if (r >= 0 && r < rows) rowUsed[r] = true;
-    if (c >= 0 && c < cols) colUsed[c] = true;
+  if (!this->sheet) return;
+  std::vector<bool> sel(kViewCount, false);
+  for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
+  const double scale = exportScale();
+  const double marginMm = 10.0, gapMm = 12.0, titleMm = 5.0;
+  const QVector<SheetTile> tiles = collectSheetTiles(this->views, this->sectionViews, sel);
+  const SheetLayoutResult lay = computeSheetLayout(tiles, scale, marginMm, gapMm, titleMm);
+  QVector<PlacedView> places;
+  places.reserve(tiles.size());
+  for (int i = 0; i < tiles.size(); ++i) {
+    PlacedView pv;
+    pv.data = *tiles.at(i).v;
+    pv.originMm = lay.origins.at(i);
+    pv.viewIndex = tiles.at(i).viewIndex;
+    pv.isSection = tiles.at(i).isSection;
+    places.push_back(pv);
   }
-  for (int r = 0; r < rows; ++r) this->sheetGrid->setRowStretch(r, rowUsed[r] ? 1 : 0);
-  for (int c = 0; c < cols; ++c) this->sheetGrid->setColumnStretch(c, colUsed[c] ? 1 : 0);
+  this->sheet->setSheet(places, scale, lay.wMm, lay.hMm);
 }
 
 bool DrawingViewDock::isViewSelected(int viewIndex) const
@@ -943,36 +985,13 @@ void DrawingViewDock::clearViews()
 
 void DrawingViewDock::saveSheet()
 {
-  if (this->viewWidgets.isEmpty()) return;
+  if (!this->sheet || !this->sheet->hasContent()) return;
   const QString filename = QFileDialog::getSaveFileName(
     this, tr("Save Drawing Sheet"), "drawing.png", tr("PNG image (*.png)"));
   if (filename.isEmpty()) return;
-
-  // Compose the shown views (with overlays) side by side by grabbing each widget.
-  QVector<QPixmap> shots;
-  int totalW = 0, maxH = 0;
-  QVector<OrthoViewWidget *> grabList;
-  for (int i = 0; i < this->viewWidgets.size(); ++i)
-    if (isViewSelected(i)) grabList.append(this->viewWidgets.at(i));
-  for (int i = 0; i < this->sectionViews.size() && i < this->sectionWidgets.size(); ++i)
-    if (this->sectionViews.at(i).valid()) grabList.append(this->sectionWidgets.at(i));
-  for (auto *w : grabList) {
-    QPixmap shot = w->grab();
-    shots.append(shot);
-    totalW += shot.width();
-    maxH = std::max(maxH, shot.height());
-  }
-  if (totalW == 0 || maxH == 0) return;
-  QImage sheet(totalW, maxH, QImage::Format_ARGB32);
-  sheet.fill(Qt::white);
-  QPainter painter(&sheet);
-  int x = 0;
-  for (const auto& shot : shots) {
-    painter.drawPixmap(x, 0, shot);
-    x += shot.width();
-  }
-  painter.end();
-  sheet.save(filename, "PNG");
+  // Grab the composed sheet as shown (single canvas → single raster).
+  const QPixmap shot = this->sheet->grab();
+  shot.save(filename, "PNG");
 }
 
 void DrawingViewDock::exportDrawing()
@@ -1195,19 +1214,11 @@ void DrawingViewDock::exportDrawing()
     }
   };  // renderToFile
 
-  // Tiles to export: the selected standard views at their first-angle cells, plus
-  // the section views appended in rows below the standard 3-row grid.
-  struct Tile { const OrthoViewData *v; int gridR, gridC; QString slug; };
-  QVector<Tile> tiles;
-  for (int i = 0; i < this->views.size(); ++i)
-    if (isViewSelected(i) && this->views.at(i).valid())
-      tiles.push_back({&this->views.at(i), kGridPos[i][0], kGridPos[i][1], kViewSlug[i]});
-  for (int i = 0, cell = 0; i < this->sectionViews.size(); ++i) {
-    if (!this->sectionViews.at(i).valid()) continue;
-    tiles.push_back({&this->sectionViews.at(i), 3 + cell / 4, cell % 4,
-                     QString("section%1").arg(i + 1)});
-    ++cell;
-  }
+  // Tiles to export: the selected standard views at their first-angle cells plus
+  // the valid section tiles — the very same layout the interactive canvas uses.
+  std::vector<bool> sel(kViewCount, false);
+  for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
+  const QVector<SheetTile> tiles = collectSheetTiles(this->views, this->sectionViews, sel);
   if (tiles.isEmpty()) return;
 
   if (this->separateFilesCheck->isChecked()) {
@@ -1222,26 +1233,12 @@ void DrawingViewDock::exportDrawing()
                    h + titleMm + 2 * marginMm, path);
     }
   } else {
-    // First-angle (ISO-E) grid. Same-axis views share extents, so centring each in
-    // its (equal-width/height) cell aligns them: top under front, sides level, etc.
-    int maxR = 2;
-    for (const auto& t : tiles) maxR = std::max(maxR, t.gridR);
-    std::vector<double> colW(4, 0.0), rowH(maxR + 1, 0.0), colX(4), rowY(maxR + 1);
-    for (const auto& t : tiles) {
-      colW[t.gridC] = std::max(colW[t.gridC], t.v->sizeMm.width() * scale);
-      rowH[t.gridR] = std::max(rowH[t.gridR], t.v->sizeMm.height() * scale);
-    }
-    double x = marginMm, y = marginMm;
-    for (int c = 0; c < 4; ++c) { colX[c] = x; if (colW[c] > 0) x += colW[c] + gapMm; }
-    for (int r = 0; r <= maxR; ++r) { rowY[r] = y; if (rowH[r] > 0) y += titleMm + rowH[r] + gapMm; }
-    const double sheetWmm = std::max(2 * marginMm, x - gapMm + marginMm);
-    const double sheetHmm = std::max(2 * marginMm, y - gapMm + marginMm);
+    // Composed first-angle sheet, laid out by the shared engine.
+    const SheetLayoutResult lay = computeSheetLayout(tiles, scale, marginMm, gapMm, titleMm);
     QVector<Placement> places;
-    for (const auto& t : tiles) {
-      const double w = t.v->sizeMm.width() * scale, h = t.v->sizeMm.height() * scale;
-      places.push_back({t.v, colX[t.gridC] + (colW[t.gridC] - w) / 2.0,
-                        rowY[t.gridR] + titleMm + (rowH[t.gridR] - h) / 2.0, t.slug});
-    }
-    renderToFile(places, sheetWmm, sheetHmm, filename);
+    for (int i = 0; i < tiles.size(); ++i)
+      places.push_back({tiles.at(i).v, lay.origins.at(i).x(), lay.origins.at(i).y(),
+                        tiles.at(i).slug});
+    renderToFile(places, lay.wMm, lay.hMm, filename);
   }
 }
