@@ -179,6 +179,8 @@ private:
   void onMaterializeKvotas();
   // A detail circle was drawn over a standard view: append a // @detail line.
   void onDetailRequested(int viewIndex, double cx, double cy, double r);
+  // A section / detail tile was dragged to free space: write its at=x,y back.
+  void onTilePlaced(const QString& placeKey, double x, double y);
 
   // Interactive dimension creation: the first anchor clicked in the drawing
   // dock, pending the second. Empty = no pending pick.

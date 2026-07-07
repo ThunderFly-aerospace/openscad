@@ -68,6 +68,7 @@ void DrawingSheetWidget::setSheet(const QVector<PlacedView>& placements, double 
   this->dragPlace = -1;
   this->draggingDim = -1;
   this->draggingLabel = -1;
+  this->tileDrag = -1;
   update();
 }
 
@@ -569,6 +570,14 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
   }
   if (event->button() != Qt::LeftButton) return;
 
+  // Left-drag a movable section / detail tile to reposition it in free space.
+  if (pi >= 0 && this->places.at(pi).data.movable) {
+    this->tileDrag = pi;
+    this->tileGrabMm = widgetToSheet(click) - this->places.at(pi).originMm;
+    setCursor(Qt::ClosedHandCursor);
+    return;
+  }
+
   // Interactive editing only on standard-view placements; section / detail tiles
   // and empty space fall through to panning the whole sheet.
   if (pi >= 0 && this->places.at(pi).viewIndex >= 0) {
@@ -629,6 +638,13 @@ void DrawingSheetWidget::mouseMoveEvent(QMouseEvent *event)
   // "New detail" rubber-band: grow the circle from its centre.
   if (this->detailDragging) {
     this->detailCur = event->position();
+    update();
+    return;
+  }
+
+  // Dragging a movable tile: move its origin to follow the cursor (sheet-mm).
+  if (this->tileDrag >= 0 && this->tileDrag < this->places.size()) {
+    this->places[this->tileDrag].originMm = widgetToSheet(event->position()) - this->tileGrabMm;
     update();
     return;
   }
@@ -741,6 +757,17 @@ void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
     setCursor(Qt::ArrowCursor);
     emit detailModeFinished();
     update();
+    return;
+  }
+
+  // Finish a movable-tile drag: persist its new origin via placeKey.
+  if (this->tileDrag >= 0) {
+    if (this->tileDrag < this->places.size()) {
+      const PlacedView& pl = this->places.at(this->tileDrag);
+      emit tilePlaced(pl.data.placeKey, pl.originMm.x(), pl.originMm.y());
+    }
+    this->tileDrag = -1;
+    setCursor(Qt::ArrowCursor);
     return;
   }
 
@@ -871,9 +898,12 @@ SheetLayoutResult computeSheetLayout(const QVector<SheetTile>& tiles,
   SheetLayoutResult r;
   r.origins.resize(tiles.size());
   int maxR = 2;
-  for (const auto& t : tiles) maxR = std::max(maxR, t.gridR);
+  // Auto-grid sizing uses only the auto-placed tiles; tiles with an explicit at=
+  // (hasAt) float freely and are excluded from the row/column extents.
+  for (const auto& t : tiles) if (!t.v->hasAt) maxR = std::max(maxR, t.gridR);
   std::vector<double> colW(4, 0.0), rowH(maxR + 1, 0.0), colX(4, 0.0), rowY(maxR + 1, 0.0);
   for (const auto& t : tiles) {
+    if (t.v->hasAt) continue;
     colW[t.gridC] = std::max(colW[t.gridC], t.v->sizeMm.width() * t.drawScale);
     rowH[t.gridR] = std::max(rowH[t.gridR], t.v->sizeMm.height() * t.drawScale);
   }
@@ -887,14 +917,22 @@ SheetLayoutResult computeSheetLayout(const QVector<SheetTile>& tiles,
     rowY[rr] = y;
     if (rowH[rr] > 0) y += titleMm + rowH[rr] + gapMm;
   }
-  r.wMm = std::max(2 * marginMm, x - gapMm + marginMm);
-  r.hMm = std::max(2 * marginMm, y - gapMm + marginMm);
+  double wMm = std::max(2 * marginMm, x - gapMm + marginMm);
+  double hMm = std::max(2 * marginMm, y - gapMm + marginMm);
   for (int i = 0; i < tiles.size(); ++i) {
     const auto& t = tiles.at(i);
     const double w = t.v->sizeMm.width() * t.drawScale, h = t.v->sizeMm.height() * t.drawScale;
-    r.origins[i] = QPointF(colX[t.gridC] + (colW[t.gridC] - w) / 2.0,
-                           rowY[t.gridR] + titleMm + (rowH[t.gridR] - h) / 2.0);
+    if (t.v->hasAt) {  // floating tile: origin straight from source, grow the sheet
+      r.origins[i] = t.v->atMm;
+      wMm = std::max(wMm, t.v->atMm.x() + w + marginMm);
+      hMm = std::max(hMm, t.v->atMm.y() + h + marginMm);
+    } else {
+      r.origins[i] = QPointF(colX[t.gridC] + (colW[t.gridC] - w) / 2.0,
+                             rowY[t.gridR] + titleMm + (rowH[t.gridR] - h) / 2.0);
+    }
   }
+  r.wMm = wMm;
+  r.hMm = hMm;
   return r;
 }
 }  // namespace
@@ -923,6 +961,8 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
           &DrawingViewDock::jumpToSource);
   connect(this->sheet, &DrawingSheetWidget::detailRequested, this,
           &DrawingViewDock::detailRequested);
+  connect(this->sheet, &DrawingSheetWidget::tilePlaced, this,
+          &DrawingViewDock::tilePlaced);
 
   // Row of per-view enable checkboxes. Toggling reprojects (viewSelectionChanged →
   // owner reprojects → setViews) and rebuilds the sheet around the ticked views.

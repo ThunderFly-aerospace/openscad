@@ -117,6 +117,14 @@ struct OrthoViewData {
   QList<OrthoSectionLine> sectionLines;
   QList<OrthoDetailMark> detailMarks;  // detail circles drawn on this (parent) view
   QString title;
+  // Manual placement: section / detail tiles can be dragged to free space. movable
+  // marks a draggable tile; placeKey identifies it for write-back ("section:A" or
+  // "detail:<0-based source line>"); hasAt/atMm is the explicit sheet-mm origin
+  // parsed from source (overrides the auto grid cell).
+  bool movable{false};
+  QString placeKey;
+  bool hasAt{false};
+  QPointF atMm;
   // Drawing scale (drawing-mm per model-mm). Geometry is drawn in model-mm; text
   // and line weights are absolute drawing-mm, so their size relative to the
   // geometry reflects the scale (1:2 -> text twice as large relative to the part).
@@ -173,6 +181,9 @@ signals:
   // Emitted when the detail rubber-band gesture ends (so the owner can untick the
   // toolbar button), regardless of whether a detail was created.
   void detailModeFinished();
+  // Emitted when a movable (section / detail) tile is dropped: its placeKey and new
+  // top-left origin in sheet drawing-mm. The owner writes at=x,y back to source.
+  void tilePlaced(const QString& placeKey, double x, double y);
   // Emitted while dragging a dimension line and once more on release, with the hit
   // view index, the dimension id and its new perpendicular offset in model-mm.
   void dimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
@@ -234,6 +245,9 @@ private:
   int detailPlace{-1};     // placement being drawn over
   QPointF detailCenter;    // press point (widget px)
   QPointF detailCur;       // current point (widget px)
+  // Dragging a movable (section / detail) tile to reposition it.
+  int tileDrag{-1};        // placement being moved, or -1
+  QPointF tileGrabMm;      // press point - tile origin, in sheet drawing-mm
 };
 
 /*!
@@ -287,6 +301,9 @@ signals:
   // Emitted when a detail circle is drawn over standard view `viewIndex`: centre and
   // radius in that view's view-local model-mm. The owner writes a // @detail line.
   void detailRequested(int viewIndex, double cx, double cy, double r);
+  // Emitted when a movable (section / detail) tile is dropped: its placeKey
+  // ("section:A" / "detail:<line>") and new sheet-mm origin. The owner writes at=.
+  void tilePlaced(const QString& placeKey, double x, double y);
 
 private slots:
   void saveSheet();

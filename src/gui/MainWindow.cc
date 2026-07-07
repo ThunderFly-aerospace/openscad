@@ -3853,6 +3853,9 @@ void MainWindow::setupDrawingDock()
   // Drawing a detail circle over a view appends a // @detail line and reprojects.
   QObject::connect(this->drawingDock, &DrawingViewDock::detailRequested, this,
                    &MainWindow::onDetailRequested);
+  // Dragging a section / detail tile to free space writes its at=x,y back.
+  QObject::connect(this->drawingDock, &DrawingViewDock::tilePlaced, this,
+                   &MainWindow::onTilePlaced);
 }
 
 namespace {
@@ -4034,6 +4037,45 @@ void MainWindow::onDetailRequested(int viewIndex, double cx, double cy, double r
   refreshDrawingViews();
   this->statusBar()->showMessage(
     tr("Detail %1 added — edit scale= to change the enlargement.").arg(name), 5000);
+}
+
+void MainWindow::onTilePlaced(const QString& placeKey, double x, double y)
+{
+  if (!activeEditor) return;
+  const QString atVal = QString("%1,%2").arg(x, 0, 'g', 5).arg(y, 0, 'g', 5);
+  QStringList lines = activeEditor->toPlainText().split('\n');
+
+  if (placeKey.startsWith("detail:")) {
+    // The @detail line's source index is baked into the key; update its at= token.
+    const int ln = placeKey.mid(7).toInt();
+    if (ln < 0 || ln >= lines.size()) return;
+    lines[ln] = setLineToken(lines.at(ln), "at", atVal);
+    activeEditor->setPlainText(lines.join('\n'));
+  } else if (placeKey.startsWith("section:")) {
+    // Sections have no annotation line of their own: update an existing
+    // // @section <name> … line, or append one carrying just the placement.
+    const QString name = placeKey.mid(8);
+    static const QRegularExpression secRe(R"(^\s*//\s*@section\s+(\S+))");
+    int found = -1;
+    for (int i = 0; i < lines.size(); ++i) {
+      const auto m = secRe.match(lines.at(i));
+      if (m.hasMatch() && m.captured(1) == name) { found = i; break; }
+    }
+    if (found >= 0) {
+      lines[found] = setLineToken(lines.at(found), "at", atVal);
+      activeEditor->setPlainText(lines.join('\n'));
+    } else {
+      activeEditor->setCursorPosition(lines.size() - 1,
+                                      lines.isEmpty() ? 0 : lines.last().length());
+      QString ins;
+      if (!lines.isEmpty() && !lines.last().isEmpty()) ins += "\n";
+      ins += QString("// @section %1 at=%2\n").arg(name, atVal);
+      activeEditor->insertOrReplaceText(ins);
+    }
+  } else {
+    return;
+  }
+  refreshDrawingViews();
 }
 
 void MainWindow::onMaterializeKvotas()
@@ -4689,13 +4731,29 @@ void MainWindow::refreshDrawingViews()
   // cx/cy/r are in the parent view's view-local model-mm; scale is the detail's own
   // drawing-mm-per-model-mm (independent of the sheet scale). Unknown parent => the
   // detail is skipped (soft, warned) rather than a ghost, like an unresolved @dim.
-  struct DetailSpec { QString name, parent; double cx{0}, cy{0}, r{0}, scale{2}; int line{-1}; };
+  struct DetailSpec {
+    QString name, parent;
+    double cx{0}, cy{0}, r{0}, scale{2}, atx{0}, aty{0};
+    bool hasAt{false};
+    int line{-1};
+  };
   std::vector<DetailSpec> details;
+  QHash<QString, QPointF> sectionAt;  // lowercased section name -> at= (sheet-mm)
   {
-    static const QRegularExpression detRe(R"(^\s*//\s*@detail\s+(.*\S)\s*$)");
     const QStringList slines = source.split('\n');
+    static const QRegularExpression detRe(R"(^\s*//\s*@detail\s+(.*\S)\s*$)");
+    static const QRegularExpression secRe(R"(^\s*//\s*@section\s+(\S+)(.*)$)");
+    static const QRegularExpression atRe(R"(\bat=([-0-9.]+),([-0-9.]+))");
     for (int ln = 0; ln < slines.size(); ++ln) {
-      const auto m = detRe.match(slines.at(ln));
+      const QString& L = slines.at(ln);
+      if (const auto sm = secRe.match(L); sm.hasMatch()) {
+        const auto am = atRe.match(sm.captured(2));
+        if (am.hasMatch())
+          sectionAt.insert(sm.captured(1).toLower(),
+                           QPointF(am.captured(1).toDouble(), am.captured(2).toDouble()));
+        continue;
+      }
+      const auto m = detRe.match(L);
       if (!m.hasMatch()) continue;
       const QStringList toks =
         m.captured(1).split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
@@ -4712,6 +4770,10 @@ void MainWindow::refreshDrawingViews()
         else if (k == "cy") ds.cy = v.toDouble();
         else if (k == "r") ds.r = v.toDouble();
         else if (k == "scale") ds.scale = v.toDouble();
+        else if (k == "at") {
+          const QStringList xy = v.split(',');
+          if (xy.size() == 2) { ds.atx = xy[0].toDouble(); ds.aty = xy[1].toDouble(); ds.hasAt = true; }
+        }
       }
       if (ds.r > 1e-6 && !ds.parent.isEmpty()) details.push_back(ds);
     }
@@ -4896,7 +4958,13 @@ void MainWindow::refreshDrawingViews()
     for (const auto& hh : sd.hatch) vd.hatch.append(QLineF(toLocal(hh.x0, hh.y0), toLocal(hh.x1, hh.y1)));
     const QString nm = QString::fromStdString(info.node->section_name);
     vd.title = nm.isEmpty() ? tr("Section") : tr("Section %1–%1").arg(nm);
-    if (!nm.isEmpty()) sectionKey.insert("section" + nm.toLower(), sectionData.size());
+    if (!nm.isEmpty()) {
+      sectionKey.insert("section" + nm.toLower(), sectionData.size());
+      vd.movable = true;  // named sections can be dragged to free space (persist at=)
+      vd.placeKey = "section:" + nm;
+      const auto it = sectionAt.constFind(nm.toLower());
+      if (it != sectionAt.constEnd()) { vd.hasAt = true; vd.atMm = it.value(); }
+    }
     sectionData.append(vd);
   }
   this->drawingDock->setSectionViews(sectionData);
@@ -4961,6 +5029,10 @@ void MainWindow::refreshDrawingViews()
     dv.sizeMm = QSizeF(2 * ds.r, 2 * ds.r);
     dv.scale = ds.scale > 1e-9 ? ds.scale : 1.0;
     dv.title = tr("Detail %1 (%2)").arg(ds.name, ratioStr(dv.scale));
+    dv.movable = true;  // a detail tile can be dragged to free space (persist at=)
+    dv.placeKey = "detail:" + QString::number(ds.line);
+    dv.hasAt = ds.hasAt;
+    dv.atMm = QPointF(ds.atx, ds.aty);
     detailData.append(dv);
   }
   this->drawingDock->setDetailViews(detailData);
