@@ -4781,6 +4781,11 @@ void MainWindow::refreshDrawingViews()
             return t0 <= t1;
           };
           if (!slab(pt.x(), dir.x(), W) || !slab(pt.y(), dir.y(), H) || t0 > t1) continue;
+          // Per ISO 128: the cutting-plane trace (and its arrows + letter) must
+          // stand off the outline, not touch it. Extend both clipped ends by
+          // 5 drawing-mm (converted to model-mm via the drawing scale).
+          const double margin = scale > 1e-9 ? 5.0 / scale : 0.0;
+          t0 -= margin; t1 += margin;
           OrthoSectionLine sl;
           sl.p0 = pt + dir * t0;
           sl.p1 = pt + dir * t1;
