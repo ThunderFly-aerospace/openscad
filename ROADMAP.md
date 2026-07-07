@@ -694,3 +694,20 @@ kružnicí** + **velké písmeno**; zvětšenina zvlášť, nadepsaná „**Deta
 - Nová dlaždice = hrany (a šrafy) parenta **oříznuté na kružnici** (úsečka × kruh
   nad `OrthoViewData.edges`), vykreslené s `vd.scale = scale`; přistane na
   sjednoceném listu z Fáze 7.
+
+### Stav (2026-07-07): HOTOVO Fáze 7 i 8
+- **Fáze 7** — `DrawingSheetWidget` nahradil grid `OrthoViewWidget`ů: jeden list,
+  jeden fit+zoom/pan, sdílený `computeSheetLayout()` (dok i složený export;
+  „separate files" beze změny). Interakce přes `placementAt()` hit-test, signály
+  nesou `viewIndex`. Commit `a2fa889ad`. Ověřeno headless (Xvfb :99 + screenshot):
+  všechny vybrané pohledy na jednom listu v ISO-E, tituly, řezová čára + „Section
+  A–A", kvóty.
+- **Fáze 8** — `// @detail parent= cx= cy= r= scale=`: tenká kružnice + písmeno na
+  rodiči (`OrthoDetailMark`), zvětšená dlaždice „Detail A (n:1)" (ořez úsečka×kruh),
+  per-tile `drawScale` na canvasu i v exportu, tlačítko „New detail" (rubber-band →
+  `detailRequested` → `onDetailRequested` zapíše řádek). Parent = std. pohled nebo
+  řez; sirotek měkce přeskočen (warning). Commit `61ed51edb`. Ověřeno headless:
+  nakreslení kroužku zapsalo `@detail`, značka „A" na Frontu + dlaždice „Detail A
+  (2:1)".
+- **Zbývá jako drobnost:** drift `cx,cy` při posunu modelu (akceptováno); volitelně
+  world-kotva středu; PNG „Save Sheet" grabuje canvas v aktuálním zoomu.
