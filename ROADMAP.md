@@ -614,3 +614,83 @@ A je samostatně užitečné a nízkorizikové; B–C jsou jádro řezů.
 - **D** — unit testy (6 směrů + zrcadlení, section cut/hatch, kept-half sign) +
   cmdline regrese `dump/echo-section-node`. ✅
 - **Zbývá jako optimalizace:** cache řezu (boolean běží při každém refreshi doku).
+
+## Fáze 7 — Jeden výkres, jeden zoom (unifikace canvasu doku)  🔶 naplánováno
+
+**Motivace.** Dok má být WYSIWYG exportu (viz Fáze 5). Dnes ho ale tvoří N
+nezávislých `OrthoViewWidget`, každý s vlastním fit/zoom/pan — a právě ten
+per-dlaždicový zoom WYSIWYG rozbíjí (dok vypadá jinak než export). Přitom
+**složený list už existuje** — jen se používá pouze pro export.
+
+**Klíčové zjištění.** Export (`DrawingViewDock.cc:999`, `1198–1245`) už skládá
+všechny pohledy na jeden list: `Placement{v, ox, oy}` v drawing-mm, jedno sdílené
+`scale`, first-angle rozvržení (sloupce/řádky/okraje/mezery). Interaktivní dok je
+jediné místo, kde se místo toho používá `QGridLayout` z per-view widgetů.
+
+**Export jednotlivých pohledů zůstává.** Režim „Separate files"
+(`separateFilesCheck`, ř. 1213–1223) běží přes tentýž `renderToFile(places,…)` a
+je nezávislý na tom, jak dok zobrazuje → Fáze 7 se ho **nedotýká**.
+
+### A. Sdílený layout engine
+- Vytáhnout výpočet ISO-E rozvržení (dnes v `exportDrawing`, ř. 1224–1245) do
+  sdílené funkce `sheetLayout(tiles, scale) → {places, sheetWmm, sheetHmm}`.
+- Používají ji: (1) složený export (beze změny chování), (2) nový canvas.
+- Větev „separate files" beze změny.
+
+### B. `DrawingSheetWidget` — jeden canvas
+- Nahradí `QGridLayout` z `OrthoViewWidget` jedním widgetem, který drží: seznam
+  `Placement` (`OrthoViewData` + `ox,oy`), jedno `scale`, jedno `fitScale/fitOffset`
+  (fit celého listu), jedno `userZoom/userPan`.
+- `paint`: pro každý `Placement` translace na jeho pozici + vykreslení
+  edges/hatch/dims/angles/sectionLines přes společné `scale` — **recyklovat dnešní
+  per-view kreslení**, parametrizované offsetem (přesně jak už dělá `map()` v exportu).
+- Kolečko-zoom + pan tažením prázdna → celý list.
+
+### C. Interakce přes hit-test dispatch
+- Na mouse event: najít `Placement` pod kurzorem (bbox test), mapovat
+  widget → view-local mm daného pohledu (offset + scale + zoom/pan), pak spustit
+  **tytéž handlery** co dnes `OrthoViewWidget`: tažení kvóty/labelu, rotace ⌀/R,
+  klik na kotvu, pravý klik → skok, dvojklik → editor.
+- Signály (`dimensionOffsetChanged`, …) nesou `viewIndex` jako dnes — určí se
+  z toho, který `Placement` byl zasažen.
+- Per-view checkboxy → relayout listu (přepočítat `sheetLayout`); prázdné/nezaškrtnuté
+  nezabírají místo (plyne z layoutu).
+
+### D. Polish / testy
+- `showAnchors`, scale spinbox beze změny (globální nad celým listem).
+- Volitelně gesto „zaměřit pohled" (dvojklik do prázdna pohledu → přizoomovat na
+  jeho bbox) — nice-to-have, ne nutnost; jinak zoom do detailu = přiblížit+posunout.
+- Test: layout pozice canvasu == export (regrese sdílené funkce); hit-test mapuje
+  klik ve složeném listu na správný pohled + bod.
+
+### Pořadí
+A (sdílený layout) → B (canvas paint) → C (interakce) → D (polish).
+
+### Rizika
+- Interakce je hlavní objem — hit-test + přemapování transformace na per-view
+  offset. Dobře ohraničené (handlery se recyklují 1:1).
+- Souřadnice canvasu musí sedět 1:1 s exportem → garantuje sdílená `sheetLayout`.
+- Zoom/pan stav přežít refresh geometrie (uchovat při `setViews`).
+
+## Fáze 8 — Detail (výřez ve větším měřítku)  🔶 naplánováno (staví na Fázi 7)
+
+Norma ČSN EN ISO 128-34 / ISO 5455: oblast v mateřském pohledu orámovat **tenkou
+kružnicí** + **velké písmeno**; zvětšenina zvlášť, nadepsaná „**Detail A (5:1)**".
+
+**Rozhodnutí (2026-07-07):**
+- **Ne** 3D marker `detail()` — detail je z definice vázaný na konkrétní pohled;
+  „view-nezávislost" 3D koule je jen zdánlivá. Detail patří do rodiny `@dim`.
+- **Anotace `// @detail`** (jako `@dim`), vzniká **nakreslením kružnice nad
+  dlaždicí** (naklikat → materializovat). Návrh:
+  `// @detail A parent=front cx=12.4 cy=8.1 r=6 scale=5`
+- `parent` = **standardní pohled nebo řez** (`front/back/left/right/top/bottom`
+  nebo `section<jméno>`). **Detail z detailu nepodporujeme.**
+- Střed = **`cx,cy` ve view-local mm** (holé souřadnice; **drift** při posunu
+  modelu je akceptované riziko uživatele — případný upgrade na world-kotvu později).
+- **Měřítko volitelné** (nezávislé na měřítku výkresu), v titulku „(5:1)".
+- **Sirotek = měkký:** když `parent` (řez) zmizí, detail se **přeskočí + varování**
+  — stejný vzor jako nevyřešená `@dim` (`MainWindow.cc:4489,4532` dělají `continue`).
+  Detail nad standardním pohledem nikdy neosiří (těch 6 pohledů je fixních).
+- Nová dlaždice = hrany (a šrafy) parenta **oříznuté na kružnici** (úsečka × kruh
+  nad `OrthoViewData.edges`), vykreslené s `vd.scale = scale`; přistane na
+  sjednoceném listu z Fáze 7.
