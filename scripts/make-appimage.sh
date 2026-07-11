@@ -12,8 +12,7 @@
 # s glibc >= 2.35. (Nativní build na Debian 13 = glibc 2.41 by běžel jen na
 # bleeding-edge distrech — proto se staví v kontejneru.)
 #
-# POŽADAVKY: docker nebo podman. (V tomhle prostředí NENÍ — pusť na stroji,
-# kde kontejnery jsou.)
+# POŽADAVKY: docker nebo podman.
 #
 # Použití:
 #   scripts/make-appimage.sh [OUT_DIR]

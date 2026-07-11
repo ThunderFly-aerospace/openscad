@@ -176,6 +176,14 @@ private:
   void onDimensionAngleChanged(int viewIndex, int id, double angleDeg, bool finished);
   void onLabelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx, bool finished);
   void onDimensionDoubleClicked(int id);
+  // Label (// @label) interaction: create from a marker click, drag its text, edit.
+  void onLabelAnchorClicked(int viewIndex, const QString& name);
+  void onCameraLabelAnchorClicked(int cameraIndex, const QString& cameraName, const QString& name);
+  // Give the cameraIndex-th camera() a name= in the source (a // @label targets a
+  // camera by name); returns the name, or empty if the call could not be edited.
+  QString nameCameraInSource(int cameraIndex);
+  void onLabelTextMoved(int viewIndex, int id, double dxMm, double dyMm, bool finished);
+  void onLabelDoubleClicked(int id);
   void onMaterializeKvotas();
   // A detail circle was drawn over a standard view: append a // @detail line.
   void onDetailRequested(int viewIndex, double cx, double cy, double r);

@@ -29,6 +29,7 @@ class NodeVisitor : public BaseVisitor,
                     public Visitor<class CameraNode>,
                     public Visitor<class DimrefNode>,
                     public Visitor<class SectionNode>,
+                    public Visitor<class LabelNode>,
                     public Visitor<class OffsetNode>
 {
 public:
@@ -127,6 +128,13 @@ public:
   // group so it stays invisible in preview/render/export and does not break
   // measurement.
   Response visit(State& state, const SectionNode& node) override
+  {
+    return visit(state, (const AbstractNode&)node);
+  }
+  // label() is a named text-annotation marker without geometry: treat it like an
+  // empty group so it stays invisible in preview/render/export and does not break
+  // measurement.
+  Response visit(State& state, const LabelNode& node) override
   {
     return visit(state, (const AbstractNode&)node);
   }

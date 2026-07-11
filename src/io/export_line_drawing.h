@@ -55,6 +55,21 @@ struct LineDrawingSeg2D {
 std::vector<LineDrawingSeg2D> projectViewEdges(const PolySet& ps, const LineDrawingView& v,
                                                double creaseAngleDeg);
 
+// A projected filled face for a colour drawing: the face outline in the view's
+// screen plane (world-plane mm, y-up, unshifted — same convention as
+// LineDrawingSeg2D) and its RGBA colour. Faces with no colour are omitted.
+struct LineDrawingFace2D {
+  std::vector<std::pair<double, double>> pts;
+  float r{0}, g{0}, b{0}, a{1};
+};
+
+// Project every coloured face of `ps` for one view to 2D filled polygons, sorted
+// back-to-front (painter's algorithm) so the nearest face wins where they
+// overlap. Faces whose colour is unset (color_index < 0) are skipped, so an
+// uncoloured region stays blank (white) under the black edges. Used only for the
+// optional "fill colours" drawing mode; the normative line drawing ignores it.
+std::vector<LineDrawingFace2D> projectViewFaces(const PolySet& ps, const LineDrawingView& v);
+
 // A section view: the mesh cut by a plane, projected along the plane normal, with
 // the cut face hatched. `edges` are the visible feature edges of the solid behind
 // the cut; `hatch` are the 45° fill lines over the cut face. All 2D coordinates
@@ -62,6 +77,7 @@ std::vector<LineDrawingSeg2D> projectViewEdges(const PolySet& ps, const LineDraw
 struct SectionDrawing {
   std::vector<LineDrawingSeg2D> edges;
   std::vector<LineDrawingSeg2D> hatch;
+  std::vector<LineDrawingFace2D> fills;  // coloured fills of the kept solid (if wantColorFills)
   bool valid{false};
 };
 
@@ -71,7 +87,8 @@ struct SectionDrawing {
 // (<=0 = auto from the cut size). Needs the Manifold backend; returns an invalid
 // result otherwise.
 SectionDrawing projectSection(const PolySet& ps, const Transform3d& worldFrame, bool flip,
-                              double creaseAngleDeg, double hatchSpacingMm);
+                              double creaseAngleDeg, double hatchSpacingMm,
+                              bool wantColorFills = false);
 
 /*!
    Write a compact vector line drawing of `ps` to `path`: the three orthographic

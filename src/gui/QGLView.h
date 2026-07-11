@@ -45,6 +45,13 @@ public:
   std::string getRendererInfo() const override;
   float getDPI() override { return this->devicePixelRatio(); }
 
+  // Expose this widget's GL context so external code (the camera snapshot dock)
+  // can render into an FBO using the known-good interactive context, instead of
+  // creating a separate GLX/EGL offscreen context — which fails on some drivers
+  // and AppImage bundles (e.g. bundled Mesa libGLX shadowing the nvidia driver).
+  void makeContextCurrent() { makeCurrent(); }
+  void doneContextCurrent() { doneCurrent(); }
+
   const QImage& grabFrame();
   bool save(const char *filename) const override;
   void resetView();

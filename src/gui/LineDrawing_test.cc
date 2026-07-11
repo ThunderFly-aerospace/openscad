@@ -296,3 +296,36 @@ TEST_CASE("line drawing export honours the drawing scale", "[linedrawing]")
   CHECK(w2 < w1);
   CHECK(w2 > w1 * 0.4);
 }
+
+TEST_CASE("coloured face projection skips uncoloured faces and sorts far-first",
+          "[linedrawing][fill]")
+{
+  // Three quads in the XZ plane (Front view: x=X, y=Z, depth=+Y). Two are coloured
+  // at different depths (Y), one is left uncoloured; projectViewFaces must return
+  // only the coloured two, farther one first (painter's back-to-front order).
+  PolySet ps(3);
+  auto quad = [&](double y) {
+    const int base = static_cast<int>(ps.vertices.size());
+    ps.vertices.emplace_back(0, y, 0);
+    ps.vertices.emplace_back(4, y, 0);
+    ps.vertices.emplace_back(4, y, 4);
+    ps.vertices.emplace_back(0, y, 4);
+    ps.indices.push_back({base, base + 1, base + 2, base + 3});
+  };
+  quad(0.0);   // face 0: near, red
+  quad(10.0);  // face 1: far, green
+  quad(5.0);   // face 2: uncoloured
+
+  ps.colors = {Color4f(1.0f, 0.0f, 0.0f, 1.0f), Color4f(0.0f, 1.0f, 0.0f, 1.0f)};
+  ps.color_indices = {0, 1, -1};
+
+  const auto& front = lineDrawingViews()[0];
+  const auto faces = projectViewFaces(ps, front);
+
+  REQUIRE(faces.size() == 2);        // the uncoloured face is skipped
+  // Front view depth = +Y, so the far (Y=10, green) face comes first.
+  CHECK(faces[0].g == Catch::Approx(1.0));
+  CHECK(faces[0].r == Catch::Approx(0.0));
+  CHECK(faces[1].r == Catch::Approx(1.0));  // near red second
+  CHECK(faces[0].pts.size() == 4);
+}

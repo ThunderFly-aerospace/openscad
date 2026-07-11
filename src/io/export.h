@@ -358,6 +358,7 @@ struct ViewOptions {
 };
 
 class OffscreenView;
+class GLView;
 
 std::string get_current_iso8601_date_time_utc();
 
@@ -366,6 +367,14 @@ std::unique_ptr<OffscreenView> prepare_preview(Tree& tree, const ViewOptions& op
 // marker (see collectCameras / CameraInfo). Colors from color() are preserved.
 std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptions& options,
                                                      const struct CameraInfo& info);
+// Configure an already-created GLView (renderer, camera pose/lens, clip planes,
+// view options) for an in-model camera() and paint it. Split out of
+// render_camera_preview so a GLView that reuses an existing GL context (the GUI's
+// interactive QOpenGLWidget) can be driven with the same setup as the standalone
+// OffscreenView used by the CLI — avoiding a separate GLX/EGL offscreen context,
+// which fails on some drivers/AppImage bundles.
+void configure_camera_snapshot(GLView& glview, Tree& tree, const ViewOptions& options,
+                               const struct CameraInfo& info);
 // Render an orthographic view (front/side/top) framing the whole model, given a
 // fixed gimbal rotation (Euler XYZ degrees). Used by the Drawing dock.
 std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& options,

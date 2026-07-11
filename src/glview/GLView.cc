@@ -373,8 +373,8 @@ void GLView::drawCameraFrustums()
 
 void GLView::drawDimrefMarkers()
 {
-  if (!this->showDimrefMarkers ||
-      (this->dimrefPoints.empty() && this->dimrefLines.empty())) {
+  if (!this->showDimrefMarkers || (this->dimrefPoints.empty() && this->dimrefLines.empty() &&
+                                   this->labelPoints.empty())) {
     return;
   }
 
@@ -390,21 +390,27 @@ void GLView::drawDimrefMarkers()
   }
   glEnd();
 
-  // A small 3D cross at each anchor, sized relative to the current zoom.
+  // A small 3D cross at each anchor, sized relative to the current zoom: dimref
+  // anchors blue, label() anchors green (as in the drawing / camera overlays).
   double s = 0.02 * this->cam.zoomValue();
   if (!(s > 0)) s = 1.0;
+  auto crosses = [s](const std::vector<Eigen::Vector3d>& points) {
+    glBegin(GL_LINES);
+    for (const auto& p : points) {
+      glVertex3d(p.x() - s, p.y(), p.z());
+      glVertex3d(p.x() + s, p.y(), p.z());
+      glVertex3d(p.x(), p.y() - s, p.z());
+      glVertex3d(p.x(), p.y() + s, p.z());
+      glVertex3d(p.x(), p.y(), p.z() - s);
+      glVertex3d(p.x(), p.y(), p.z() + s);
+    }
+    glEnd();
+  };
   glLineWidth(2.0);
-  glColor3f(0.15f, 0.45f, 0.95f);  // blue
-  glBegin(GL_LINES);
-  for (const auto& p : this->dimrefPoints) {
-    glVertex3d(p.x() - s, p.y(), p.z());
-    glVertex3d(p.x() + s, p.y(), p.z());
-    glVertex3d(p.x(), p.y() - s, p.z());
-    glVertex3d(p.x(), p.y() + s, p.z());
-    glVertex3d(p.x(), p.y(), p.z() - s);
-    glVertex3d(p.x(), p.y(), p.z() + s);
-  }
-  glEnd();
+  glColor3f(0.15f, 0.45f, 0.95f);  // blue: dimref anchors
+  crosses(this->dimrefPoints);
+  glColor3f(0.12f, 0.78f, 0.35f);  // green: label anchors
+  crosses(this->labelPoints);
   glLineWidth(2);
 }
 

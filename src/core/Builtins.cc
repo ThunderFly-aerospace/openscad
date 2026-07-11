@@ -54,6 +54,7 @@ extern void register_builtin_color();
 extern void register_builtin_camera();
 extern void register_builtin_dimref();
 extern void register_builtin_section();
+extern void register_builtin_label();
 extern void register_builtin_primitives();
 extern void register_builtin_surface();
 extern void register_builtin_control();
@@ -88,6 +89,7 @@ void Builtins::initialize()
   register_builtin_camera();
   register_builtin_dimref();
   register_builtin_section();
+  register_builtin_label();
   register_builtin_primitives();
   register_builtin_surface();
   register_builtin_control();

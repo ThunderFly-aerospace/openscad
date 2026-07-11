@@ -1009,6 +1009,7 @@ set(CORE_SOURCES
   src/core/CameraNode.cc
   src/core/DimrefNode.cc
   src/core/SectionNode.cc
+  src/core/LabelNode.cc
   src/core/CgalAdvNode.cc
   src/core/Children.cc
   src/core/ColorNode.cc
@@ -1364,6 +1365,7 @@ set(GUI_SOURCES
   src/gui/parameter/ParameterWidget.cc
   src/gui/ai/AIDock.cc
   src/gui/CameraViewDock.cc
+  src/gui/FboSnapshotView.cc
   src/gui/DrawingViewDock.cc
   src/gui/ai/ChatWidget.cc
   src/gui/ai/ChatInputEdit.cc

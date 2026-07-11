@@ -12,6 +12,7 @@
 #include "geometry/linalg.h"
 #include "glview/Camera.h"
 #include "glview/CsgInfo.h"
+#include "glview/GLView.h"
 #include "glview/OffscreenView.h"
 #include "glview/RenderSettings.h"
 #include "glview/Renderer.h"
@@ -168,22 +169,14 @@ double distanceForScene(const Eigen::Vector3d& eye, const BoundingBox& bbox)
 
 }  // namespace
 
-std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptions& options,
-                                                     const CameraInfo& info)
+void configure_camera_snapshot(GLView& glview, Tree& tree, const ViewOptions& options,
+                               const CameraInfo& info)
 {
-  if (!info.node) return nullptr;
+  if (!info.node) return;
   Camera camera = cameraFromNode(*info.node);
 
   CsgInfo csgInfo = CsgInfo();
   csgInfo.compile_products(tree);
-
-  std::unique_ptr<OffscreenView> glview;
-  try {
-    glview = std::make_unique<OffscreenView>(camera.pixel_width, camera.pixel_height);
-  } catch (const OffscreenViewException& ex) {
-    LOG("Can't create OffscreenView: %1$s.", ex.what());
-    return nullptr;
-  }
 
   std::shared_ptr<Renderer> renderer;
   if (options.previewer == Previewer::OPENCSG) {
@@ -198,9 +191,9 @@ std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptio
     renderer = std::make_shared<ThrownTogetherRenderer>(
       csgInfo.root_products, csgInfo.highlights_products, csgInfo.background_products);
   }
-  glview->setRenderer(renderer);
+  glview.setRenderer(renderer);
 
-  const BoundingBox bbox = glview->getRenderer()->getBoundingBox();
+  const BoundingBox bbox = glview.getRenderer()->getBoundingBox();
   const Eigen::Vector3d eye = info.world.translation();
   camera.setFromMatrix(info.world, distanceForScene(eye, bbox));
 
@@ -227,18 +220,34 @@ std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptio
     camera.clip_near = std::max(nearC, farthest * 1e-4);
     camera.clip_far = std::max(farthest * 1.05 + 1e-3, camera.clip_near * 1.001);
   }
-  glview->setCamera(camera);
+  glview.setCamera(camera);
 
 #ifdef ENABLE_OPENCSG
   OpenCSG::setContext(0);
   OpenCSG::setOption(OpenCSG::OffscreenSetting, OpenCSG::FrameBufferObject);
 #endif
-  glview->setColorScheme(RenderSettings::inst()->colorscheme);
-  glview->setShowAxes(options["axes"]);
-  glview->setShowScaleProportional(options["scales"]);
-  glview->setShowEdges(options["edges"]);
-  glview->setShowCrosshairs(options["crosshairs"]);
-  glview->paintGL();
+  glview.setColorScheme(RenderSettings::inst()->colorscheme);
+  glview.setShowAxes(options["axes"]);
+  glview.setShowScaleProportional(options["scales"]);
+  glview.setShowEdges(options["edges"]);
+  glview.setShowCrosshairs(options["crosshairs"]);
+  glview.paintGL();
+}
+
+std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptions& options,
+                                                     const CameraInfo& info)
+{
+  if (!info.node) return nullptr;
+  const Camera camera = cameraFromNode(*info.node);
+
+  std::unique_ptr<OffscreenView> glview;
+  try {
+    glview = std::make_unique<OffscreenView>(camera.pixel_width, camera.pixel_height);
+  } catch (const OffscreenViewException& ex) {
+    LOG("Can't create OffscreenView: %1$s.", ex.what());
+    return nullptr;
+  }
+  configure_camera_snapshot(*glview, tree, options, info);
   return glview;
 }
 
@@ -360,6 +369,10 @@ std::unique_ptr<OffscreenView> render_camera_preview(Tree& tree, const ViewOptio
                                                      const CameraInfo& info)
 {
   return nullptr;
+}
+void configure_camera_snapshot(GLView& glview, Tree& tree, const ViewOptions& options,
+                               const CameraInfo& info)
+{
 }
 std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& options,
                                                  const Eigen::Vector3d& object_rot,

@@ -1130,6 +1130,8 @@ add_cmdline_test(dump-dimref-node          OPENSCAD SUFFIX csg  FILES ${TEST_SCA
 add_cmdline_test(echo-dimref-node          OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/dimref-node.scad)
 add_cmdline_test(dump-section-node         OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/section-node.scad)
 add_cmdline_test(echo-section-node         OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/section-node.scad)
+add_cmdline_test(dump-label-node           OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/label-node.scad)
+add_cmdline_test(echo-label-node           OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/label-node.scad)
 
 set(CAMERA_TEST           "${TEST_SCAD_DIR}/3D/misc/camera-tests.scad")
 set(CAMERA_TEST_OFFCENTER "${TEST_SCAD_DIR}/3D/misc/camera-tests-offcenter.scad")

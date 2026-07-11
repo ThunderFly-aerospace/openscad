@@ -1,10 +1,12 @@
 #pragma once
 
+#include <QColor>
 #include <QFont>
 #include <QImage>
 #include <QLineF>
 #include <QList>
 #include <QPointF>
+#include <QPolygonF>
 #include <QSizeF>
 #include <QString>
 #include <QStringList>
@@ -102,12 +104,33 @@ struct OrthoDetailMark {
   QString label;
 };
 
+// A text label (from a label() marker + // @label line) drawn in one view: the
+// projected 3D anchor point, the text, its offset from the anchor (view-local
+// model-mm, y-down), a leader line from the text box to the anchor, and the
+// 0-based // @label source line for laboff= write-back / right-click jump.
+struct OrthoLabel {
+  QPointF anchor;
+  QString text;
+  QPointF off;         // text position = anchor + off
+  bool leader{true};
+  int id{-1};
+};
+
+// A projected filled face for the optional colour drawing mode: the face outline
+// in view-local model-mm (y-down, same frame as edges) and its colour. Painted
+// behind the black edges.
+struct OrthoFill {
+  QPolygonF poly;
+  QColor color;
+};
+
 // Everything needed to render one ortho view as a vector line drawing with its
 // dimension overlay. All 2D coordinates are view-local model millimetres, y-down,
 // with the origin at the view's bounding-box top-left corner (see
 // MainWindow::refreshDrawingViews). The dock is a WYSIWYG editor of the export:
 // what it paints is what the vector export writes.
 struct OrthoViewData {
+  QList<OrthoFill> fills;       // coloured face fills (model-mm, y-down); empty unless fill mode on
   QList<QLineF> edges;          // silhouette + feature edges (model-mm, y-down)
   QList<QLineF> hatch;          // section cut-face hatching (model-mm, y-down); empty for plain views
   QSizeF sizeMm;                // view bounding box (model-mm) used to fit
@@ -116,6 +139,8 @@ struct OrthoViewData {
   QList<OrthoAngle> angles;
   QList<OrthoSectionLine> sectionLines;
   QList<OrthoDetailMark> detailMarks;  // detail circles drawn on this (parent) view
+  QList<OrthoLabel> labels;            // text callouts (// @label) drawn in this view
+  QList<OrthoAnchor> labelAnchors;     // clickable label() markers (for "new label")
   QString title;
   // Manual placement: section / detail tiles can be dragged to free space. movable
   // marks a draggable tile; placeKey identifies it for write-back ("section:A" or
@@ -175,6 +200,14 @@ public:
 
 signals:
   void anchorClicked(int viewIndex, const QString& name);
+  // Emitted when a label() marker dot is clicked (to create a // @label): the hit
+  // view index and the marker's reference name.
+  void labelAnchorClicked(int viewIndex, const QString& name);
+  // Emitted while dragging a // @label text (its offset from the anchor in the
+  // view's local model-mm, y-down) and once more on release.
+  void labelTextMoved(int viewIndex, int id, double dxMm, double dyMm, bool finished);
+  // Emitted on double-click of a // @label text (its source line) to open its editor.
+  void labelDoubleClicked(int id);
   // Emitted when a detail circle is drawn over standard view `viewIndex`: centre and
   // radius in that view's view-local model-mm.
   void detailRequested(int viewIndex, double cx, double cy, double r);
@@ -226,6 +259,8 @@ private:
   // the placement + dim index and whether the label (vs the line) was hit.
   bool hitDim(const QPointF& widgetPt, bool editableOnly, int& place, int& dim,
               bool& onLabel) const;
+  // Find the // @label text box under a widget point across all standard views.
+  bool hitLabel(const QPointF& widgetPt, int& place, int& label) const;
   void paintPlacement(QPainter& painter, const PlacedView& pl);
 
   QVector<PlacedView> places;
@@ -240,6 +275,7 @@ private:
   int dragPlace{-1};
   int draggingDim{-1};
   int draggingLabel{-1};
+  int draggingText{-1};  // index into places[dragPlace].data.labels (// @label drag)
   bool panning{false};
   QPointF panLast;
   bool showAnchors{true};
@@ -280,10 +316,18 @@ public:
   double exportScale() const;
   // Is standard view `viewIndex` (0..5 = Front/Back/Left/Right/Top/Bottom) shown?
   bool isViewSelected(int viewIndex) const;
+  // Whether the "Fill colors" mode is on (fill views with model color() colours).
+  bool fillColors() const;
 
 signals:
   // Emitted when an anchor is clicked in one of the views (view index + name).
   void anchorClicked(int viewIndex, const QString& name);
+  // Emitted when a label() marker dot is clicked to create a // @label line.
+  void labelAnchorClicked(int viewIndex, const QString& name);
+  // Emitted while dragging a // @label text (offset from anchor, view-local mm).
+  void labelTextMoved(int viewIndex, int id, double dxMm, double dyMm, bool finished);
+  // Emitted on double-click of a // @label text (its source line) to open its editor.
+  void labelDoubleClicked(int id);
   // Emitted when a dimension's offset is dragged (view index, dim id, offset px,
   // finished=true on mouse release).
   void dimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
@@ -333,6 +377,7 @@ private:
   QPushButton *detailButton;  // checkable "New detail" mode
   QPushButton *exportButton;
   QCheckBox *showRefsCheck;
+  QCheckBox *fillColorsCheck;
   QCheckBox *separateFilesCheck;
   QDoubleSpinBox *scaleSpin;
   QList<OrthoViewData> views;

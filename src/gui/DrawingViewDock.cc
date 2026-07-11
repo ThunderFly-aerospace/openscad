@@ -68,6 +68,7 @@ void DrawingSheetWidget::setSheet(const QVector<PlacedView>& placements, double 
   this->dragPlace = -1;
   this->draggingDim = -1;
   this->draggingLabel = -1;
+  this->draggingText = -1;
   this->tileDrag = -1;
   update();
 }
@@ -86,7 +87,7 @@ void DrawingSheetWidget::clear()
   this->sheetWmm = this->sheetHmm = 0.0;
   this->userZoom = 1.0;
   this->userPan = QPointF();
-  this->dragPlace = this->draggingDim = this->draggingLabel = -1;
+  this->dragPlace = this->draggingDim = this->draggingLabel = this->draggingText = -1;
   update();
 }
 
@@ -258,6 +259,17 @@ void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
   if (!data.title.isEmpty()) {
     painter.setPen(Qt::black);
     painter.drawText(map(QPointF(0, 0)) - QPointF(0, absPx(3.0)), data.title);
+  }
+
+  // Coloured face fills (fill-colors mode), painted first so edges sit on top.
+  if (!data.fills.isEmpty()) {
+    painter.setPen(Qt::NoPen);
+    for (const auto& f : data.fills) {
+      QPolygonF poly;
+      for (const auto& p : f.poly) poly << map(p);
+      painter.setBrush(f.color);
+      painter.drawPolygon(poly);
+    }
   }
 
   // Section cut-face hatching first, so edges sit on top of it.
@@ -501,15 +513,52 @@ void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
     painter.drawText(box, Qt::AlignCenter, ang.label);
   }
 
-  // Anchor dots with names (reference points) — optional.
-  if (this->showAnchors)
-  for (const auto& anchor : data.anchors) {
-    const QPointF p = map(anchor.pos);
+  // Text labels (// @label): a dot at the projected 3D anchor, a leader from the
+  // text box to it, and the text (black — an annotation, not a dimension value).
+  for (const auto& lb : data.labels) {
+    const QPointF anc = map(lb.anchor);
+    const QPointF center = map(lb.anchor + lb.off);
+    const QRectF tr = painter.fontMetrics().boundingRect(lb.text).adjusted(-3, -2, 3, 2);
+    QRectF box(center.x() - tr.width() / 2.0, center.y() - tr.height() / 2.0,
+               tr.width(), tr.height());
+    const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
+    const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
+    box.moveTo(bx, by);
+    // Leader from the text box centre to the anchor (drawn first, then the white
+    // box backing hides the portion inside the box).
+    if (lb.leader &&
+        std::hypot(box.center().x() - anc.x(), box.center().y() - anc.y()) > box.height()) {
+      painter.setPen(witnessPen);
+      painter.drawLine(box.center(), anc);
+    }
+    const double dotR = std::max(1.6, absPx(0.5));
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(30, 90, 200));
-    painter.drawEllipse(p, 3.5, 3.5);
-    painter.setPen(QColor(30, 90, 200));
-    painter.drawText(p + QPointF(5, -4), anchor.name);
+    painter.setBrush(QColor(20, 20, 20));
+    painter.drawEllipse(anc, dotR, dotR);
+    painter.fillRect(box, QColor(255, 255, 255, 220));
+    painter.setPen(Qt::black);
+    painter.drawText(box, Qt::AlignCenter, lb.text);
+  }
+
+  // Anchor dots with names (reference points) — optional. Includes label() markers
+  // (shown as clickable dots for the "new label" gesture) in a distinct colour.
+  if (this->showAnchors) {
+    for (const auto& anchor : data.anchors) {
+      const QPointF p = map(anchor.pos);
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(QColor(30, 90, 200));
+      painter.drawEllipse(p, 3.5, 3.5);
+      painter.setPen(QColor(30, 90, 200));
+      painter.drawText(p + QPointF(5, -4), anchor.name);
+    }
+    for (const auto& anchor : data.labelAnchors) {
+      const QPointF p = map(anchor.pos);
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(QColor(30, 160, 90));
+      painter.drawEllipse(p, 3.5, 3.5);
+      painter.setPen(QColor(20, 110, 60));
+      painter.drawText(p + QPointF(5, -4), anchor.name);
+    }
   }
 }
 
@@ -557,6 +606,11 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
       emit jumpToSource(this->places.at(hp).data.dims.at(hd).jumpLine);
       return;
     }
+    int lp, ll;
+    if (hitLabel(click, lp, ll) && this->places.at(lp).data.labels.at(ll).id >= 0) {
+      emit jumpToSource(this->places.at(lp).data.labels.at(ll).id);
+      return;
+    }
     if (pi >= 0) {  // else the nearest dimref anchor in the tile under the cursor
       const PlacedView& pl = this->places.at(pi);
       double best = 12.0;
@@ -580,6 +634,12 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
     if (hitDim(click, /*editableOnly=*/true, hp, hd, onLabel)) {
       this->dragPlace = hp;
       if (onLabel) this->draggingLabel = hd; else this->draggingDim = hd;
+      return;
+    }
+    int lp, ll;
+    if (hitLabel(click, lp, ll)) {
+      this->dragPlace = lp;
+      this->draggingText = ll;
       return;
     }
   }
@@ -612,6 +672,22 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
       if (QAction *chosen = menu.exec(event->globalPosition().toPoint()))
         emit anchorClicked(pl.viewIndex, chosen->text());
       return;
+    }
+  }
+
+  // Label marker click (create a // @label) — in the tile under the cursor.
+  if (pi >= 0 && this->places.at(pi).viewIndex >= 0 && this->showAnchors) {
+    const PlacedView& pl = this->places.at(pi);
+    for (const auto& a : pl.data.labelAnchors) {
+      const QPointF p = mapToWidget(pl, a.pos);
+      if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= 12.0) {
+        // Copy the reference out: the slot refreshes the sheet, which replaces
+        // `places` while the signal is still on the stack.
+        const int viewIndex = pl.viewIndex;
+        const QString ref = a.ref;
+        emit labelAnchorClicked(viewIndex, ref);
+        return;
+      }
     }
   }
 
@@ -661,6 +737,16 @@ void DrawingSheetWidget::mouseMoveEvent(QMouseEvent *event)
     dim.labPerpPx = rel.x() * perp.x() + rel.y() * perp.y();
     update();
     emit labelOffsetChanged(pl.viewIndex, dim.id, dim.labAlongPx, dim.labPerpPx, false);
+    return;
+  }
+
+  // // @label text drag: the offset is simply the text position relative to the
+  // projected anchor, in the view's local model-mm (y-down).
+  if (this->draggingText >= 0 && this->draggingText < pl.data.labels.size()) {
+    OrthoLabel& lb = pl.data.labels[this->draggingText];
+    lb.off = mapToViewLocal(pl, event->position()) - lb.anchor;
+    update();
+    emit labelTextMoved(pl.viewIndex, lb.id, lb.off.x(), lb.off.y(), false);
     return;
   }
 
@@ -727,8 +813,29 @@ bool DrawingSheetWidget::hitDim(const QPointF& pt, bool editableOnly, int& place
   return false;
 }
 
+bool DrawingSheetWidget::hitLabel(const QPointF& pt, int& place, int& label) const
+{
+  const QFontMetrics fm(overlayFont());
+  for (int p = 0; p < this->places.size(); ++p) {
+    const PlacedView& pl = this->places.at(p);
+    if (pl.viewIndex < 0) continue;
+    for (int i = 0; i < pl.data.labels.size(); ++i) {
+      const auto& lb = pl.data.labels.at(i);
+      QRectF box = fm.boundingRect(lb.text).adjusted(-3, -2, 3, 2);
+      box.moveCenter(mapToWidget(pl, lb.anchor + lb.off));
+      if (box.contains(pt)) { place = p; label = i; return true; }
+    }
+  }
+  return false;
+}
+
 void DrawingSheetWidget::mouseDoubleClickEvent(QMouseEvent *event)
 {
+  int lp, ll;
+  if (hitLabel(event->position(), lp, ll) && this->places.at(lp).data.labels.at(ll).id >= 0) {
+    emit labelDoubleClicked(this->places.at(lp).data.labels.at(ll).id);
+    return;
+  }
   int hp, hd; bool onLabel;
   if (hitDim(event->position(), /*editableOnly=*/true, hp, hd, onLabel))
     emit dimensionDoubleClicked(this->places.at(hp).data.dims.at(hd).id);
@@ -775,11 +882,14 @@ void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
     return;
   }
   if (this->dragPlace < 0 || this->dragPlace >= this->places.size()) {
-    this->draggingLabel = this->draggingDim = -1;
+    this->draggingLabel = this->draggingDim = this->draggingText = -1;
     return;
   }
   PlacedView& pl = this->places[this->dragPlace];
-  if (this->draggingLabel >= 0 && this->draggingLabel < pl.data.dims.size()) {
+  if (this->draggingText >= 0 && this->draggingText < pl.data.labels.size()) {
+    const OrthoLabel& lb = pl.data.labels[this->draggingText];
+    emit labelTextMoved(pl.viewIndex, lb.id, lb.off.x(), lb.off.y(), true);
+  } else if (this->draggingLabel >= 0 && this->draggingLabel < pl.data.dims.size()) {
     const OrthoDimension& dim = pl.data.dims[this->draggingLabel];
     emit labelOffsetChanged(pl.viewIndex, dim.id, dim.labAlongPx, dim.labPerpPx, true);
   } else if (this->draggingDim >= 0 && this->draggingDim < pl.data.dims.size()) {
@@ -792,7 +902,7 @@ void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
       emit dimensionOffsetChanged(pl.viewIndex, dim.id, dim.offsetPx, true);
     }
   }
-  this->dragPlace = this->draggingLabel = this->draggingDim = -1;
+  this->dragPlace = this->draggingLabel = this->draggingDim = this->draggingText = -1;
 }
 
 void DrawingSheetWidget::wheelEvent(QWheelEvent *event)
@@ -954,6 +1064,15 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
           &DrawingViewDock::dimensionAngleChanged);
   connect(this->sheet, &DrawingSheetWidget::labelOffsetChanged, this,
           &DrawingViewDock::labelOffsetChanged);
+  // Queued: creating the label rewrites the source and refreshes the sheet, which
+  // must not run inside the widget's mouse handler (it replaces the very data the
+  // handler is walking).
+  connect(this->sheet, &DrawingSheetWidget::labelAnchorClicked, this,
+          &DrawingViewDock::labelAnchorClicked, Qt::QueuedConnection);
+  connect(this->sheet, &DrawingSheetWidget::labelTextMoved, this,
+          &DrawingViewDock::labelTextMoved);
+  connect(this->sheet, &DrawingSheetWidget::labelDoubleClicked, this,
+          &DrawingViewDock::labelDoubleClicked);
   connect(this->sheet, &DrawingSheetWidget::dimensionDoubleClicked, this,
           &DrawingViewDock::dimensionDoubleClicked);
   connect(this->sheet, &DrawingSheetWidget::jumpToSource, this,
@@ -998,6 +1117,12 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
     tr("Export each shown view to its own file (name_front.svg, …) instead of "
        "one composed sheet."));
 
+  this->fillColorsCheck = new QCheckBox(tr("Fill colors"), central);
+  this->fillColorsCheck->setChecked(false);
+  this->fillColorsCheck->setToolTip(
+    tr("Fill the views with the model's color() colors (edges stay black). "
+       "Shown live and carried into the SVG/PDF export."));
+
   this->materializeButton = new QPushButton(tr("Materialize kvóty"), central);
   this->materializeButton->setToolTip(
     tr("Write a // @dim line for each kvota= pair, making them editable."));
@@ -1035,6 +1160,7 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   auto *checkLayout = new QHBoxLayout(checkRow);
   checkLayout->setContentsMargins(0, 0, 0, 0);
   checkLayout->addWidget(this->showRefsCheck);
+  checkLayout->addWidget(this->fillColorsCheck);
   checkLayout->addWidget(this->separateFilesCheck);
   checkLayout->addStretch(1);
   checkLayout->addWidget(this->scaleSpin);
@@ -1057,6 +1183,10 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   connect(this->sheet, &DrawingSheetWidget::detailModeFinished, this,
           [this] { this->detailButton->setChecked(false); });
   connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
+  // Toggling fill mode needs the owner to reproject (faces must be computed), so
+  // reuse the view-selection-changed path.
+  connect(this->fillColorsCheck, &QCheckBox::toggled, this,
+          [this](bool) { emit viewSelectionChanged(); });
   // The scale changes the sheet layout (view sizes and spacing) but not the
   // geometry, so just recompute the layout — no reprojection / re-render.
   connect(this->scaleSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
@@ -1067,6 +1197,11 @@ double DrawingViewDock::exportScale() const
 {
   const double denom = this->scaleSpin->value();
   return denom > 1e-6 ? 1.0 / denom : 1.0;  // drawing-mm per model-mm
+}
+
+bool DrawingViewDock::fillColors() const
+{
+  return this->fillColorsCheck && this->fillColorsCheck->isChecked();
 }
 
 void DrawingViewDock::setShowAnchors(bool show)
@@ -1191,7 +1326,9 @@ void DrawingViewDock::exportDrawing()
                           const QString& path) {
     std::vector<QLineF> edgeSegs, hatchSegs, dimSegs, witSegs;
     std::vector<QPolygonF> arrows;
+    std::vector<std::pair<QPolygonF, QColor>> fillPolys;  // coloured face fills (behind edges)
     std::vector<std::pair<QPointF, QString>> labels, titles;
+    std::vector<std::pair<QPointF, QString>> textLabels;  // // @label callouts (black)
     for (const auto& pl : places) {
       const auto& v = *pl.v;
       const double oxmm = pl.ox, oymm = pl.oy;
@@ -1200,6 +1337,11 @@ void DrawingViewDock::exportDrawing()
       return QPointF(oxmm + mp.x() * sc, oymm + mp.y() * sc);  // -> drawing-mm
     };
     titles.emplace_back(QPointF(oxmm, oymm - fontMm), v.title);  // ~one font height off
+    for (const auto& f : v.fills) {
+      QPolygonF poly;
+      for (const auto& p : f.poly) poly << map(p);
+      fillPolys.emplace_back(poly, f.color);
+    }
     for (const auto& hh : v.hatch) hatchSegs.emplace_back(map(hh.p1()), map(hh.p2()));
     for (const auto& e : v.edges) edgeSegs.emplace_back(map(e.p1()), map(e.p2()));
     // Detail circles on this (parent) view: a 48-gon polyline + the letter.
@@ -1280,6 +1422,16 @@ void DrawingViewDock::exportDrawing()
       bis = bl > 1e-6 ? bis / bl : QPointF(0, -1);
       labels.emplace_back(vtx + bis * (arrowMm * 4), ang.label);
     }
+    for (const auto& lb : v.labels) {
+      const QPointF anc = map(lb.anchor);
+      const QPointF pos = map(lb.anchor + lb.off);
+      if (lb.leader && std::hypot((pos - anc).x(), (pos - anc).y()) > fontMm)
+        witSegs.emplace_back(pos, anc);
+      const double c = arrowMm * 0.4;  // small cross at the anchor point
+      edgeSegs.emplace_back(anc - QPointF(c, 0), anc + QPointF(c, 0));
+      edgeSegs.emplace_back(anc - QPointF(0, c), anc + QPointF(0, c));
+      textLabels.emplace_back(pos, lb.text);
+    }
     for (const auto& sl : v.sectionLines) {
       const QPointF a = map(sl.p0), b = map(sl.p1);
       dimSegs.emplace_back(a, b);  // chain style is lost in export; drawn solid
@@ -1318,6 +1470,7 @@ void DrawingViewDock::exportDrawing()
           << s.toStdString() << "\n";
     };
     for (const auto& [p, s] : labels) text(p, s, fontMm);
+    for (const auto& [p, s] : textLabels) text(p, s, fontMm);
     for (const auto& [p, s] : titles) text(QPointF(p.x() + 10, p.y()), s, fontMm);
     out << "0\nENDSEC\n0\nEOF\n";
     return;
@@ -1336,6 +1489,15 @@ void DrawingViewDock::exportDrawing()
 
     p.setPen(Qt::black);
     for (const auto& [pos, txt] : titles) p.drawText(P(pos), txt);
+
+    // Coloured face fills first, so the black edges (and everything else) sit on top.
+    p.setPen(Qt::NoPen);
+    for (const auto& [poly, color] : fillPolys) {
+      QPolygonF q;
+      for (const auto& pt : poly) q << P(pt);
+      p.setBrush(color);
+      p.drawPolygon(q);
+    }
 
     QPen hatchPen(QColor(90, 90, 90));
     hatchPen.setWidthF(0.13 * mmToPx);
@@ -1372,6 +1534,15 @@ void DrawingViewDock::exportDrawing()
       QRectF box(c.x() - tr.width() / 2, c.y() - tr.height() / 2, tr.width(), tr.height());
       p.fillRect(box, QColor(255, 255, 255, 220));
       p.setPen(QColor(150, 30, 30));
+      p.drawText(box, Qt::AlignCenter, txt);
+    }
+    // // @label callouts: black text (annotations, not dimension values).
+    for (const auto& [pos, txt] : textLabels) {
+      const QPointF c = P(pos);
+      const QRectF tr = p.fontMetrics().boundingRect(txt).adjusted(-2, -1, 2, 1);
+      QRectF box(c.x() - tr.width() / 2, c.y() - tr.height() / 2, tr.width(), tr.height());
+      p.fillRect(box, QColor(255, 255, 255, 220));
+      p.setPen(Qt::black);
       p.drawText(box, Qt::AlignCenter, txt);
     }
   };

@@ -107,12 +107,20 @@ public:
   // preview aid, hidden in the F6 rendered view.
   std::vector<Eigen::Vector3d> dimrefPoints;
   std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> dimrefLines;
+  // In-model label() anchors: the same kind of cross, in green, so they read as a
+  // different family than the (blue) dimref anchors. Shown / hidden together with
+  // the dimref markers.
+  std::vector<Eigen::Vector3d> labelPoints;
   bool showDimrefMarkers{true};
   void setDimrefMarkers(std::vector<Eigen::Vector3d> points,
                         std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> lines)
   {
     this->dimrefPoints = std::move(points);
     this->dimrefLines = std::move(lines);
+  }
+  void setLabelMarkers(std::vector<Eigen::Vector3d> points)
+  {
+    this->labelPoints = std::move(points);
   }
   void setShowDimrefMarkers(bool show) { this->showDimrefMarkers = show; }
 

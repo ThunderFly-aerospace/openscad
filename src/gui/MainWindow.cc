@@ -132,9 +132,11 @@
 #include "gui/Dock.h"
 #include "gui/ai/AIDock.h"
 #include "gui/CameraViewDock.h"
+#include "gui/FboSnapshotView.h"
 #include "gui/DrawingViewDock.h"
 #include "core/CameraNode.h"
 #include "core/DimrefNode.h"
+#include "core/LabelNode.h"
 #include "core/SectionNode.h"
 #include "glview/GLView.h"
 #include "glview/OffscreenView.h"
@@ -3747,70 +3749,27 @@ void MainWindow::setupCameraDock()
   QObject::connect(this->cameraDock, &Dock::visibilityChanged, this, [this](bool visible) {
     if (visible) refreshCameras();
   });
-}
-
-void MainWindow::refreshCameras()
-{
-  const auto cameras = this->rootNode ? collectCameras(this->rootNode) : std::vector<CameraInfo>{};
-
-  // Frustum markers in the interactive view are updated on every preview,
-  // regardless of the dock's visibility.
-  std::vector<GLView::CameraFrustum> frustums;
-  double autoLength = 0.15 * this->qglview->cam.zoomValue();
-  if (!(autoLength > 0)) autoLength = 20.0;
-  for (const auto& info : cameras) {
-    if (!info.node) continue;
-    // Per-camera marker length in mm, or the zoom-scaled auto length.
-    const double markerLength = info.node->marker > 0 ? info.node->marker : autoLength;
-    const double fov = info.node->fov >= 0
-                         ? info.node->fov
-                         : camera_math::focalToFovDegrees(info.node->focal, info.node->sensor);
-    const double aspect = info.node->pixel_height > 0
-                            ? static_cast<double>(info.node->pixel_width) / info.node->pixel_height
-                            : 1.0;
-    const double halfHeight = markerLength * std::tan(fov * M_PI / 360.0);
-    const double halfWidth = halfHeight * aspect;
-    const Eigen::Matrix4d m = info.world.matrix();
-    auto pt = [&](double x, double y, double z) {
-      const Eigen::Vector4d p = m * Eigen::Vector4d(x, y, z, 1.0);
-      return Eigen::Vector3d(p.x(), p.y(), p.z());
-    };
-    GLView::CameraFrustum fr;
-    fr.apex = m.block<3, 1>(0, 3);
-    fr.corners = {pt(-halfWidth, halfHeight, -markerLength), pt(halfWidth, halfHeight, -markerLength),
-                  pt(halfWidth, -halfHeight, -markerLength),
-                  pt(-halfWidth, -halfHeight, -markerLength)};
-    fr.up = pt(0.0, 1.5 * halfHeight, -markerLength);
-    frustums.push_back(fr);
-  }
-  this->qglview->setCameraFrustums(std::move(frustums));
-  this->qglview->update();
-
-  // Snapshots are expensive, so only render them while the dock is visible.
-  if (!this->cameraDock || !this->cameraDock->isVisible()) return;
-  if (!this->rootNode) {
-    this->cameraDock->clearSnapshots();
-    return;
-  }
-
-  QList<QImage> images;
-  QStringList names;
-  ViewOptions options;  // OpenCSG previewer, no axes/edges/crosshairs
-  for (const auto& info : cameras) {
-    QImage image;
-    if (auto glview = render_camera_preview(this->tree, options, info)) {
-      std::ostringstream stream(std::ios::out | std::ios::binary);
-      if (glview->save(stream)) {
-        const std::string data = stream.str();
-        image.loadFromData(reinterpret_cast<const uchar *>(data.data()),
-                           static_cast<int>(data.size()), "PNG");
-      }
+  // Dragging a // @label callout on a snapshot writes laboff= (image px) back.
+  QObject::connect(this->cameraDock, &CameraViewDock::labelTextMoved, this,
+                   [this](int id, double dx, double dy, bool finished) {
+                     onLabelTextMoved(-1, id, dx, dy, finished);
+                   });
+  // Double-click / right-click a callout: edit it / jump to its source line.
+  QObject::connect(this->cameraDock, &CameraViewDock::labelDoubleClicked, this,
+                   &MainWindow::onLabelDoubleClicked);
+  QObject::connect(this->cameraDock, &CameraViewDock::jumpToSource, this, [this](int line) {
+    if (this->activeEditor && line >= 0) {
+      this->jumpToLine(line, 0);
+      this->activeEditor->setFocus();
     }
-    images.append(image);
-    names.append(info.node ? QString::fromStdString(info.node->camera_name) : QString());
-  }
-  this->cameraDock->setSnapshots(images, names);
+  });
+  // Clicking a label() marker dot on a snapshot appends a // @label for that camera.
+  QObject::connect(this->cameraDock, &CameraViewDock::labelAnchorClicked, this,
+                   &MainWindow::onCameraLabelAnchorClicked);
 }
+
+// refreshCameras() is defined after the anonymous namespace below, because it
+// uses resolveLabels() (a file-local helper declared there).
 
 void MainWindow::setupDrawingDock()
 {
@@ -3840,6 +3799,15 @@ void MainWindow::setupDrawingDock()
   // Double-click a dimension to edit its label/precision/arrows/projection.
   QObject::connect(this->drawingDock, &DrawingViewDock::dimensionDoubleClicked, this,
                    &MainWindow::onDimensionDoubleClicked);
+  // Clicking a label() marker dot appends a // @label line for that view.
+  QObject::connect(this->drawingDock, &DrawingViewDock::labelAnchorClicked, this,
+                   &MainWindow::onLabelAnchorClicked);
+  // Dragging a // @label text writes laboff= back on release.
+  QObject::connect(this->drawingDock, &DrawingViewDock::labelTextMoved, this,
+                   &MainWindow::onLabelTextMoved);
+  // Double-click a // @label to edit its text/projection/leader.
+  QObject::connect(this->drawingDock, &DrawingViewDock::labelDoubleClicked, this,
+                   &MainWindow::onLabelDoubleClicked);
   // Right-click a dimref/dimension in a view jumps the editor to its source line.
   QObject::connect(this->drawingDock, &DrawingViewDock::jumpToSource, this, [this](int line) {
     if (this->activeEditor && line >= 0) {
@@ -4178,6 +4146,190 @@ void MainWindow::onLabelOffsetChanged(int viewIndex, int id, double alongPx, dou
     QString("%1,%2").arg(alongMm, 0, 'g', 4).arg(perpMm, 0, 'g', 4);
   lines[id] = setLineToken(lines.at(id), "laboff", value);
   activeEditor->setPlainText(lines.join('\n'));
+}
+
+void MainWindow::onLabelAnchorClicked(int viewIndex, const QString& name)
+{
+  if (name.isEmpty() || !activeEditor) return;
+  static const char *const keys[6] = {"front", "back", "left", "right", "top", "bottom"};
+  const QString proj = keys[std::clamp(viewIndex, 0, 5)];
+  const QString labLine = QString("// @label %1 proj=%2").arg(name, proj);
+
+  const QStringList lines = activeEditor->toPlainText().split('\n');
+  activeEditor->setCursorPosition(lines.size() - 1, lines.isEmpty() ? 0 : lines.last().length());
+  QString insertText;
+  if (!lines.isEmpty() && !lines.last().isEmpty()) insertText += "\n";
+  insertText += labLine + "\n";
+  activeEditor->insertOrReplaceText(insertText);
+  refreshDrawingViews();
+  this->statusBar()->showMessage(tr("Added label %1 (proj=%2)").arg(name, proj), 4000);
+}
+
+QString MainWindow::nameCameraInSource(int cameraIndex)
+{
+  if (!activeEditor || !this->rootNode) return {};
+  const auto cameras = collectCameras(this->rootNode);
+  if (cameraIndex < 0 || cameraIndex >= static_cast<int>(cameras.size())) return {};
+  const CameraNode *node = cameras[cameraIndex].node;
+  if (!node || !node->modinst) return {};
+
+  // First camN not taken by another camera in the model.
+  std::set<std::string> taken;
+  for (const auto& info : cameras) {
+    if (info.node) taken.insert(info.node->camera_name);
+  }
+  QString newName;
+  for (int n = 1;; ++n) {
+    const QString candidate = QString("cam%1").arg(n);
+    if (!taken.count(candidate.toStdString())) { newName = candidate; break; }
+  }
+
+  // Insert name="camN" as the first argument of the camera( … ) call. The
+  // instantiation's location gives the line and column of the `camera` token; the
+  // opening parenthesis follows it on the same line.
+  const Location& loc = node->modinst->location();
+  QStringList lines = activeEditor->toPlainText().split('\n');
+  const int li = loc.firstLine() - 1;
+  if (li < 0 || li >= lines.size()) return {};
+  const int from = std::clamp<int>(loc.firstColumn() - 1, 0, lines.at(li).length());
+  const int open = lines.at(li).indexOf('(', from);
+  if (open < 0) return {};
+
+  QString line = lines.at(li);
+  const QString rest = line.mid(open + 1);
+  const bool emptyArgs = rest.trimmed().startsWith(')');  // camera() -> no comma
+  line.insert(open + 1, QString("name=\"%1\"%2").arg(newName, emptyArgs ? "" : ", "));
+  lines[li] = line;
+  activeEditor->setPlainText(lines.join('\n'));
+  return newName;
+}
+
+void MainWindow::onCameraLabelAnchorClicked(int cameraIndex, const QString& cameraName,
+                                            const QString& name)
+{
+  if (name.isEmpty() || !activeEditor) return;
+
+  // A // @label targets a camera by name, so an unnamed camera() gets one written
+  // into the source first (which changes the model -> re-preview instead of just
+  // reprojecting the overlay).
+  QString camera = cameraName;
+  const bool autoNamed = camera.isEmpty();
+  if (autoNamed) {
+    camera = nameCameraInSource(cameraIndex);
+    if (camera.isEmpty()) {
+      this->statusBar()->showMessage(
+        tr("This camera has no name — add name=\"…\" to its camera() call."), 6000);
+      return;
+    }
+  }
+
+  const QString labLine = QString("// @label %1 proj=cam:%2").arg(name, camera);
+  const QStringList lines = activeEditor->toPlainText().split('\n');
+  activeEditor->setCursorPosition(lines.size() - 1, lines.isEmpty() ? 0 : lines.last().length());
+  QString insertText;
+  if (!lines.isEmpty() && !lines.last().isEmpty()) insertText += "\n";
+  insertText += labLine + "\n";
+  activeEditor->insertOrReplaceText(insertText);
+
+  if (autoNamed) {
+    actionRenderPreview();  // camera() changed: re-parse, then the snapshots refresh
+    this->statusBar()->showMessage(
+      tr("Named the camera \"%1\" and added label %2").arg(camera, name), 4000);
+  } else {
+    refreshCameras();  // the // @label is a comment: reproject, no geometry change
+    this->statusBar()->showMessage(tr("Added label %1 (proj=cam:%2)").arg(name, camera), 4000);
+  }
+}
+
+void MainWindow::onLabelTextMoved(int viewIndex, int id, double dxMm, double dyMm, bool finished)
+{
+  (void)viewIndex;
+  if (!finished || id < 0 || !activeEditor) return;
+  QStringList lines = activeEditor->toPlainText().split('\n');
+  if (id >= lines.size()) return;
+  // The overlay offset is view-local, y-down; laboff in source is the screen frame
+  // (dx = right, dy = up), so the vertical component flips sign.
+  const double du = dxMm, dv = -dyMm;
+  const QString value = QString("%1,%2").arg(du, 0, 'g', 4).arg(dv, 0, 'g', 4);
+  lines[id] = setLineToken(lines.at(id), "laboff", value);
+  activeEditor->setPlainText(lines.join('\n'));
+}
+
+void MainWindow::onLabelDoubleClicked(int id)
+{
+  if (id < 0 || !activeEditor) return;
+  QStringList lines = activeEditor->toPlainText().split('\n');
+  if (id >= lines.size()) return;
+  QString line = lines.at(id);
+
+  auto tokenValue = [&](const QString& re) {
+    const auto m = QRegularExpression(re).match(line);
+    return m.hasMatch() ? m.captured(1) : QString();
+  };
+  QString curText = tokenValue(R"RX(text="([^"]*)")RX");
+  if (curText.isEmpty()) curText = tokenValue(R"(\btext=(\S+))");
+  const QString curProj = tokenValue(R"(\bproj=(\S+))");
+  const QString curLeader = tokenValue(R"(\bleader=(\w+))");
+
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Edit label"));
+  auto *form = new QFormLayout(&dialog);
+
+  auto *textEdit = new QLineEdit(curText, &dialog);
+  textEdit->setPlaceholderText(tr("Override the label() text (blank = keep it)"));
+  form->addRow(tr("Text"), textEdit);
+
+  auto *projBox = new QComboBox(&dialog);
+  projBox->setEditable(true);  // lets the user type cam:<name>
+  projBox->addItems({tr("(all)"), "front", "back", "left", "right", "top", "bottom"});
+  projBox->setCurrentText(curProj.isEmpty() ? tr("(all)") : curProj);
+  projBox->setToolTip(tr("front…bottom = an ortho view; cam:<name> = a camera; "
+                         "(all) = every ortho view"));
+  form->addRow(tr("Projection"), projBox);
+
+  auto *leaderCheck = new QCheckBox(tr("Leader line to the anchor"), &dialog);
+  leaderCheck->setChecked(curLeader.toLower() != "off");
+  form->addRow(tr("Leader"), leaderCheck);
+
+  auto *buttons =
+    new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  auto *deleteButton = buttons->addButton(tr("Delete"), QDialogButtonBox::DestructiveRole);
+  deleteButton->setToolTip(tr("Remove this label (the // @label line)."));
+  form->addRow(buttons);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  bool deleteRequested = false;
+  connect(deleteButton, &QPushButton::clicked, &dialog, [&] {
+    deleteRequested = true;
+    dialog.accept();
+  });
+
+  if (dialog.exec() != QDialog::Accepted) return;
+
+  if (deleteRequested) {
+    lines.removeAt(id);
+    activeEditor->setPlainText(lines.join('\n'));
+    refreshDrawingViews();
+    this->statusBar()->showMessage(tr("Label deleted."), 3000);
+    return;
+  }
+
+  // Rewrite the tokens. Text may contain spaces -> always quote it.
+  line.remove(QRegularExpression(R"RX(\s*text="[^"]*")RX"));
+  line.remove(QRegularExpression(R"(\s*\btext=\S+)"));
+  const QString textVal = textEdit->text().trimmed();
+  if (!textVal.isEmpty()) line += " text=\"" + textVal + "\"";
+
+  line.remove(QRegularExpression(R"(\s*\bproj=\S+)"));
+  const QString projVal = projBox->currentText().trimmed();
+  if (!projVal.isEmpty() && projVal != tr("(all)")) line += " proj=" + projVal;
+
+  if (!leaderCheck->isChecked()) line = setLineToken(line, "leader", "off");
+  else line.remove(QRegularExpression(R"(\s*\bleader=\S+)"));
+
+  lines[id] = line;
+  activeEditor->setPlainText(lines.join('\n'));
+  refreshDrawingViews();
 }
 
 // If the anchor reference `ref` ("A" or "A#index") resolves to a dimref() that
@@ -4660,7 +4812,268 @@ ResolvedDrawing resolveDrawing(const std::vector<DimrefInfo>& dimrefs,
   return {std::move(anchorRecs), std::move(dims)};
 }
 
+// A label() marker resolved for one target projection: the world anchor to draw a
+// leader to, the text to show, which projection it belongs to, and the text
+// offset from the projected anchor (in the projection plane, mm: dx = screen
+// right, dy = screen up). `proj` is "front".."bottom" for an ortho view,
+// "cam:<name>" for a camera, or "" for all ortho views. sourceLine is the 0-based
+// // @label line (for laboff= write-back + right-click jump).
+struct ResolvedLabel {
+  Eigen::Vector3d anchor{Eigen::Vector3d::Zero()};
+  QString text;
+  QString proj;
+  double labDxMm{0};
+  double labDyMm{0};
+  bool leader{true};
+  int sourceLine{-1};
+};
+
+// A label() marker with its world position, keyed for reference resolution.
+struct LabelAnchorRec {
+  QString name;                 // label_name (may be empty)
+  QString ref;                  // name or name#index (duplicated) / @line<N> (unnamed)
+  QString text;                 // node text (default shown text)
+  Eigen::Vector3d pos;
+  int sourceLine{-1};           // 0-based label() line, for creation / jump
+};
+
+// The model's label markers plus the resolved // @label callouts.
+struct ResolvedLabels {
+  std::vector<LabelAnchorRec> anchors;
+  std::vector<ResolvedLabel> labels;
+};
+
+// Resolve label() markers + every // @label line to world-space callouts, shared
+// by the drawing-dock overlay and the camera-snapshot overlay. Mirrors
+// resolveDrawing() but for the text-annotation family.
+//   // @label NAME [proj=front|…|cam:<camera>] [laboff=dx,dy] [text="…"] [leader=on|off]
+ResolvedLabels resolveLabels(const std::vector<LabelInfo>& labelInfos, const QString& source)
+{
+  ResolvedLabels out;
+
+  // World positions + nodes per label name, in tree (DFS) order — index = occurrence.
+  std::map<std::string, std::vector<Eigen::Vector3d>> posByName;
+  std::map<std::string, std::vector<const LabelNode *>> nodeByName;
+  std::map<int, Eigen::Vector3d> posByLine;  // unnamed labels keyed by 1-based line
+  for (const auto& li : labelInfos) {
+    if (!li.node) continue;
+    const Eigen::Vector3d pos = li.world.translation();
+    const int line1 = li.node->modinst ? li.node->modinst->location().firstLine() : -1;
+    const QString name = QString::fromStdString(li.node->label_name);
+    const QString text = QString::fromStdString(li.node->text);
+    QString ref = name;
+    if (!name.isEmpty()) {
+      auto& v = posByName[li.node->label_name];
+      ref = name + "#" + QString::number(static_cast<int>(v.size()));
+      v.push_back(pos);
+      nodeByName[li.node->label_name].push_back(li.node);
+    } else if (line1 > 0) {
+      ref = QStringLiteral("@line%1").arg(line1);
+      posByLine[line1] = pos;
+    }
+    out.anchors.push_back({name, ref, text, pos, line1 > 0 ? line1 - 1 : -1});
+  }
+  // Collapse name#0 to a clean name when the name is unique (parity with dimref).
+  for (auto& rec : out.anchors) {
+    if (rec.ref.startsWith("@line")) continue;
+    const std::string base = rec.ref.left(rec.ref.indexOf('#')).toStdString();
+    const bool dup = !base.empty() && posByName.count(base) && posByName[base].size() > 1;
+    if (!dup) rec.ref = rec.name;
+    else rec.name = rec.ref;  // duplicated -> show name#index on the clickable dot
+  }
+
+  // Resolve a // @label reference token ("A", "A#index", "@line<N>") to a world pos
+  // and the LabelNode (for the default text).
+  auto resolve = [&](const QString& tok, Eigen::Vector3d& pos, const LabelNode *&node) -> bool {
+    node = nullptr;
+    if (tok.startsWith("@line")) {
+      const auto it = posByLine.find(tok.mid(5).toInt());
+      if (it == posByLine.end()) return false;
+      pos = it->second;
+      return true;
+    }
+    const int hash = tok.indexOf('#');
+    const QString base = hash >= 0 ? tok.left(hash) : tok;
+    const int idx = hash >= 0 ? tok.mid(hash + 1).toInt() : 0;
+    const auto it = posByName.find(base.toStdString());
+    if (it == posByName.end() || idx < 0 || idx >= static_cast<int>(it->second.size()))
+      return false;
+    pos = it->second[idx];
+    const auto nit = nodeByName.find(base.toStdString());
+    if (nit != nodeByName.end() && idx < static_cast<int>(nit->second.size()))
+      node = nit->second[idx];
+    return true;
+  };
+
+  // A camera target keeps its verbatim name; an ortho token is normalized.
+  auto normLabelProj = [](const QString& raw) -> QString {
+    const QString p = raw.trimmed();
+    if (p.startsWith("cam:", Qt::CaseInsensitive)) return "cam:" + p.mid(4);
+    return normalizeProj(p);
+  };
+
+  static const QRegularExpression labRe(R"(^\s*//\s*@label\s+(.*\S)\s*$)");
+  static const QRegularExpression quotedTextRe(R"RX(text="([^"]*)")RX");
+  const QStringList lines = source.split('\n');
+  for (int li = 0; li < lines.size(); ++li) {
+    const auto m = labRe.match(lines.at(li));
+    if (!m.hasMatch()) continue;
+
+    // Pull a quoted text="…" out first so its spaces don't break tokenizing.
+    QString rest = m.captured(1);
+    QString textOverride;
+    bool haveText = false;
+    const auto tm = quotedTextRe.match(rest);
+    if (tm.hasMatch()) {
+      textOverride = tm.captured(1);
+      haveText = true;
+      rest = rest.left(tm.capturedStart()) + rest.mid(tm.capturedEnd());
+    }
+    QStringList toks = rest.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    if (toks.isEmpty()) continue;
+
+    ResolvedLabel rl;
+    rl.sourceLine = li;
+    const LabelNode *node = nullptr;
+    if (!resolve(toks.first(), rl.anchor, node)) continue;  // unknown marker: skip
+    rl.text = haveText ? textOverride
+                       : (node ? QString::fromStdString(node->text) : toks.first());
+    for (int t = 1; t < toks.size(); ++t) {
+      const QString& tok = toks[t];
+      if (tok.startsWith("proj=")) rl.proj = normLabelProj(tok.mid(5));
+      else if (tok.startsWith("laboff=")) {
+        const QStringList xy = tok.mid(7).split(',');
+        if (xy.size() == 2) { rl.labDxMm = xy[0].toDouble(); rl.labDyMm = xy[1].toDouble(); }
+      } else if (tok.startsWith("leader=")) rl.leader = (tok.mid(7).toLower() != "off");
+      else if (tok.startsWith("text=")) { rl.text = tok.mid(5); }
+    }
+    out.labels.push_back(rl);
+  }
+  return out;
+}
+
 }  // namespace
+
+void MainWindow::refreshCameras()
+{
+  const auto cameras = this->rootNode ? collectCameras(this->rootNode) : std::vector<CameraInfo>{};
+
+  // Frustum markers in the interactive view are updated on every preview,
+  // regardless of the dock's visibility.
+  std::vector<GLView::CameraFrustum> frustums;
+  double autoLength = 0.15 * this->qglview->cam.zoomValue();
+  if (!(autoLength > 0)) autoLength = 20.0;
+  for (const auto& info : cameras) {
+    if (!info.node) continue;
+    // Per-camera marker length in mm, or the zoom-scaled auto length.
+    const double markerLength = info.node->marker > 0 ? info.node->marker : autoLength;
+    const double fov = info.node->fov >= 0
+                         ? info.node->fov
+                         : camera_math::focalToFovDegrees(info.node->focal, info.node->sensor);
+    const double aspect = info.node->pixel_height > 0
+                            ? static_cast<double>(info.node->pixel_width) / info.node->pixel_height
+                            : 1.0;
+    const double halfHeight = markerLength * std::tan(fov * M_PI / 360.0);
+    const double halfWidth = halfHeight * aspect;
+    const Eigen::Matrix4d m = info.world.matrix();
+    auto pt = [&](double x, double y, double z) {
+      const Eigen::Vector4d p = m * Eigen::Vector4d(x, y, z, 1.0);
+      return Eigen::Vector3d(p.x(), p.y(), p.z());
+    };
+    GLView::CameraFrustum fr;
+    fr.apex = m.block<3, 1>(0, 3);
+    fr.corners = {pt(-halfWidth, halfHeight, -markerLength), pt(halfWidth, halfHeight, -markerLength),
+                  pt(halfWidth, -halfHeight, -markerLength),
+                  pt(-halfWidth, -halfHeight, -markerLength)};
+    fr.up = pt(0.0, 1.5 * halfHeight, -markerLength);
+    frustums.push_back(fr);
+  }
+  this->qglview->setCameraFrustums(std::move(frustums));
+  this->qglview->update();
+
+  // Snapshots are expensive, so only render them while the dock is visible.
+  if (!this->cameraDock || !this->cameraDock->isVisible()) return;
+  if (!this->rootNode) {
+    this->cameraDock->clearSnapshots();
+    return;
+  }
+
+  QList<QImage> images;
+  QStringList names;
+  QList<QList<CameraLabel>> overlays;
+  QList<QList<CameraLabel>> markerOverlays;
+  ViewOptions options;  // OpenCSG previewer, no axes/edges/crosshairs
+
+  // Resolve label() markers + // @label callouts once; each camera keeps those
+  // targeting it (proj=cam:<name>).
+  const QString source = activeEditor ? activeEditor->toPlainText() : QString();
+  const auto labelInfos = collectLabels(this->rootNode);
+  const ResolvedLabels resolvedLabels = resolveLabels(labelInfos, source);
+
+  // Render the snapshots into an FBO on the interactive view's own GL context
+  // (FboSnapshotView) rather than allocating a standalone GLX/EGL offscreen
+  // context (render_camera_preview / OffscreenView). The standalone context
+  // fails on some drivers and AppImage bundles ("Unable to obtain GL Context",
+  // e.g. bundled Mesa libGLX shadowing the nvidia driver); the interactive
+  // context is always known-good here.
+  this->qglview->makeContextCurrent();
+  for (const auto& info : cameras) {
+    QImage image;
+    QList<CameraLabel> camLabels;
+    QList<CameraLabel> camMarkers;
+    if (info.node) {
+      FboSnapshotView view(info.node->pixel_width, info.node->pixel_height);
+      if (view.isValid()) {
+        configure_camera_snapshot(view, this->tree, options, info);
+        image = view.toImage();
+
+        // Project world points onto the snapshot. After configure_camera_snapshot()
+        // the view holds valid GL matrices (set in paintGL); world -> clip -> image
+        // pixels (y-down) by hand. Returns false when the point is behind the camera.
+        const QString camTarget = "cam:" + QString::fromStdString(info.node->camera_name);
+        Eigen::Map<const Eigen::Matrix4d> M(view.modelview);
+        Eigen::Map<const Eigen::Matrix4d> P(view.projection);
+        const Eigen::Matrix4d MVP = P * M;
+        const int W = info.node->pixel_width, H = info.node->pixel_height;
+        auto project = [&](const Eigen::Vector3d& p, QPointF& out) -> bool {
+          const Eigen::Vector4d clip = MVP * Eigen::Vector4d(p.x(), p.y(), p.z(), 1.0);
+          if (clip.w() <= 1e-9) return false;  // at or behind the camera plane
+          out = QPointF((clip.x() / clip.w() * 0.5 + 0.5) * W,
+                        (1.0 - (clip.y() / clip.w() * 0.5 + 0.5)) * H);
+          return true;
+        };
+
+        // Callouts targeting this camera (proj=cam:<name>).
+        for (const auto& lb : resolvedLabels.labels) {
+          if (lb.proj.compare(camTarget, Qt::CaseInsensitive) != 0) continue;
+          CameraLabel cl;
+          if (!project(lb.anchor, cl.anchor)) continue;
+          cl.off = QPointF(lb.labDxMm, -lb.labDyMm);  // laboff (px): dx right, dy up
+          cl.text = lb.text;
+          cl.leader = lb.leader;
+          cl.id = lb.sourceLine;
+          camLabels.append(cl);
+        }
+        // All label() markers as clickable dots, so a // @label for this camera can
+        // be created by clicking (parity with the drawing dock's green dots).
+        for (const auto& rec : resolvedLabels.anchors) {
+          CameraLabel cl;
+          if (!project(rec.pos, cl.anchor)) continue;
+          cl.text = rec.name;
+          cl.ref = rec.ref;
+          cl.id = rec.sourceLine;
+          camMarkers.append(cl);
+        }
+      }
+    }
+    images.append(image);
+    overlays.append(camLabels);
+    markerOverlays.append(camMarkers);
+    names.append(info.node ? QString::fromStdString(info.node->camera_name) : QString());
+  }
+  this->qglview->doneContextCurrent();
+  this->cameraDock->setSnapshots(images, names, overlays, markerOverlays);
+}
 
 void MainWindow::refreshDrawingViews()
 {
@@ -4674,6 +5087,14 @@ void MainWindow::refreshDrawingViews()
   const ResolvedDrawing resolved = resolveDrawing(dimrefs, source, /*warn=*/true);
   const std::vector<AnchorRec>& anchorRecs = resolved.anchors;
   const std::vector<ResolvedDim>& dims = resolved.dims;
+
+  // Resolve label() markers + // @label callouts (view-independent), shared with
+  // the camera overlay.
+  const auto labelInfos =
+    this->rootNode ? collectLabels(this->rootNode) : std::vector<LabelInfo>{};
+  const ResolvedLabels resolvedLabels = resolveLabels(labelInfos, source);
+  const std::vector<LabelAnchorRec>& labelAnchorRecs = resolvedLabels.anchors;
+  const std::vector<ResolvedLabel>& labels = resolvedLabels.labels;
 
   // Push dimref markers (anchor crosses + dimension lines) to the 3D view. This
   // happens on every preview, like camera frustums, regardless of dock state.
@@ -4691,6 +5112,12 @@ void MainWindow::refreshDrawingViews()
     }
   }
   this->qglview->setDimrefMarkers(std::move(markerPoints), std::move(markerLines));
+
+  // label() anchors get the same cross in the 3D view, in green (dimref = blue).
+  std::vector<Eigen::Vector3d> labelPoints;
+  labelPoints.reserve(labelAnchorRecs.size());
+  for (const auto& rec : labelAnchorRecs) labelPoints.push_back(rec.pos);
+  this->qglview->setLabelMarkers(std::move(labelPoints));
   this->qglview->update();
 
   // The line drawing needs the concrete mesh (feature edges come from a PolySet),
@@ -4721,6 +5148,7 @@ void MainWindow::refreshDrawingViews()
   // view's bounding-box top-left) — the same convention the old raster overlay
   // used, so the dimension/dragging math is unchanged.
   const double scale = this->drawingDock->exportScale();
+  const bool fillColors = this->drawingDock->fillColors();
   const std::vector<LineDrawingView>& views = standardViews();
   // Titles parallel to standardViews(): Front, Back, Left, Right, Top, Bottom.
   const char *const titleUtf8[6] = {"Front (nárys)", "Back (zadní)", "Left (levý bok)",
@@ -4823,8 +5251,37 @@ void MainWindow::refreshDrawingViews()
         for (const auto& r : raw)
           vd.edges.append(QLineF(toLocal(r.x0, r.y0), toLocal(r.x1, r.y1)));
 
+        // Coloured face fills (behind the edges), only in fill mode. Painter's
+        // order (far first) is preserved from projectViewFaces.
+        if (fillColors) {
+          for (const auto& f : projectViewFaces(*ps, view)) {
+            OrthoFill of;
+            for (const auto& [sx, sy] : f.pts) of.poly << toLocal(sx, sy);
+            of.color = QColor::fromRgbF(f.r, f.g, f.b, f.a);
+            vd.fills.append(of);
+          }
+        }
+
         for (const auto& rec : anchorRecs)
           vd.anchors.append({proj(rec.pos), rec.label, rec.ref, rec.sourceLine});
+
+        // Label markers as clickable dots (for the "new label" gesture).
+        for (const auto& rec : labelAnchorRecs)
+          vd.labelAnchors.append({proj(rec.pos), rec.name, rec.ref, rec.sourceLine});
+
+        // Text callouts: draw those targeting this view (empty proj = all ortho
+        // views; cam:<name> targets never match an ortho key). laboff is in the
+        // view's screen frame (dx = right, dy = up); the overlay is y-down.
+        for (const auto& lb : labels) {
+          if (!lb.proj.isEmpty() && lb.proj != key) continue;
+          OrthoLabel ol;
+          ol.anchor = proj(lb.anchor);
+          ol.text = lb.text;
+          ol.off = QPointF(lb.labDxMm, -lb.labDyMm);
+          ol.leader = lb.leader;
+          ol.id = lb.sourceLine;
+          vd.labels.append(ol);
+        }
 
         for (const auto& rd : dims) {
           if (!rd.proj.isEmpty() && rd.proj != key) continue;
@@ -4942,7 +5399,8 @@ void MainWindow::refreshDrawingViews()
   for (const auto& info : sections) {
     if (!info.node) continue;
     const double hatchMm = info.node->hatch > 0 && scale > 1e-9 ? info.node->hatch / scale : -1.0;
-    const SectionDrawing sd = projectSection(*ps, info.world, info.node->flip, 20.0, hatchMm);
+    const SectionDrawing sd =
+      projectSection(*ps, info.world, info.node->flip, 20.0, hatchMm, fillColors);
     if (!sd.valid) continue;
     double minSx = 1e30, maxSx = -1e30, minSy = 1e30, maxSy = -1e30;
     for (const auto& e : sd.edges) {
@@ -4954,6 +5412,12 @@ void MainWindow::refreshDrawingViews()
     OrthoViewData vd;
     vd.sizeMm = QSizeF(maxSx - minSx, maxSy - minSy);
     vd.scale = scale;
+    for (const auto& f : sd.fills) {
+      OrthoFill of;
+      for (const auto& [sx, sy] : f.pts) of.poly << toLocal(sx, sy);
+      of.color = QColor::fromRgbF(f.r, f.g, f.b, f.a);
+      vd.fills.append(of);
+    }
     for (const auto& e : sd.edges) vd.edges.append(QLineF(toLocal(e.x0, e.y0), toLocal(e.x1, e.y1)));
     for (const auto& hh : sd.hatch) vd.hatch.append(QLineF(toLocal(hh.x0, hh.y0), toLocal(hh.x1, hh.y1)));
     const QString nm = QString::fromStdString(info.node->section_name);

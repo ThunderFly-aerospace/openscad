@@ -349,6 +349,44 @@ std::vector<LineDrawingSeg2D> projectViewEdges(const PolySet& ps, const LineDraw
   return proj;
 }
 
+std::vector<LineDrawingFace2D> projectViewFaces(const PolySet& ps, const LineDrawingView& v)
+{
+  std::vector<LineDrawingFace2D> out;
+  if (ps.color_indices.empty() || ps.colors.empty()) return out;
+
+  // Build one filled polygon per coloured face, with a painter's-algorithm depth
+  // key (average depth; smaller = nearer, so we sort descending = far first).
+  struct FaceRec { LineDrawingFace2D face; double depth; };
+  std::vector<FaceRec> recs;
+  recs.reserve(ps.indices.size());
+  for (size_t fi = 0; fi < ps.indices.size(); ++fi) {
+    const int ci = fi < ps.color_indices.size() ? ps.color_indices[fi] : -1;
+    if (ci < 0 || ci >= static_cast<int>(ps.colors.size())) continue;  // uncoloured: blank
+    const auto& face = ps.indices[fi];
+    if (face.size() < 3) continue;
+    FaceRec rec;
+    const Color4f& col = ps.colors[ci];
+    rec.face.r = col.r(); rec.face.g = col.g(); rec.face.b = col.b(); rec.face.a = col.a();
+    double depthSum = 0.0;
+    int n = 0;
+    for (const int idx : face) {
+      if (idx < 0 || idx >= static_cast<int>(ps.vertices.size())) { n = 0; break; }
+      const Vector3d& p = ps.vertices[idx];
+      rec.face.pts.emplace_back(screenX(v, p), screenY(v, p));
+      depthSum += v.depthSign * p[v.az];
+      ++n;
+    }
+    if (n < 3) continue;
+    rec.depth = depthSum / n;
+    recs.push_back(std::move(rec));
+  }
+  std::sort(recs.begin(), recs.end(),
+            [](const FaceRec& a, const FaceRec& b) { return a.depth > b.depth; });  // far first
+  out.reserve(recs.size());
+  for (auto& r : recs) out.push_back(std::move(r.face));
+  return out;
+}
+
 namespace {
 // Clip the 45° line {x - y = c} to triangle (a,b,c2) and, if it crosses, append
 // the interior segment to `out`.
@@ -382,8 +420,40 @@ void hatchTriangle(const std::array<double, 2>& a, const std::array<double, 2>& 
 }
 }  // namespace
 
+namespace {
+// Clip a polygon (local frame) to the kept half-space and, if a triangle or more
+// survives, append it to `out` as a projected coloured fill (screen x=X, y=Y),
+// with a painter's depth key = average local z. keep(z) selects the half; the
+// section always projects along +Z, so nearer = smaller z (far-first = z desc).
+struct SectionFaceRec { LineDrawingFace2D face; double depth; };
+void clipColorFace(const std::vector<Vector3d>& poly, float r, float g, float b, float a,
+                   bool flip, std::vector<SectionFaceRec>& out)
+{
+  const double s = flip ? -1.0 : 1.0;          // keep side: s*z >= 0
+  std::vector<Vector3d> clipped;
+  const size_t n = poly.size();
+  for (size_t i = 0; i < n; ++i) {
+    const Vector3d& A = poly[i];
+    const Vector3d& B = poly[(i + 1) % n];
+    const double da = s * A.z(), db = s * B.z();
+    if (da >= -1e-9) clipped.push_back(A);
+    if ((da > 1e-9 && db < -1e-9) || (da < -1e-9 && db > 1e-9)) {
+      const double t = da / (da - db);         // crossing point on z=0
+      clipped.push_back(A + t * (B - A));
+    }
+  }
+  if (clipped.size() < 3) return;
+  SectionFaceRec rec;
+  rec.face.r = r; rec.face.g = g; rec.face.b = b; rec.face.a = a;
+  double zsum = 0.0;
+  for (const auto& p : clipped) { rec.face.pts.emplace_back(p.x(), p.y()); zsum += p.z(); }
+  rec.depth = zsum / clipped.size();
+  out.push_back(std::move(rec));
+}
+}  // namespace
+
 SectionDrawing projectSection(const PolySet& ps, const Transform3d& worldFrame, bool flip,
-                              double creaseAngleDeg, double hatchSpacingMm)
+                              double creaseAngleDeg, double hatchSpacingMm, bool wantColorFills)
 {
   SectionDrawing out;
 #ifdef ENABLE_MANIFOLD
@@ -433,9 +503,37 @@ SectionDrawing projectSection(const PolySet& ps, const Transform3d& worldFrame, 
         hatchTriangle(a, b, c, cval, out.hatch);
     }
   }
+  // Coloured fills of the kept solid: clip each coloured original face to the kept
+  // half-space (in the section frame) and project along +Z. Independent of the
+  // manifold trim (which loses per-face colour), so it always shows the colours.
+  if (wantColorFills && !ps.color_indices.empty() && !ps.colors.empty()) {
+    std::vector<SectionFaceRec> recs;
+    for (size_t fi = 0; fi < local.indices.size(); ++fi) {
+      const int ci = fi < ps.color_indices.size() ? ps.color_indices[fi] : -1;
+      if (ci < 0 || ci >= static_cast<int>(ps.colors.size())) continue;
+      const auto& face = local.indices[fi];
+      if (face.size() < 3) continue;
+      std::vector<Vector3d> poly;
+      poly.reserve(face.size());
+      bool ok = true;
+      for (const int idx : face) {
+        if (idx < 0 || idx >= static_cast<int>(local.vertices.size())) { ok = false; break; }
+        poly.push_back(local.vertices[idx]);
+      }
+      if (!ok) continue;
+      const Color4f& col = ps.colors[ci];
+      clipColorFace(poly, col.r(), col.g(), col.b(), col.a(), flip, recs);
+    }
+    std::sort(recs.begin(), recs.end(),
+              [](const SectionFaceRec& a, const SectionFaceRec& b) { return a.depth > b.depth; });
+    out.fills.reserve(recs.size());
+    for (auto& r : recs) out.fills.push_back(std::move(r.face));
+  }
+
   out.valid = !out.edges.empty();
 #else
   (void)ps; (void)worldFrame; (void)flip; (void)creaseAngleDeg; (void)hatchSpacingMm;
+  (void)wantColorFills;
 #endif
   return out;
 }

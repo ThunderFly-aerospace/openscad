@@ -722,3 +722,45 @@ kružnicí** + **velké písmeno**; zvětšenina zvlášť, nadepsaná „**Deta
   MainWindow zapíše `at=x,y` do `// @detail` řádku, resp. do/nový `// @section <name>
   at=x,y`. Commit `f7211e8b7`. Ověřeno headless: přetažení „Section A–A" do prázdného
   sloupce zapsalo `// @section A at=92.686,87.173` a dlaždici tam přesunulo.
+
+## Fáze 10 — labely (3D text callouty) + barevná výplň výkresů  ✅ HOTOVO (2026-07-11)
+
+Dvě funkce (rozhodnutí uživatele 2026-07-11):
+
+### 10A — Labely (3D text s vodicí čárou, ve výkresech i kamerách)
+- **Marker `label("A", "text")`** — nový neviditelný uzel (`src/core/LabelNode.{h,cc}`,
+  vzor `DimrefNode`): jméno + text, prochází transformacemi, prázdná grupa v
+  `NodeVisitor`, `collectLabels()`. Registrace `Builtins.cc` + CMake. `text` default =
+  jméno. Regrese `dump/echo-label-node`.
+- **Komentář `// @label A [proj=front|…|cam:<jméno>] [laboff=dx,dy] [text="…"] [leader=on|off]`**
+  — parsuje `resolveLabels()` (v `MainWindow.cc`, vzor `resolveDrawing`/`@dim`). `proj`
+  určuje, kde se label vypíše (prázdné = všechny ortho pohledy; `cam:<jméno>` = konkrétní
+  kamera); `laboff` = posun textu od promítnutého bodu (mm ve výkresu, px v kameře; dx=vpravo,
+  dy=nahoru). Mezi textem a bodem se kreslí **leader**. Duplicity jmen `A#i` jako dimref.
+- **Výkresy:** `OrthoLabel` v `OrthoViewData`; projekce v per-view loopu (gate `proj==key`),
+  kreslení v `DrawingSheetWidget::paintPlacement` (černý text + leader + tečka na kotvě) i ve
+  vektorovém exportu (SVG/PDF/DXF). Label markery = zelené klikací tečky (gate „Reference points").
+  **Plná parita s kótami:** tažení textu → `laboff=` zpět (`onLabelTextMoved`), pravý klik skok,
+  dvojklik editor (`onLabelDoubleClicked`, text/proj/leader/delete), klik na zelenou kotvu →
+  `// @label` (`onLabelAnchorClicked`).
+- **Kamery:** `CameraViewDock` přepsán z pasivního `QLabel` na `CameraImageView` (letterbox +
+  overlay + tažení). `MainWindow::refreshCameras` promítá labely `proj=cam:<jméno>` přes GL
+  matice snímku (`FboSnapshotView.modelview/projection`, MVP ručně) na pixely; kreslí text+leader,
+  „Save PNG" ukládá i s overlayem. **Plná parita vč. tvorby:** `label()` markery se promítají i
+  na snímek jako **zelené klikací tečky** (i bez `@label` řádku); klik → `// @label <jméno>
+  proj=cam:<jméno kamery>` (`onCameraLabelAnchorClicked`). Tažení/skok/editor přeposláno na tytéž
+  sloty (laboff v px). **Pozor:** kamera se jmenuje `camera(name="main")` (pojmenovaně), ne
+  pozičně — jinak je jméno prázdné a `proj=cam:main` nematchne.
+
+### 10B — Barevná výplň výkresů (živě v doku + SVG/PDF, hrany černé)
+- `projectViewFaces()` v `export_line_drawing.{h,cc}`: per-face barvy z `PolySet.color_indices`
+  /`colors`, řazeno painter's algoritmem (nejdál první), nebarevné plochy přeskočeny (zůstanou bílé).
+- Checkbox **„Fill colors"** v doku → `OrthoViewData.fills`, kreslení **pod** hrany (dok i
+  SVG/PDF export). DXF zůstává čárový. Unit test `[fill]` (řazení + přeskočení nebarevných).
+
+Ověřeno headless (Xvfb :99, screenshoty): labely v Front/Top s leadery + per-projekce gating,
+barevná výplň červená/zelená s černými hranami, label „top face" na snímku kamery `main`.
+Unit (190 assertions) + 56 deterministických regresí (vč. `label-node`) zelené.
+
+**Zbývá jako drobnost / možné rozšíření:** bug detekce viditelných hran (siluety) — samostatně,
+uživatel ho hledá.
