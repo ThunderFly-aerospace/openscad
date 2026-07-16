@@ -3827,6 +3827,23 @@ void MainWindow::setupDrawingDock()
 }
 
 namespace {
+// Canonical proj= token per standard view, indexed by the Drawing dock's view
+// index (0..5), matching DrawingViewDock's checkbox order.
+const char *const kProjKeys[6] = {"front", "back", "left", "right", "top", "bottom"};
+
+// Normalize a projection token (english or czech) to one of kProjKeys, or "".
+QString normalizeProj(const QString& raw)
+{
+  const QString p = raw.trimmed().toLower();
+  if (p == "front" || p == "narys" || p == "nárys") return "front";
+  if (p == "back" || p == "rear" || p == "zadni" || p == "zadní") return "back";
+  if (p == "left" || p == "levy" || p == "levý") return "left";
+  if (p == "right" || p == "side" || p == "bokorys" || p == "pravy" || p == "pravý") return "right";
+  if (p == "top" || p == "pudorys" || p == "půdorys") return "top";
+  if (p == "bottom" || p == "spodni" || p == "spodní") return "bottom";
+  return "";
+}
+
 // Replace or append a `key=value` token on one editor line (whole-word key).
 QString setLineToken(QString line, const QString& key, const QString& value)
 {
@@ -3900,9 +3917,22 @@ void MainWindow::onDimensionDoubleClicked(int id)
     form->addRow(tr("Kind"), kindBox);
   }
 
+  // Offer the views ticked in the Drawing dock: a dim can only show up in a view
+  // that is on the sheet. The dim's own proj stays in the list even when its view
+  // is unticked, so opening and OK-ing this dialog never silently retargets it.
+  // The proj= token is the item data, since the display text may be decorated.
   auto *projBox = new QComboBox(&dialog);
-  projBox->addItems({tr("(all)"), "front", "side", "top"});
-  projBox->setCurrentText(curProj.isEmpty() ? tr("(all)") : curProj);
+  projBox->addItem(tr("(all)"), QString());
+  const QString curProjKey = normalizeProj(curProj);
+  for (int i = 0; i < 6; ++i) {
+    const QString key = QString::fromLatin1(kProjKeys[i]);
+    if (this->drawingDock->isViewSelected(i)) projBox->addItem(key, key);
+    else if (key == curProjKey) projBox->addItem(tr("%1 (view not shown)").arg(key), key);
+  }
+  projBox->setCurrentIndex(std::max(0, projBox->findData(curProjKey)));
+  projBox->setToolTip(tr("Which ortho view shows this dimension; "
+                         "(all) = every view. Only the views ticked in the "
+                         "Drawing dock are listed."));
   form->addRow(tr("Projection"), projBox);
 
   // Measure mode: how the length is taken relative to the projection plane.
@@ -3956,9 +3986,8 @@ void MainWindow::onDimensionDoubleClicked(int id)
   else line.remove(QRegularExpression(R"(\s*\bleader=\S+)"));
 
   line.remove(QRegularExpression(R"(\s*\bproj=\S+)"));
-  if (projBox->currentIndex() > 0) {
-    line += " proj=" + projBox->currentText();
-  }
+  const QString projVal = projBox->currentData().toString();
+  if (!projVal.isEmpty()) line += " proj=" + projVal;
 
   line.remove(QRegularExpression(R"(\s*\bmeasure=\S+)"));
   if (measureBox->currentText() != "direct") {
@@ -3978,7 +4007,6 @@ void MainWindow::onDimensionDoubleClicked(int id)
 void MainWindow::onDetailRequested(int viewIndex, double cx, double cy, double r)
 {
   if (!activeEditor || viewIndex < 0 || viewIndex > 5) return;
-  static const char *const keys[6] = {"front", "back", "left", "right", "top", "bottom"};
   const QString text = activeEditor->toPlainText();
 
   // Pick the next unused single-letter detail name (A, B, C, …).
@@ -3994,7 +4022,7 @@ void MainWindow::onDetailRequested(int viewIndex, double cx, double cy, double r
 
   // scale=2 (2:1) is a sensible default enlargement; the user edits it afterwards.
   const QString line = QString("// @detail %1 parent=%2 cx=%3 cy=%4 r=%5 scale=2")
-                         .arg(name, keys[viewIndex])
+                         .arg(name, kProjKeys[viewIndex])
                          .arg(cx, 0, 'g', 4).arg(cy, 0, 'g', 4).arg(r, 0, 'g', 4);
   const QStringList lines = text.split('\n');
   activeEditor->setCursorPosition(lines.size() - 1, lines.isEmpty() ? 0 : lines.last().length());
@@ -4151,8 +4179,7 @@ void MainWindow::onLabelOffsetChanged(int viewIndex, int id, double alongPx, dou
 void MainWindow::onLabelAnchorClicked(int viewIndex, const QString& name)
 {
   if (name.isEmpty() || !activeEditor) return;
-  static const char *const keys[6] = {"front", "back", "left", "right", "top", "bottom"};
-  const QString proj = keys[std::clamp(viewIndex, 0, 5)];
+  const QString proj = kProjKeys[std::clamp(viewIndex, 0, 5)];
   const QString labLine = QString("// @label %1 proj=%2").arg(name, proj);
 
   const QStringList lines = activeEditor->toPlainText().split('\n');
@@ -4364,8 +4391,7 @@ void MainWindow::onDrawingAnchorClicked(int viewIndex, const QString& name)
 {
   if (name.isEmpty() || !activeEditor) return;
 
-  static const char *const keys[6] = {"front", "back", "left", "right", "top", "bottom"};
-  const QString proj = keys[std::clamp(viewIndex, 0, 5)];
+  const QString proj = kProjKeys[std::clamp(viewIndex, 0, 5)];
 
   // Append a // @dim line at the end of the document (the "list of pairs") and
   // reproject: an @dim line is a comment, so the geometry (and dimref world
@@ -4439,19 +4465,6 @@ struct ResolvedDim {
   int sourceLine{-1};   // 0-based editor line of the // @dim (for write-back)
   int jumpLine{-1};     // 0-based line for right-click jump (kvota= -> its dimref)
 };
-
-// Normalize a projection token (english or czech) to front|side|top, or "".
-QString normalizeProj(const QString& raw)
-{
-  const QString p = raw.trimmed().toLower();
-  if (p == "front" || p == "narys" || p == "nárys") return "front";
-  if (p == "back" || p == "rear" || p == "zadni" || p == "zadní") return "back";
-  if (p == "left" || p == "levy" || p == "levý") return "left";
-  if (p == "right" || p == "side" || p == "bokorys" || p == "pravy" || p == "pravý") return "right";
-  if (p == "top" || p == "pudorys" || p == "půdorys") return "top";
-  if (p == "bottom" || p == "spodni" || p == "spodní") return "bottom";
-  return "";
-}
 
 // World axis indices that map to the horizontal / vertical screen directions of
 // an ortho view: front h=X v=Z, top h=X v=Y, side h=Y v=Z (see refreshDrawingViews
