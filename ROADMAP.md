@@ -764,3 +764,164 @@ Unit (190 assertions) + 56 deterministických regresí (vč. `label-node`) zelen
 
 **Zbývá jako drobnost / možné rozšíření:** bug detekce viditelných hran (siluety) — samostatně,
 uživatel ho hledá.
+
+## Fáze 11 — použitelnost doku Drawing: uvolnit kóty + výkon nad velkými meshi  ✅ 11A–C HOTOVO (2026-07-20)
+
+Motivace (uživatel, 2026-07-20): nad dvěma naimportovanými STL plošného spoje je dok
+Drawing „hodně zamrzlý", a popisky kót se odmítají posunout mimo viditelnou plochu doku.
+
+### 11A — zrušit clamp popisek na viewport  ✅
+**Bug.** `DrawingSheetWidget::paintPlacement` napevno vtlačí box popisky do obdélníku
+widgetu: `DrawingViewDock.cc:373-375` (lambda `drawLabel`, lineární i radiální kóty) a
+`DrawingViewDock.cc:508-510` (úhlové kóty):
+```cpp
+const double bx = std::clamp(box.x(), 1.0, width()  - box.width()  - 1.0);
+const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
+```
+Pozůstatek z éry per-view `OrthoViewWidget`ů (každý pohled vlastní widget, bez zoom/pan),
+kde clamp držel popisku viditelnou. Na jednom canvasu Fáze 7 to znamená, že se popisky při
+panu/zoomu **lepí na okraj doku** místo aby odjely s výkresem. Vedlejší efekt: tažení popisky
+k okraji se vizuálně zastaví, ale do zdroje se zapíše nezclampované `labAlongPx/labPerpPx`
+→ po refreshi „poskočí". Vektorový export clamp nemá → dok je dnes ne-WYSIWYG.
+
+**Oprava:** clamp na obou místech odstranit. Malý nezávislý zásah, dělá se první.
+
+### 11B — cache projekce (největší výkonová výhra)  ✅
+**Diagnóza.** Každá editace kóty/labelu/dlaždice zapíše zdroj a zavolá
+`refreshDrawingViews()` (`MainWindow.cc:4003, 4033, 4074, 4191, 4339, 4359, 4406`), která
+v `MainWindow.cc:5249` volá `projectViewEdges()` **znovu pro každou dlaždici**. Ta
+(`export_line_drawing.cc:311`) je nejdražší článek celého řetězce:
+`FeatureEdges::select` přes všechny facy + postavení `DepthBuffer` (rasterizace celého
+meshe) + HLR vzorkování **až 400 vzorků na hranu**. Pro 6 pohledů + řezy + detaily nad
+PCB meshem to jsou vteřiny — a spustí se to při **puštění myši po každém posunu kóty**.
+
+Komentář na `MainWindow.cc:5136-5139` tvrdí, že opakované refreshe jsou levné, protože
+`GeometryEvaluator` hitne cache. To platí pro **mesh**, ale **ne pro projekci** — ta dnes
+žádnou cache nemá.
+
+**Návrh:** cache `projectViewEdges`/`projectViewFaces`/`projectSection` klíčovaná na
+(identita geometrie, směr pohledu, `scale`, fill flag, crease angle) → `edges/hatch/fills`.
+Změna `// @dim` / `// @label` / posun dlaždice geometrii nemění → cache hit → editace kót
+je **okamžitá nezávisle na velikosti meshe**. Odhad: ~80 % vnímaného zamrznutí.
+
+### 11C — levné výhry v paintu  ✅
+Nezávislé na 11B, lokální změny v `paintPlacement`:
+- `painter.drawLines(QVector<QLineF>)` v jedné dávce místo N volání `drawLine` na hranu.
+- Mapování nechat na `painter.setTransform()` místo dvou `QPointF` transformací na hranu.
+- Cull hran mimo viditelný obdélník (při zoomu je většina hran mimo plátno).
+- Vypnout antialiasing po dobu tažení / panu.
+
+### 11D — vrstvení + pixmap cache  ⬜ rozhodne se později
+Návrh uživatele: statická vrstva (fills/hatch/edges/section lines) do `QPixmap`,
+invalidovaná jen při změně geometrie / zoomu / velikosti widgetu; kóty a labely se kreslí
+živě nad ni. Přidání/editace kóty pak překresluje jen tenkou vrstvu.
+
+Upřesnění k návrhu:
+- **Pan nepotřebuje re-render vůbec** — nemění měřítko, je to čistý blit s offsetem.
+- **Zoom** — okamžitě škálovaný (rozmazaný) blit + přerender, jak uživatel navrhl. Ale
+  přerender **ne ve vlákně**: `QPainter` nad `QPixmap` není thread-safe a `places` by
+  chtěla zámek. Stačí odložit přerender `QTimer`em ~150 ms po ustání kolečka — vizuálně
+  týž efekt, o řád méně rizika.
+
+**Rozhodnutí odloženo:** 11D sáhne i do `paintPlacement` a hit-testu, takže je to
+podstatně větší zásah než 11A–C. Nejdřív udělat 11A–C a **změřit**; je dost možné, že
+vrstvení pak nebude potřeba. Rozhodnout až podle naměřeného stavu.
+
+### Pořadí
+11A (clamp) → 11B (cache projekce) → 11C (paint) → změřit → rozhodnout o 11D.
+
+### Stav implementace (2026-07-20)
+- **11A** — clamp odstraněn na **třech** místech, ne dvou: `drawLabel` (lineární +
+  radiální kóty), úhlové kóty, a **textové labely `// @label`** (ten se v původní
+  analýze přehlédl). Ověřeno headless: po panu listu kóty odjedou s pohledem místo
+  aby se zastavily na okraji doku.
+- **11B** — `MainWindow::DrawingProjCache`: `projectViewEdges` / `projectViewFaces`
+  per index pohledu, `projectSection` per (rovina, flip, hatch, fills). Klíč = objekt
+  geometrie, který si cache **drží přes `shared_ptr`**, takže se novému meshi nemůže
+  vrátit stará položka recyklovanou adresou. Řezy v `std::deque` (ne `vector`) —
+  `cachedSection` vydává reference dovnitř kontejneru a pozdější vklad je nesmí
+  invalidovat.
+- **11C** — hrany/šrafy/výplně jdou přes `QTransform` dlaždice + dávkové `drawLines`
+  (žádné mapování po úsečkách, u plně viditelné dlaždice **nulová kopie**); cosmetic
+  pen drží tloušťky v device px; culling na viditelný obdélník jen když je dlaždice
+  částečně mimo; antialiasing vypnutý po dobu tažení (a `update()` po puštění, aby
+  se poslední snímek dokreslil vyhlazeně).
+
+## Fáze 12 — kóty a labely v řezech (+ chybějící data v detailech)  ✅ HOTOVO (2026-07-20)
+
+Dnes **řezová dlaždice kóty nepodporuje**. Kóty se počítají jen ve smyčce přes 6
+standardních pohledů, gated na `proj == key`; `normalizeProj` (`MainWindow.cc:3835`,
+použité při parsování `// @dim … proj=` na `4745`) rozeznává jen
+`front/back/left/right/top/bottom`. Řezy se staví v samostatné smyčce
+(`MainWindow.cc:5412-5446`), která plní jen `fills/edges/hatch/title` — `vd.dims`,
+`vd.anchors` ani `vd.labels` se tam nikdy nenaplní. Napsat `proj=sectionA` proto dnes
+nic nechytí.
+
+### Rozhodnutí (2026-07-20)
+
+**Řezy zůstávají obecné (libovolná rovina), NEomezujeme je na směry os.** Zvažováno a
+zamítnuto, protože:
+- Obecnost není volba, kterou lze vzít zpět: `section()` nemá parametr orientace
+  (`SectionNode.cc:49` bere jen `name`, `flip`, `hatch`) — rovina vzniká **výhradně
+  z akumulované transformace rodičů** (`rotate([0,45,0]) … section("A")`), stejně jako
+  u `camera()` a `dimref()`. „Omezit na osy" by znamenalo aktivně detekovat neosovou
+  world matici a hlásit chybu / snapovat = práce navíc, ne ušetřená, plus breaking change.
+- Nic by to nezjednodušilo: `projectSection` už si lokální rám počítá
+  (`export_line_drawing.cc:461`, `const Transform3d L = worldFrame.inverse()`), takže
+  projekce kotvy je `L * anchorPos` → vezmi `(x, y)`. Osově zarovnaná varianta by ušetřila
+  jeden řádek.
+- Šikmý řez sestavou je jeden z hlavních důvodů, proč řezy mít.
+
+**Kotvy mimo rovinu řezu = kolmý průmět do roviny.** Žádné nové pravidlo — je to přesně
+to, co dělají ortho pohledy dnes: `MainWindow.cc:4476-4477` vybere `hAxis`/`vAxis` a
+třetí souřadnici zahodí, což je kolmý průmět do roviny pohledu. U řezu je směr pohledu
+totožný s normálou roviny, takže „zahodit z v lokálním rámu `L`" je tatáž operace.
+
+**Otevřené k rozhodnutí při implementaci:** kotva ležící v **odříznuté** polovině se
+kolmým průmětem taky promítne do dlaždice → kóta na prvek, který v řezu není vidět.
+V ortho pohledu tenhle případ nenastává (model je celý). Varianty: (a) nechat být —
+konzistentní s tím, že kotvy se promítají i na zakryté prvky; (b) varovat; (c) skrýt.
+Přiklonit se pravděpodobně k (a).
+
+### Práce
+1. **`normalizeProj` rozšířit o `section<jméno>`** — precedens existuje, `// @detail
+   parent=` to už umí (lookup přes `sectionKey`, `MainWindow.cc:5488-5491`).
+2. **Projekce kotev/kót/labelů do rámu řezu** v section smyčce (`MainWindow.cc:5412`):
+   `L * anchorPos` → `(x, y)` → `toLocal()` (tentýž posun `minSx/maxSy`, co už používají
+   hrany na ř. 5424), plus `flip` handling. Naplnit `vd.dims`, `vd.anchors`, `vd.labels`.
+3. **Interakce zdarma:** dlaždice řezu už jde přes týž `placementAt()` hit-test a signály
+   nesou `viewIndex` — tažení/skok/editor by měly fungovat bez dalšího zásahu, jakmile
+   jsou data v `vd`.
+
+### Stav implementace (2026-07-20)
+Ověřeno headless (Xvfb :99): řez „Section A–A" ukazuje kótu `// @dim L R
+proj=sectionA measure=h` (=60) i label `proj=sectionA`, nescopovaná kóta zůstala jen
+ve standardních pohledech; tažení kóty v řezu zapsalo `offset=21.56` zpět do zdroje;
+dvojklik otevřel editor s **Projection = sectiona**; barevná výplň v řezu funguje.
+
+Nad rámec původního plánu bylo nutné dodělat:
+- **`fillAnnotations(vd, key, takeUnscoped, proj)`** — projekce kotev/labelů/kót
+  vytažena ze smyčky standardních pohledů do sdílené lambdy. `takeUnscoped` rozlišuje,
+  co znamená chybějící `proj=`: pro 6 standardních pohledů „všechny" (dokumentované
+  chování), pro řezy **ne** — jinak by každá nescopovaná kóta spadla i do každého řezu.
+- **`OrthoViewData.annotated` + `projKey`** — hit-test (`hitDim`/`hitLabel`/kotvy) byl
+  gated na `viewIndex >= 0`, takže by kóty v řezu šly vykreslit, ale ne chytit. Nově
+  gate na `annotated`, což drží dlaždice **detailu** dál jako jen zobrazovací.
+- **Signály `anchorClicked` / `labelAnchorClicked` / `detailRequested` nesou `projKey`
+  místo `viewIndex`.** Bez toho by klik na kotvu v řezu vyrobil kótu s `proj=front`
+  (viewIndex −1 → `clamp(…,0,5)` → 0), což je horší než nic. Vedlejší zisk: detail lze
+  teď nakreslit i nad řezem (`parent=section<jméno>`).
+- **Dropdown projekcí v editoru kót** doplněn o řezy modelu + fallback „(not on the
+  sheet)" pro `proj=`, který na listu není.
+
+### Vedlejší bug (Fáze 10B), opravit spolu s tím
+Dlaždice **detailu** (`MainWindow.cc:5481-5508`) přebírá z rodiče jen `edges` a `hatch` →
+detail nemá ani kóty, ani **barevnou výplň**, i když ji rodič má. `fills` se neořezávají
+`clipToCircle` (jsou to polygony, ne úsečky — chce Sutherland-Hodgman na kruh, nebo
+clip přes `QPainterPath`).
+
+**Opraveno 2026-07-20:** výplně rodiče se ořezávají `QPainterPath::intersected()` s
+kružnicí detailu (kružnice se aproximuje polygonem, přesný ořez by znamenal křivé
+hrany) a kreslí se ve stejném painter's pořadí jako u rodiče. Kóty se do detailu
+**nedědí** — dlaždice detailu zůstává zobrazovací (`annotated=false`); kótovat detail
+zvlášť je samostatné rozhodnutí, ne bugfix.

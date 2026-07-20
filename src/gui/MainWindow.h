@@ -27,6 +27,8 @@
 #include <QUrl>
 #include <QWidget>
 #include <ctime>
+#include <deque>
+#include <map>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -38,6 +40,7 @@
 #include "core/SourceFile.h"
 #include "glview/Camera.h"
 #include "glview/Renderer.h"
+#include "io/export_line_drawing.h"
 #ifdef STATIC_QT_SVG_PLUGIN
 #include <QtPlugin>
 Q_IMPORT_PLUGIN(QSvgPlugin)
@@ -169,7 +172,7 @@ private:
   // camera dock (only when it is visible). Called after each preview.
   void refreshCameras();
   void refreshDrawingViews();
-  void onDrawingAnchorClicked(int viewIndex, const QString& name);
+  void onDrawingAnchorClicked(const QString& projKey, const QString& name);
   // "diameter"/"radius" if the anchor ref resolves to a dimref carrying d=/r=.
   QString radialKindOfAnchor(const QString& ref) const;
   void onDimensionOffsetChanged(int viewIndex, int id, double offsetPx, bool finished);
@@ -177,7 +180,7 @@ private:
   void onLabelOffsetChanged(int viewIndex, int id, double alongPx, double perpPx, bool finished);
   void onDimensionDoubleClicked(int id);
   // Label (// @label) interaction: create from a marker click, drag its text, edit.
-  void onLabelAnchorClicked(int viewIndex, const QString& name);
+  void onLabelAnchorClicked(const QString& projKey, const QString& name);
   void onCameraLabelAnchorClicked(int cameraIndex, const QString& cameraName, const QString& name);
   // Give the cameraIndex-th camera() a name= in the source (a // @label targets a
   // camera by name); returns the name, or empty if the call could not be edited.
@@ -186,7 +189,7 @@ private:
   void onLabelDoubleClicked(int id);
   void onMaterializeKvotas();
   // A detail circle was drawn over a standard view: append a // @detail line.
-  void onDetailRequested(int viewIndex, double cx, double cy, double r);
+  void onDetailRequested(const QString& projKey, double cx, double cy, double r);
   // A section / detail tile was dragged to free space: write its at=x,y back.
   void onTilePlaced(const QString& placeKey, double x, double y);
 
@@ -195,6 +198,32 @@ private:
   QString pendingDimAnchor;
   // Pixels per model unit (mm) in each ortho view, for offset px<->mm mapping.
   double viewPxPerMm[6]{1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
+
+  // Cache of the expensive drawing projections (hidden-line removal over the whole
+  // mesh). Editing a // @dim or // @label comment re-runs refreshDrawingViews but
+  // does not change the geometry, so without this every dimension drag reprojected
+  // every tile — seconds on a large imported mesh. Keyed on the geometry object:
+  // `geom` both identifies the entry and keeps that object alive, so a later
+  // geometry can never be handed back a stale entry by reusing its address.
+  struct DrawingProjCache {
+    std::shared_ptr<const Geometry> geom;               // cache key + keep-alive
+    std::map<int, std::vector<LineDrawingSeg2D>> edges;  // standard view index -> edges
+    std::map<int, std::vector<LineDrawingFace2D>> faces; // standard view index -> fills
+    // Sections are keyed on their own parameters too: moving a section() marker
+    // changes the cutting plane without necessarily changing the geometry.
+    struct SectionEntry {
+      Transform3d world;
+      bool flip{false};
+      double hatchMm{-1.0};
+      bool fills{false};
+      SectionDrawing result;
+    };
+    // deque, not vector: cachedSection() hands out references into this container
+    // and later inserts must not invalidate them.
+    std::deque<SectionEntry> sections;
+    void clear() { edges.clear(); faces.clear(); sections.clear(); }
+  };
+  DrawingProjCache drawingProjCache;
 
 protected:
   void closeEvent(QCloseEvent *event) override;

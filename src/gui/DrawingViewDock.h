@@ -150,6 +150,15 @@ struct OrthoViewData {
   QString placeKey;
   bool hasAt{false};
   QPointF atMm;
+  // This tile carries its own resolved dimensions / labels (standard views and
+  // named section tiles), so they are interactive here: draggable, right-click to
+  // jump, double-click to edit. False for detail tiles, whose geometry is a clipped
+  // copy of a parent — dragging a dimension there would be ambiguous.
+  bool annotated{false};
+  // The proj= token that targets this tile ("front".."bottom", "section<name>").
+  // Emitted when an anchor here is clicked, so a new // @dim or // @label lands on
+  // the tile the user actually clicked in. Empty for tiles that cannot be targeted.
+  QString projKey;
   // Drawing scale (drawing-mm per model-mm). Geometry is drawn in model-mm; text
   // and line weights are absolute drawing-mm, so their size relative to the
   // geometry reflects the scale (1:2 -> text twice as large relative to the part).
@@ -199,10 +208,10 @@ public:
   bool hasContent() const { return !this->places.isEmpty(); }
 
 signals:
-  void anchorClicked(int viewIndex, const QString& name);
+  void anchorClicked(const QString& projKey, const QString& name);
   // Emitted when a label() marker dot is clicked (to create a // @label): the hit
   // view index and the marker's reference name.
-  void labelAnchorClicked(int viewIndex, const QString& name);
+  void labelAnchorClicked(const QString& projKey, const QString& name);
   // Emitted while dragging a // @label text (its offset from the anchor in the
   // view's local model-mm, y-down) and once more on release.
   void labelTextMoved(int viewIndex, int id, double dxMm, double dyMm, bool finished);
@@ -210,7 +219,7 @@ signals:
   void labelDoubleClicked(int id);
   // Emitted when a detail circle is drawn over standard view `viewIndex`: centre and
   // radius in that view's view-local model-mm.
-  void detailRequested(int viewIndex, double cx, double cy, double r);
+  void detailRequested(const QString& projKey, double cx, double cy, double r);
   // Emitted when the detail rubber-band gesture ends (so the owner can untick the
   // toolbar button), regardless of whether a detail was created.
   void detailModeFinished();
@@ -262,6 +271,17 @@ private:
   // Find the // @label text box under a widget point across all standard views.
   bool hitLabel(const QPointF& widgetPt, int& place, int& label) const;
   void paintPlacement(QPainter& painter, const PlacedView& pl);
+  // View-local model-mm -> widget px as an affine QTransform, so the geometry
+  // (edges / hatch / fills) can be handed to QPainter unmapped and in one batch
+  // instead of transforming every endpoint here. Same mapping as mapToWidget().
+  QTransform tileTransform(const PlacedView& pl) const;
+  // True while a drag / pan is in flight: antialiasing is dropped for those frames,
+  // which matters on large imported meshes where a tile is tens of thousands of edges.
+  bool interacting() const
+  {
+    return this->panning || this->tileDrag >= 0 || this->draggingDim >= 0 ||
+           this->draggingLabel >= 0 || this->draggingText >= 0;
+  }
 
   QVector<PlacedView> places;
   double sheetWmm{0.0}, sheetHmm{0.0};
@@ -321,9 +341,9 @@ public:
 
 signals:
   // Emitted when an anchor is clicked in one of the views (view index + name).
-  void anchorClicked(int viewIndex, const QString& name);
+  void anchorClicked(const QString& projKey, const QString& name);
   // Emitted when a label() marker dot is clicked to create a // @label line.
-  void labelAnchorClicked(int viewIndex, const QString& name);
+  void labelAnchorClicked(const QString& projKey, const QString& name);
   // Emitted while dragging a // @label text (offset from anchor, view-local mm).
   void labelTextMoved(int viewIndex, int id, double dxMm, double dyMm, bool finished);
   // Emitted on double-click of a // @label text (its source line) to open its editor.
@@ -348,7 +368,7 @@ signals:
   void viewSelectionChanged();
   // Emitted when a detail circle is drawn over standard view `viewIndex`: centre and
   // radius in that view's view-local model-mm. The owner writes a // @detail line.
-  void detailRequested(int viewIndex, double cx, double cy, double r);
+  void detailRequested(const QString& projKey, double cx, double cy, double r);
   // Emitted when a movable (section / detail) tile is dropped: its placeKey
   // ("section:A" / "detail:<line>") and new sheet-mm origin. The owner writes at=.
   void tilePlaced(const QString& placeKey, double x, double y);

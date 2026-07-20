@@ -56,6 +56,7 @@
 #include <QMetaObject>
 #include <QMimeData>
 #include <QMutexLocker>
+#include <QPainterPath>
 #include <QPoint>
 #include <QProcess>
 #include <QProgressDialog>
@@ -3835,6 +3836,9 @@ const char *const kProjKeys[6] = {"front", "back", "left", "right", "top", "bott
 QString normalizeProj(const QString& raw)
 {
   const QString p = raw.trimmed().toLower();
+  // A section tile: "section<name>", the same key // @detail parent= already uses.
+  // Passed through verbatim (lowercased); the section loop matches on it.
+  if (p.startsWith("section") && p.size() > 7) return p;
   if (p == "front" || p == "narys" || p == "nárys") return "front";
   if (p == "back" || p == "rear" || p == "zadni" || p == "zadní") return "back";
   if (p == "left" || p == "levy" || p == "levý") return "left";
@@ -3929,10 +3933,22 @@ void MainWindow::onDimensionDoubleClicked(int id)
     if (this->drawingDock->isViewSelected(i)) projBox->addItem(key, key);
     else if (key == curProjKey) projBox->addItem(tr("%1 (view not shown)").arg(key), key);
   }
+  // Section tiles can be targeted too (proj=section<name>); they are always on the
+  // sheet when the model defines them, so there is no "not shown" case.
+  if (this->rootNode) {
+    for (const auto& info : collectSections(this->rootNode)) {
+      if (!info.node || info.node->section_name.empty()) continue;
+      const QString key =
+        "section" + QString::fromStdString(info.node->section_name).toLower();
+      if (projBox->findData(key) < 0) projBox->addItem(key, key);
+    }
+  }
+  if (!curProjKey.isEmpty() && projBox->findData(curProjKey) < 0)
+    projBox->addItem(tr("%1 (not on the sheet)").arg(curProjKey), curProjKey);
   projBox->setCurrentIndex(std::max(0, projBox->findData(curProjKey)));
-  projBox->setToolTip(tr("Which ortho view shows this dimension; "
-                         "(all) = every view. Only the views ticked in the "
-                         "Drawing dock are listed."));
+  projBox->setToolTip(tr("Which view or section shows this dimension; "
+                         "(all) = every ortho view. Only the views ticked in the "
+                         "Drawing dock, plus the model's sections, are listed."));
   form->addRow(tr("Projection"), projBox);
 
   // Measure mode: how the length is taken relative to the projection plane.
@@ -4004,9 +4020,9 @@ void MainWindow::onDimensionDoubleClicked(int id)
   this->statusBar()->showMessage(tr("Dimension updated."), 3000);
 }
 
-void MainWindow::onDetailRequested(int viewIndex, double cx, double cy, double r)
+void MainWindow::onDetailRequested(const QString& projKey, double cx, double cy, double r)
 {
-  if (!activeEditor || viewIndex < 0 || viewIndex > 5) return;
+  if (!activeEditor || projKey.isEmpty()) return;
   const QString text = activeEditor->toPlainText();
 
   // Pick the next unused single-letter detail name (A, B, C, …).
@@ -4022,7 +4038,7 @@ void MainWindow::onDetailRequested(int viewIndex, double cx, double cy, double r
 
   // scale=2 (2:1) is a sensible default enlargement; the user edits it afterwards.
   const QString line = QString("// @detail %1 parent=%2 cx=%3 cy=%4 r=%5 scale=2")
-                         .arg(name, kProjKeys[viewIndex])
+                         .arg(name, projKey)  // "front".."bottom" or "section<name>"
                          .arg(cx, 0, 'g', 4).arg(cy, 0, 'g', 4).arg(r, 0, 'g', 4);
   const QStringList lines = text.split('\n');
   activeEditor->setCursorPosition(lines.size() - 1, lines.isEmpty() ? 0 : lines.last().length());
@@ -4176,10 +4192,10 @@ void MainWindow::onLabelOffsetChanged(int viewIndex, int id, double alongPx, dou
   activeEditor->setPlainText(lines.join('\n'));
 }
 
-void MainWindow::onLabelAnchorClicked(int viewIndex, const QString& name)
+void MainWindow::onLabelAnchorClicked(const QString& projKey, const QString& name)
 {
-  if (name.isEmpty() || !activeEditor) return;
-  const QString proj = kProjKeys[std::clamp(viewIndex, 0, 5)];
+  if (name.isEmpty() || projKey.isEmpty() || !activeEditor) return;
+  const QString proj = projKey;  // "front".."bottom" or "section<name>"
   const QString labLine = QString("// @label %1 proj=%2").arg(name, proj);
 
   const QStringList lines = activeEditor->toPlainText().split('\n');
@@ -4387,11 +4403,11 @@ QString MainWindow::radialKindOfAnchor(const QString& ref) const
   return {};
 }
 
-void MainWindow::onDrawingAnchorClicked(int viewIndex, const QString& name)
+void MainWindow::onDrawingAnchorClicked(const QString& projKey, const QString& name)
 {
-  if (name.isEmpty() || !activeEditor) return;
+  if (name.isEmpty() || projKey.isEmpty() || !activeEditor) return;
 
-  const QString proj = kProjKeys[std::clamp(viewIndex, 0, 5)];
+  const QString proj = projKey;  // "front".."bottom" or "section<name>" 
 
   // Append a // @dim line at the end of the document (the "list of pairs") and
   // reproject: an @dim line is a comment, so the geometry (and dimref world
@@ -5156,6 +5172,45 @@ void MainWindow::refreshDrawingViews()
     return;
   }
 
+  // Drop the projection cache when the geometry object changed; otherwise every
+  // project*() below is a lookup. This is what makes editing a dimension cheap:
+  // the comment changed, the mesh did not (see DrawingProjCache in MainWindow.h).
+  if (this->drawingProjCache.geom != geom) {
+    this->drawingProjCache.clear();
+    this->drawingProjCache.geom = geom;
+  }
+  auto cachedEdges = [this, &ps](int vi, const LineDrawingView& v)
+    -> const std::vector<LineDrawingSeg2D>& {
+    auto it = this->drawingProjCache.edges.find(vi);
+    if (it == this->drawingProjCache.edges.end())
+      it = this->drawingProjCache.edges.emplace(vi, projectViewEdges(*ps, v, 20.0)).first;
+    return it->second;
+  };
+  auto cachedFaces = [this, &ps](int vi, const LineDrawingView& v)
+    -> const std::vector<LineDrawingFace2D>& {
+    auto it = this->drawingProjCache.faces.find(vi);
+    if (it == this->drawingProjCache.faces.end())
+      it = this->drawingProjCache.faces.emplace(vi, projectViewFaces(*ps, v)).first;
+    return it->second;
+  };
+  // Sections are few, so a linear scan over their full parameter set is cheaper
+  // (and simpler) than hashing a 4x4 matrix.
+  auto cachedSection = [this, &ps](const Transform3d& world, bool flip, double hatchMm,
+                                   bool fills) -> const SectionDrawing& {
+    for (const auto& e : this->drawingProjCache.sections)
+      if (e.flip == flip && e.fills == fills && e.hatchMm == hatchMm &&
+          e.world.matrix().isApprox(world.matrix()))
+        return e.result;
+    DrawingProjCache::SectionEntry e;
+    e.world = world;
+    e.flip = flip;
+    e.hatchMm = hatchMm;
+    e.fills = fills;
+    e.result = projectSection(*ps, world, flip, 20.0, hatchMm, fills);
+    this->drawingProjCache.sections.push_back(std::move(e));
+    return this->drawingProjCache.sections.back().result;
+  };
+
   // 4. Project the mesh's feature edges + the dimensions into each ortho view.
   // Coordinates handed to the dock are view-local model-mm, y-down (origin at the
   // view's bounding-box top-left) — the same convention the old raster overlay
@@ -5234,6 +5289,104 @@ void MainWindow::refreshDrawingViews()
                        QString::fromStdString(info.node->section_name)});
   }
 
+  // Project the resolved anchors / labels / dimensions into one tile. Shared by
+  // the six standard views and (Phase 12) the section tiles, so a // @dim or
+  // // @label targeting proj=section<name> behaves exactly as in a standard view.
+  // `proj` maps a world point to that tile's view-local mm (y-down); for a section
+  // that mapping drops the component along the plane normal, i.e. it projects the
+  // anchor perpendicularly onto the cutting plane — the same thing a standard view
+  // does when it drops the depth axis.
+  // `takeUnscoped` decides what an annotation with no proj= means for this tile:
+  // true for the six standard views (documented as "empty proj = all ortho views"),
+  // false for section tiles — otherwise every unscoped dimension would also pile
+  // onto every section, which is not what "all views" has ever meant.
+  auto fillAnnotations = [&](OrthoViewData& vd, const QString& key, bool takeUnscoped,
+                             auto&& proj) {
+    vd.projKey = key;
+    vd.annotated = true;
+    for (const auto& rec : anchorRecs)
+      vd.anchors.append({proj(rec.pos), rec.label, rec.ref, rec.sourceLine});
+
+    // Label markers as clickable dots (for the "new label" gesture).
+    for (const auto& rec : labelAnchorRecs)
+      vd.labelAnchors.append({proj(rec.pos), rec.name, rec.ref, rec.sourceLine});
+
+    // Text callouts: draw those targeting this view (empty proj = all ortho
+    // views; cam:<name> targets never match an ortho key). laboff is in the
+    // view's screen frame (dx = right, dy = up); the overlay is y-down.
+    for (const auto& lb : labels) {
+      if (lb.proj.isEmpty() ? !takeUnscoped : lb.proj != key) continue;
+      OrthoLabel ol;
+      ol.anchor = proj(lb.anchor);
+      ol.text = lb.text;
+      ol.off = QPointF(lb.labDxMm, -lb.labDyMm);
+      ol.leader = lb.leader;
+      ol.id = lb.sourceLine;
+      vd.labels.append(ol);
+    }
+
+    for (const auto& rd : dims) {
+      if (rd.proj.isEmpty() ? !takeUnscoped : rd.proj != key) continue;
+      if (rd.kind == DimKind::Angle) {
+        const QPointF pv = proj(rd.c), pa = proj(rd.a), pb = proj(rd.b);
+        if (std::hypot((pa - pv).x(), (pa - pv).y()) < 0.1 ||
+            std::hypot((pb - pv).x(), (pb - pv).y()) < 0.1)
+          continue;
+        vd.angles.append({pv, pa, pb, rd.label});
+        continue;
+      }
+      if (rd.kind == DimKind::Diameter || rd.kind == DimKind::Radius) {
+        // Radial dim: through the feature centre at the source angle. a/b are
+        // the rim points (diameter) or centre + rim point (radius).
+        const QPointF pa = proj(rd.a), pb = proj(rd.b);
+        QPointF d = pb - pa;
+        const double dl = std::hypot(d.x(), d.y());
+        if (dl < 1e-6) continue;  // circle edge-on in this view
+        OrthoDimension od;
+        od.radial = true;
+        od.radiusHalf = (rd.kind == DimKind::Radius);
+        od.a = pa;
+        od.b = pb;
+        od.center = od.radiusHalf ? pa : (pa + pb) / 2.0;
+        od.dir = d / dl;
+        od.label = rd.label;
+        od.arrowsOut = rd.arrowsOut;
+        od.leader = rd.leader;
+        od.labAlongPx = rd.labAlongMm;
+        od.labPerpPx = rd.labPerpMm;
+        od.id = rd.sourceLine;
+        od.jumpLine = rd.sourceLine >= 0 ? rd.sourceLine : rd.jumpLine;
+        vd.dims.append(od);
+        continue;
+      }
+      const QPointF pa = proj(rd.a), pb = proj(rd.b);
+      // Measurement direction: for h/v the view's screen axis (screen-x is
+      // local +x, screen-up is local -y), else along the anchor line.
+      QPointF dir = pb - pa;
+      if (rd.measure == "h") dir = QPointF(1, 0);
+      else if (rd.measure == "v") dir = QPointF(0, -1);
+      const double dirLen = std::hypot(dir.x(), dir.y());
+      if (dirLen < 1e-9) continue;
+      dir /= dirLen;
+      // Skip dimensions that collapse to a dot in this view (edge-on).
+      const QPointF ab = pb - pa;
+      if (std::abs(ab.x() * dir.x() + ab.y() * dir.y()) < 0.05) continue;
+      OrthoDimension od;
+      od.a = pa;
+      od.b = pb;
+      od.dir = dir;
+      od.label = rd.label;
+      od.offsetPx = rd.offsetMm;  // model-mm (dock coordinate space)
+      od.arrowsOut = rd.arrowsOut;
+      od.leader = rd.leader;
+      od.labAlongPx = rd.labAlongMm;
+      od.labPerpPx = rd.labPerpMm;
+      od.id = rd.sourceLine;  // -1 for kvota= dims (not draggable)
+      od.jumpLine = rd.sourceLine >= 0 ? rd.sourceLine : rd.jumpLine;
+      vd.dims.append(od);
+    }
+  };
+
   QList<OrthoViewData> viewData;
   QStringList titles;
   for (int vi = 0; vi < static_cast<int>(views.size()); ++vi) {
@@ -5246,7 +5399,7 @@ void MainWindow::refreshDrawingViews()
 
     // Only project the views the dock currently shows (mesh stays cached).
     if (!this->drawingDock->isViewSelected(vi)) { viewData.append(vd); titles.append(vd.title); continue; }
-    const auto raw = projectViewEdges(*ps, view, 20.0);
+    const auto& raw = cachedEdges(vi, view);
     if (!raw.empty()) {
       double minSx = raw[0].x0, maxSx = raw[0].x0, minSy = raw[0].y0, maxSy = raw[0].y0;
       for (const auto& r : raw) {
@@ -5267,7 +5420,7 @@ void MainWindow::refreshDrawingViews()
         // Coloured face fills (behind the edges), only in fill mode. Painter's
         // order (far first) is preserved from projectViewFaces.
         if (fillColors) {
-          for (const auto& f : projectViewFaces(*ps, view)) {
+          for (const auto& f : cachedFaces(vi, view)) {
             OrthoFill of;
             for (const auto& [sx, sy] : f.pts) of.poly << toLocal(sx, sy);
             of.color = QColor::fromRgbF(f.r, f.g, f.b, f.a);
@@ -5275,87 +5428,7 @@ void MainWindow::refreshDrawingViews()
           }
         }
 
-        for (const auto& rec : anchorRecs)
-          vd.anchors.append({proj(rec.pos), rec.label, rec.ref, rec.sourceLine});
-
-        // Label markers as clickable dots (for the "new label" gesture).
-        for (const auto& rec : labelAnchorRecs)
-          vd.labelAnchors.append({proj(rec.pos), rec.name, rec.ref, rec.sourceLine});
-
-        // Text callouts: draw those targeting this view (empty proj = all ortho
-        // views; cam:<name> targets never match an ortho key). laboff is in the
-        // view's screen frame (dx = right, dy = up); the overlay is y-down.
-        for (const auto& lb : labels) {
-          if (!lb.proj.isEmpty() && lb.proj != key) continue;
-          OrthoLabel ol;
-          ol.anchor = proj(lb.anchor);
-          ol.text = lb.text;
-          ol.off = QPointF(lb.labDxMm, -lb.labDyMm);
-          ol.leader = lb.leader;
-          ol.id = lb.sourceLine;
-          vd.labels.append(ol);
-        }
-
-        for (const auto& rd : dims) {
-          if (!rd.proj.isEmpty() && rd.proj != key) continue;
-          if (rd.kind == DimKind::Angle) {
-            const QPointF pv = proj(rd.c), pa = proj(rd.a), pb = proj(rd.b);
-            if (std::hypot((pa - pv).x(), (pa - pv).y()) < 0.1 ||
-                std::hypot((pb - pv).x(), (pb - pv).y()) < 0.1)
-              continue;
-            vd.angles.append({pv, pa, pb, rd.label});
-            continue;
-          }
-          if (rd.kind == DimKind::Diameter || rd.kind == DimKind::Radius) {
-            // Radial dim: through the feature centre at the source angle. a/b are
-            // the rim points (diameter) or centre + rim point (radius).
-            const QPointF pa = proj(rd.a), pb = proj(rd.b);
-            QPointF d = pb - pa;
-            const double dl = std::hypot(d.x(), d.y());
-            if (dl < 1e-6) continue;  // circle edge-on in this view
-            OrthoDimension od;
-            od.radial = true;
-            od.radiusHalf = (rd.kind == DimKind::Radius);
-            od.a = pa;
-            od.b = pb;
-            od.center = od.radiusHalf ? pa : (pa + pb) / 2.0;
-            od.dir = d / dl;
-            od.label = rd.label;
-            od.arrowsOut = rd.arrowsOut;
-            od.leader = rd.leader;
-            od.labAlongPx = rd.labAlongMm;
-            od.labPerpPx = rd.labPerpMm;
-            od.id = rd.sourceLine;
-            od.jumpLine = rd.sourceLine >= 0 ? rd.sourceLine : rd.jumpLine;
-            vd.dims.append(od);
-            continue;
-          }
-          const QPointF pa = proj(rd.a), pb = proj(rd.b);
-          // Measurement direction: for h/v the view's screen axis (screen-x is
-          // local +x, screen-up is local -y), else along the anchor line.
-          QPointF dir = pb - pa;
-          if (rd.measure == "h") dir = QPointF(1, 0);
-          else if (rd.measure == "v") dir = QPointF(0, -1);
-          const double dirLen = std::hypot(dir.x(), dir.y());
-          if (dirLen < 1e-9) continue;
-          dir /= dirLen;
-          // Skip dimensions that collapse to a dot in this view (edge-on).
-          const QPointF ab = pb - pa;
-          if (std::abs(ab.x() * dir.x() + ab.y() * dir.y()) < 0.05) continue;
-          OrthoDimension od;
-          od.a = pa;
-          od.b = pb;
-          od.dir = dir;
-          od.label = rd.label;
-          od.offsetPx = rd.offsetMm;  // model-mm (dock coordinate space)
-          od.arrowsOut = rd.arrowsOut;
-          od.leader = rd.leader;
-          od.labAlongPx = rd.labAlongMm;
-          od.labPerpPx = rd.labPerpMm;
-          od.id = rd.sourceLine;  // -1 for kvota= dims (not draggable)
-          od.jumpLine = rd.sourceLine >= 0 ? rd.sourceLine : rd.jumpLine;
-          vd.dims.append(od);
-        }
+        fillAnnotations(vd, key, /*takeUnscoped=*/true, proj);
 
         // Cutting-plane lines: section markers seen edge-on in this view (their
         // normal lies in the view plane), drawn across the view with arrows + letter.
@@ -5412,8 +5485,8 @@ void MainWindow::refreshDrawingViews()
   for (const auto& info : sections) {
     if (!info.node) continue;
     const double hatchMm = info.node->hatch > 0 && scale > 1e-9 ? info.node->hatch / scale : -1.0;
-    const SectionDrawing sd =
-      projectSection(*ps, info.world, info.node->flip, 20.0, hatchMm, fillColors);
+    const SectionDrawing& sd =
+      cachedSection(info.world, info.node->flip, hatchMm, fillColors);
     if (!sd.valid) continue;
     double minSx = 1e30, maxSx = -1e30, minSy = 1e30, maxSy = -1e30;
     for (const auto& e : sd.edges) {
@@ -5436,6 +5509,18 @@ void MainWindow::refreshDrawingViews()
     const QString nm = QString::fromStdString(info.node->section_name);
     vd.title = nm.isEmpty() ? tr("Section") : tr("Section %1–%1").arg(nm);
     if (!nm.isEmpty()) {
+      // Dimensions / labels targeting proj=section<name>. projectSection views the
+      // cut along the frame's +Z with screen x=local X, y=local Y, so a world point
+      // maps through world.inverse() and drops the local z — the perpendicular
+      // projection onto the cutting plane. Anchors lying in the discarded half
+      // still project (they are simply not visible in the cut), matching how a
+      // standard view dimensions features hidden behind the surface.
+      const Transform3d L = info.world.inverse();
+      fillAnnotations(vd, "section" + nm.toLower(), /*takeUnscoped=*/false,
+                      [&](const Eigen::Vector3d& P) {
+        const Eigen::Vector3d q = L * P;
+        return toLocal(q.x(), q.y());
+      });
       sectionKey.insert("section" + nm.toLower(), sectionData.size());
       vd.movable = true;  // named sections can be dragged to free space (persist at=)
       vd.placeKey = "section:" + nm;
@@ -5501,6 +5586,29 @@ void MainWindow::refreshDrawingViews()
     if (ce.isEmpty() && ch.isEmpty()) continue;
     const QPointF corner(ds.cx - ds.r, ds.cy - ds.r);
     OrthoViewData dv;
+    // Colour fills of the parent, clipped to the same circle. Without this a detail
+    // over a filled view came out as bare line work (Phase 10B only filled the views
+    // and sections themselves). Clipping a filled polygon to a circle exactly would
+    // mean curved edges, so the circle is approximated by a polygon and the two are
+    // intersected — the result is filled through the same painter's order as the
+    // parent, since parent->fills is already sorted back-to-front.
+    if (!parent->fills.isEmpty()) {
+      QPainterPath circle;
+      circle.addEllipse(C, ds.r, ds.r);
+      for (const auto& f : parent->fills) {
+        if (!f.poly.boundingRect().intersects(circle.boundingRect())) continue;
+        QPainterPath fp;
+        fp.addPolygon(f.poly);
+        const QPainterPath clipped = fp.intersected(circle);
+        if (clipped.isEmpty()) continue;
+        for (const QPolygonF& sub : clipped.toSubpathPolygons()) {
+          OrthoFill of;
+          for (const QPointF& p : sub) of.poly << (p - corner);
+          of.color = f.color;
+          dv.fills.append(of);
+        }
+      }
+    }
     for (const auto& e : ce) dv.edges.append(QLineF(e.p1() - corner, e.p2() - corner));
     for (const auto& h : ch) dv.hatch.append(QLineF(h.p1() - corner, h.p2() - corner));
     dv.sizeMm = QSizeF(2 * ds.r, 2 * ds.r);

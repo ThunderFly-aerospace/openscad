@@ -135,6 +135,18 @@ QPointF DrawingSheetWidget::mapToWidget(const PlacedView& pl, const QPointF& vie
   return sheetToWidget(sheetMm);
 }
 
+QTransform DrawingSheetWidget::tileTransform(const PlacedView& pl) const
+{
+  // widget = (originMm + local*drawScale) * s + fitOffset + userPan, with
+  // s = fitScale*userZoom — i.e. a uniform scale k plus a translation.
+  const double s = this->fitScale * this->userZoom;
+  const double sc = pl.drawScale > 1e-9 ? pl.drawScale : 1.0;
+  const double k = sc * s;
+  return QTransform(k, 0, 0, k,
+                    pl.originMm.x() * s + this->fitOffset.x() + this->userPan.x(),
+                    pl.originMm.y() * s + this->fitOffset.y() + this->userPan.y());
+}
+
 QPointF DrawingSheetWidget::mapToViewLocal(const PlacedView& pl, const QPointF& widgetPt) const
 {
   const QPointF sheetMm = widgetToSheet(widgetPt);
@@ -230,7 +242,9 @@ void DrawingSheetWidget::paintEvent(QPaintEvent *)
   }
 
   recomputeFit();  // fit the whole sheet (drawing-mm) into the widget
-  painter.setRenderHint(QPainter::Antialiasing, true);
+  // Antialiasing costs real time on edge-heavy sheets, so drop it while a drag is
+  // in flight and put it back on the frame after the mouse is released.
+  painter.setRenderHint(QPainter::Antialiasing, !interacting());
   for (const auto& pl : this->places) paintPlacement(painter, pl);
 
   // "New detail" rubber-band circle (widget space).
@@ -261,33 +275,70 @@ void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
     painter.drawText(map(QPointF(0, 0)) - QPointF(0, absPx(3.0)), data.title);
   }
 
-  // Coloured face fills (fill-colors mode), painted first so edges sit on top.
-  if (!data.fills.isEmpty()) {
-    painter.setPen(Qt::NoPen);
-    for (const auto& f : data.fills) {
-      QPolygonF poly;
-      for (const auto& p : f.poly) poly << map(p);
-      painter.setBrush(f.color);
-      painter.drawPolygon(poly);
+  // Bulk geometry (fills / hatch / edges) is drawn through the tile's own transform
+  // so QPainter does the mapping in one batch — on an imported mesh a tile can be
+  // tens of thousands of segments, and per-endpoint mapping plus a drawLine() call
+  // each was the bulk of a repaint. Pens are cosmetic so their widths stay in
+  // device px under that transform.
+  {
+    painter.save();
+    const QTransform T = tileTransform(pl);
+    painter.setTransform(T, /*combine=*/false);
+    // Visible region in this tile's view-local mm, for culling when zoomed in.
+    bool ok = false;
+    const QTransform inv = T.inverted(&ok);
+    const QRectF visLocal = ok ? inv.mapRect(QRectF(rect())) : QRectF();
+    const QRectF tileBox(0, 0, data.sizeMm.width(), data.sizeMm.height());
+    // Culling only pays when part of the tile is off-screen; when the whole tile
+    // is visible the segments go to QPainter untouched (no copy at all).
+    const bool cull = ok && !visLocal.contains(tileBox);
+    auto drawSegs = [&](const QList<QLineF>& segs) {
+      if (segs.isEmpty()) return;
+      if (!cull) {
+        painter.drawLines(segs.constData(), segs.size());
+        return;
+      }
+      QVector<QLineF> keep;
+      keep.reserve(segs.size());
+      for (const auto& e : segs) {
+        if (std::max(e.x1(), e.x2()) < visLocal.left() ||
+            std::min(e.x1(), e.x2()) > visLocal.right() ||
+            std::max(e.y1(), e.y2()) < visLocal.top() ||
+            std::min(e.y1(), e.y2()) > visLocal.bottom())
+          continue;
+        keep.append(e);
+      }
+      if (!keep.isEmpty()) painter.drawLines(keep.constData(), keep.size());
+    };
+
+    // Coloured face fills (fill-colors mode), painted first so edges sit on top.
+    if (!data.fills.isEmpty()) {
+      painter.setPen(Qt::NoPen);
+      for (const auto& f : data.fills) {
+        if (cull && !visLocal.intersects(f.poly.boundingRect())) continue;
+        painter.setBrush(f.color);
+        painter.drawPolygon(f.poly);
+      }
     }
-  }
 
-  // Section cut-face hatching first, so edges sit on top of it.
-  if (!data.hatch.isEmpty()) {
-    QPen hatchPen(QColor(90, 90, 90));
-    hatchPen.setWidthF(std::max(0.4, absPx(0.13)));
-    painter.setPen(hatchPen);
-    for (const auto& hh : data.hatch)
-      painter.drawLine(map(hh.p1()), map(hh.p2()));
-  }
+    // Section cut-face hatching next, so edges sit on top of it.
+    if (!data.hatch.isEmpty()) {
+      QPen hatchPen(QColor(90, 90, 90));
+      hatchPen.setWidthF(std::max(0.4, absPx(0.13)));
+      hatchPen.setCosmetic(true);
+      painter.setPen(hatchPen);
+      painter.setBrush(Qt::NoBrush);
+      drawSegs(data.hatch);
+    }
 
-  // The line drawing itself: silhouette + feature edges (model-mm -> widget).
-  QPen edgePen(Qt::black);
-  edgePen.setWidthF(std::max(0.6, absPx(0.3)));
-  edgePen.setCapStyle(Qt::RoundCap);
-  painter.setPen(edgePen);
-  for (const auto& e : data.edges) {
-    painter.drawLine(map(e.p1()), map(e.p2()));
+    // The line drawing itself: silhouette + feature edges.
+    QPen edgePen(Qt::black);
+    edgePen.setWidthF(std::max(0.6, absPx(0.3)));
+    edgePen.setCapStyle(Qt::RoundCap);
+    edgePen.setCosmetic(true);
+    painter.setPen(edgePen);
+    drawSegs(data.edges);
+    painter.restore();
   }
 
   // Detail markers: a thin circle around each enlarged region, labelled with its
@@ -368,11 +419,13 @@ void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
   auto drawLabel = [&](const QPointF& center, const QString& text, const QPointF& seg0,
                        const QPointF& seg1, bool leader) {
     const QRectF tr = painter.fontMetrics().boundingRect(text).adjusted(-3, -2, 3, 2);
+    // The box sits where the label was dragged to — deliberately NOT clamped to the
+    // widget: on the single sheet canvas the label has to pan/zoom away with its
+    // view, and clamping also made a drag near the edge snap back on refresh (the
+    // unclamped offset is what gets written to the source). The vector export has
+    // never clamped, so this keeps the dock WYSIWYG.
     QRectF box(center.x() - tr.width() / 2.0, center.y() - tr.height() / 2.0,
                tr.width(), tr.height());
-    const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
-    const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
-    box.moveTo(bx, by);
     if (leader) {
       const QPointF foot = closestOnSegment(box.center(), seg0, seg1);
       if (std::hypot(box.center().x() - foot.x(), box.center().y() - foot.y()) >
@@ -504,10 +557,7 @@ void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
     const QPointF labelCenter = v + bis * (arcR + 12);
     const QRectF tr = painter.fontMetrics().boundingRect(ang.label).adjusted(-3, -2, 3, 2);
     QRectF box(labelCenter.x() - tr.width() / 2.0, labelCenter.y() - tr.height() / 2.0,
-               tr.width(), tr.height());
-    const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
-    const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
-    box.moveTo(bx, by);
+               tr.width(), tr.height());  // not viewport-clamped, see drawLabel above
     painter.fillRect(box, QColor(255, 255, 255, 220));
     painter.setPen(QColor(150, 30, 30));
     painter.drawText(box, Qt::AlignCenter, ang.label);
@@ -520,10 +570,7 @@ void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
     const QPointF center = map(lb.anchor + lb.off);
     const QRectF tr = painter.fontMetrics().boundingRect(lb.text).adjusted(-3, -2, 3, 2);
     QRectF box(center.x() - tr.width() / 2.0, center.y() - tr.height() / 2.0,
-               tr.width(), tr.height());
-    const double bx = std::clamp(box.x(), 1.0, width() - box.width() - 1.0);
-    const double by = std::clamp(box.y(), 1.0, height() - box.height() - 1.0);
-    box.moveTo(bx, by);
+               tr.width(), tr.height());  // not viewport-clamped, see drawLabel above
     // Leader from the text box centre to the anchor (drawn first, then the white
     // box backing hides the portion inside the box).
     if (lb.leader &&
@@ -654,7 +701,7 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
 
   // Anchor click (create dimensions) — in the tile under the cursor; anchors are
   // feature points, always inside their tile.
-  if (pi >= 0 && this->places.at(pi).viewIndex >= 0 && this->showAnchors) {
+  if (pi >= 0 && !this->places.at(pi).data.projKey.isEmpty() && this->showAnchors) {
     const PlacedView& pl = this->places.at(pi);
     const double radius = 12.0;
     QStringList hits;  // distinct anchor refs within the hit radius
@@ -665,27 +712,27 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
         hits << anchor.ref;
       }
     }
-    if (hits.size() == 1) { emit anchorClicked(pl.viewIndex, hits.first()); return; }
+    if (hits.size() == 1) { emit anchorClicked(pl.data.projKey, hits.first()); return; }
     if (hits.size() > 1) {
       QMenu menu(this);
       for (const QString& ref : hits) menu.addAction(ref);
       if (QAction *chosen = menu.exec(event->globalPosition().toPoint()))
-        emit anchorClicked(pl.viewIndex, chosen->text());
+        emit anchorClicked(pl.data.projKey, chosen->text());
       return;
     }
   }
 
   // Label marker click (create a // @label) — in the tile under the cursor.
-  if (pi >= 0 && this->places.at(pi).viewIndex >= 0 && this->showAnchors) {
+  if (pi >= 0 && !this->places.at(pi).data.projKey.isEmpty() && this->showAnchors) {
     const PlacedView& pl = this->places.at(pi);
     for (const auto& a : pl.data.labelAnchors) {
       const QPointF p = mapToWidget(pl, a.pos);
       if (std::hypot(p.x() - click.x(), p.y() - click.y()) <= 12.0) {
         // Copy the reference out: the slot refreshes the sheet, which replaces
         // `places` while the signal is still on the stack.
-        const int viewIndex = pl.viewIndex;
+        const QString projKey = pl.data.projKey;
         const QString ref = a.ref;
-        emit labelAnchorClicked(viewIndex, ref);
+        emit labelAnchorClicked(projKey, ref);
         return;
       }
     }
@@ -785,7 +832,7 @@ bool DrawingSheetWidget::hitDim(const QPointF& pt, bool editableOnly, int& place
   // Label boxes first, across all standard views.
   for (int p = 0; p < this->places.size(); ++p) {
     const PlacedView& pl = this->places.at(p);
-    if (pl.viewIndex < 0) continue;
+    if (pl.viewIndex < 0 && !pl.data.annotated) continue;  // detail tiles: display-only
     for (int i = 0; i < pl.data.dims.size(); ++i) {
       const auto& d = pl.data.dims.at(i);
       if (editableOnly && d.id < 0) continue;
@@ -799,7 +846,7 @@ bool DrawingSheetWidget::hitDim(const QPointF& pt, bool editableOnly, int& place
   int bp = -1, bd = -1;
   for (int p = 0; p < this->places.size(); ++p) {
     const PlacedView& pl = this->places.at(p);
-    if (pl.viewIndex < 0) continue;
+    if (pl.viewIndex < 0 && !pl.data.annotated) continue;  // detail tiles: display-only
     for (int i = 0; i < pl.data.dims.size(); ++i) {
       const auto& d = pl.data.dims.at(i);
       if (editableOnly && d.id < 0) continue;
@@ -818,7 +865,7 @@ bool DrawingSheetWidget::hitLabel(const QPointF& pt, int& place, int& label) con
   const QFontMetrics fm(overlayFont());
   for (int p = 0; p < this->places.size(); ++p) {
     const PlacedView& pl = this->places.at(p);
-    if (pl.viewIndex < 0) continue;
+    if (pl.viewIndex < 0 && !pl.data.annotated) continue;  // detail tiles: display-only
     for (int i = 0; i < pl.data.labels.size(); ++i) {
       const auto& lb = pl.data.labels.at(i);
       QRectF box = fm.boundingRect(lb.text).adjusted(-3, -2, 3, 2);
@@ -846,7 +893,8 @@ void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
   // Finish a "new detail" gesture: emit the circle in the parent view's local mm.
   if (this->detailDragging) {
     const int pi = this->detailPlace;
-    if (pi >= 0 && pi < this->places.size() && this->places.at(pi).viewIndex >= 0) {
+    if (pi >= 0 && pi < this->places.size() &&
+        !this->places.at(pi).data.projKey.isEmpty()) {
       const PlacedView& pl = this->places.at(pi);
       const double rpx = std::hypot(this->detailCur.x() - this->detailCenter.x(),
                                     this->detailCur.y() - this->detailCenter.y());
@@ -854,7 +902,7 @@ void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
         const QPointF c = mapToViewLocal(pl, this->detailCenter);
         const QPointF rimPt = mapToViewLocal(pl, this->detailCur);
         const double r = std::hypot(rimPt.x() - c.x(), rimPt.y() - c.y());
-        emit detailRequested(pl.viewIndex, c.x(), c.y(), r);
+        emit detailRequested(pl.data.projKey, c.x(), c.y(), r);
       }
     }
     this->detailDragging = false;
@@ -874,15 +922,18 @@ void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
     }
     this->tileDrag = -1;
     setCursor(Qt::ArrowCursor);
+    update();  // interacting() just went false: repaint antialiased
     return;
   }
 
   if (this->panning) {
     this->panning = false;
+    update();
     return;
   }
   if (this->dragPlace < 0 || this->dragPlace >= this->places.size()) {
     this->draggingLabel = this->draggingDim = this->draggingText = -1;
+    update();
     return;
   }
   PlacedView& pl = this->places[this->dragPlace];
@@ -903,6 +954,7 @@ void DrawingSheetWidget::mouseReleaseEvent(QMouseEvent *)
     }
   }
   this->dragPlace = this->draggingLabel = this->draggingDim = this->draggingText = -1;
+  update();  // interacting() just went false: repaint antialiased
 }
 
 void DrawingSheetWidget::wheelEvent(QWheelEvent *event)
