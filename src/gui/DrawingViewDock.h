@@ -3,6 +3,7 @@
 #include <vector>
 
 #include <QColor>
+#include <QElapsedTimer>
 #include <QFont>
 #include <QHash>
 #include <QImage>
@@ -353,6 +354,12 @@ private:
   // scale (crisp). `zooming` is true between the wheel step and the rebuild.
   QTimer *zoomSettleTimer{nullptr};
   bool zooming{false};
+  // Per-frame rasterisation budget so a full rebuild never freezes input: paintEvent
+  // restarts the clock, blitTileGeometry builds stale tiles only while it is under
+  // budget and sets deferredRebuild for the rest, and paintEvent then schedules a
+  // follow-up repaint. Tiles fill in over a few frames instead of blocking the thread.
+  QElapsedTimer paintBudget;
+  bool deferredRebuild{false};
 };
 
 /*!

@@ -275,7 +275,15 @@ void DrawingSheetWidget::paintEvent(QPaintEvent *)
   // transform keeps the scaled-blit zoom phase from looking blocky.
   painter.setRenderHint(QPainter::Antialiasing, !interacting());
   painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+  // Rasterising the tile pixmaps is the one heavy step; cap how much of it runs per
+  // frame so a full rebuild (F5 / zoom-settle / view toggle) never freezes input.
+  // Tiles past the budget keep this frame short and are finished on the follow-up.
+  this->paintBudget.restart();
+  this->deferredRebuild = false;
   for (const auto& pl : this->places) paintPlacement(painter, pl);
+  // More pixmaps still to build: come back and continue next event-loop turn, so
+  // mouse events queued in between are handled (dragging stays live during a rebuild).
+  if (this->deferredRebuild) QTimer::singleShot(0, this, [this] { update(); });
 
   // "New detail" rubber-band circle (widget space).
   if (this->detailDragging) {
@@ -369,24 +377,38 @@ bool DrawingSheetWidget::blitTileGeometry(QPainter& painter, const PlacedView& p
   const bool stale = L.px.isNull() || L.builtVersion != this->geomVersion ||
                      (!this->zooming && std::abs(L.builtScale - k) > 1e-9);
   if (stale) {
-    const double dpr = devicePixelRatioF();
-    const int wpx = std::max(1, static_cast<int>(std::ceil(sz.width() * k * dpr)));
-    const int hpx = std::max(1, static_cast<int>(std::ceil(sz.height() * k * dpr)));
-    QPixmap px(wpx, hpx);
-    px.setDevicePixelRatio(dpr);
-    px.fill(Qt::transparent);
-    QPainter pp(&px);
-    pp.setRenderHint(QPainter::Antialiasing, true);  // cached once; keep it crisp
-    pp.setTransform(QTransform(k, 0, 0, k, 0, 0), /*combine=*/false);  // tile-mm -> pixmap px
-    renderTileGeometry(pp, pl, /*cull=*/false, QRectF());
-    pp.end();
-    L.px = px;
-    L.builtScale = k;
-    L.builtVersion = this->geomVersion;
+    // Build only while this frame's rasterisation budget lasts; otherwise defer to
+    // the follow-up so the frame stays short. A tile with an existing (stale-scale or
+    // stale-version) pixmap still blits it meanwhile — deferral only shows blank for a
+    // brand-new tile (geometry change clears the cache, so those fill in over a few
+    // frames instead of freezing).
+    constexpr qint64 kBuildBudgetMs = 8;
+    const bool budgetLeft =
+      !this->paintBudget.isValid() || this->paintBudget.elapsed() < kBuildBudgetMs;
+    if (!budgetLeft) {
+      this->deferredRebuild = true;
+      if (L.px.isNull()) return true;  // nothing to show yet — skip geometry this frame
+    } else {
+      const double dpr = devicePixelRatioF();
+      const int wpx = std::max(1, static_cast<int>(std::ceil(sz.width() * k * dpr)));
+      const int hpx = std::max(1, static_cast<int>(std::ceil(sz.height() * k * dpr)));
+      QPixmap px(wpx, hpx);
+      px.setDevicePixelRatio(dpr);
+      px.fill(Qt::transparent);
+      QPainter pp(&px);
+      pp.setRenderHint(QPainter::Antialiasing, true);  // cached once; keep it crisp
+      pp.setTransform(QTransform(k, 0, 0, k, 0, 0), /*combine=*/false);  // tile-mm -> pixmap px
+      renderTileGeometry(pp, pl, /*cull=*/false, QRectF());
+      pp.end();
+      L.px = px;
+      L.builtScale = k;
+      L.builtVersion = this->geomVersion;
+    }
   }
 
   // Blit at the tile's widget origin. If the current scale differs from the built one
-  // (a zoom in flight), scale the pixmap about that origin so it tracks until rebuilt.
+  // (a zoom in flight, or a deferred rebuild), scale the pixmap about that origin so
+  // it tracks until rebuilt.
   const QPointF origin = mapToWidget(pl, QPointF(0, 0));
   const double ratio = L.builtScale > 1e-9 ? k / L.builtScale : 1.0;
   if (std::abs(ratio - 1.0) < 1e-6) {
