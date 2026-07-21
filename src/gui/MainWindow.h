@@ -224,6 +224,10 @@ private:
     void clear() { edges.clear(); faces.clear(); sections.clear(); }
   };
   DrawingProjCache drawingProjCache;
+  // Bumped whenever the drawing mesh changes; handed to the dock so its per-tile
+  // geometry pixmap cache is dropped only on a real geometry change, not on a
+  // dimension edit (which re-runs refreshDrawingViews with the same mesh).
+  int drawingGeomVersion{0};
 
 protected:
   void closeEvent(QCloseEvent *event) override;

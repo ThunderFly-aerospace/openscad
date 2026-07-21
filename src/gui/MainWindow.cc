@@ -5175,10 +5175,14 @@ void MainWindow::refreshDrawingViews()
   // Drop the projection cache when the geometry object changed; otherwise every
   // project*() below is a lookup. This is what makes editing a dimension cheap:
   // the comment changed, the mesh did not (see DrawingProjCache in MainWindow.h).
+  // The same event bumps the dock's geometry version, so its per-tile pixmap cache
+  // survives dimension edits but drops when the mesh really changes.
   if (this->drawingProjCache.geom != geom) {
     this->drawingProjCache.clear();
     this->drawingProjCache.geom = geom;
+    ++this->drawingGeomVersion;
   }
+  this->drawingDock->setGeometryVersion(this->drawingGeomVersion);
   auto cachedEdges = [this, &ps](int vi, const LineDrawingView& v)
     -> const std::vector<LineDrawingSeg2D>& {
     auto it = this->drawingProjCache.edges.find(vi);

@@ -2,9 +2,11 @@
 
 #include <QColor>
 #include <QFont>
+#include <QHash>
 #include <QImage>
 #include <QLineF>
 #include <QList>
+#include <QPixmap>
 #include <QPointF>
 #include <QPolygonF>
 #include <QSizeF>
@@ -21,6 +23,7 @@ class QCheckBox;
 class QDoubleSpinBox;
 class QResizeEvent;
 class QMouseEvent;
+class QTimer;
 class QPaintEvent;
 
 // A dimref anchor projected into one ortho view, in render-image pixel coords.
@@ -200,6 +203,11 @@ public:
   // Replace the whole sheet: placed views (each carrying its own drawScale) and the
   // sheet size in drawing-mm. Zoom/pan are preserved across refreshes.
   void setSheet(const QVector<PlacedView>& placements, double sheetWmm, double sheetHmm);
+  // Bump the geometry version whenever the underlying mesh changed (owner detects
+  // this — see MainWindow's projection cache). A dimension edit re-runs setSheet with
+  // the SAME version, so the cached per-tile geometry pixmaps survive it; only a real
+  // mesh change (or a scale change) invalidates them.
+  void setGeometryVersion(int version);
   void clear();
   void setShowAnchors(bool show);
   // Enter/leave "new detail" mode: while on, a left-drag on a standard view rubber-
@@ -271,6 +279,24 @@ private:
   // Find the // @label text box under a widget point across all standard views.
   bool hitLabel(const QPointF& widgetPt, int& place, int& label) const;
   void paintPlacement(QPainter& painter, const PlacedView& pl);
+  // Draw one tile's bulk geometry (fills + hatch + edges) with the painter already
+  // transformed to that tile's view-local mm. `cull` clips to `visLocal` (view-local
+  // mm) for the direct-draw path; the pixmap-build path passes the whole tile.
+  void renderTileGeometry(QPainter& painter, const PlacedView& pl, bool cull,
+                          const QRectF& visLocal) const;
+  // Draw one tile's live overlay (title, dimensions, angles, section lines, detail
+  // marks, // @label callouts, anchor dots) in widget coordinates. Always redrawn —
+  // it is cheap (dozens of primitives) and it is what the user drags.
+  void paintTileOverlay(QPainter& painter, const PlacedView& pl);
+  // Ensure `tileLayers[id]` holds this tile's geometry rasterised at scale k (px per
+  // model-mm) and blit it, or fall back to direct-draw when the tile has no stable id
+  // or is too large at this zoom. Returns false if nothing was cached (caller then
+  // direct-draws). While `zooming`, a stale-scale pixmap is blitted scaled instead of
+  // rebuilt, so a wheel spin stays responsive.
+  bool blitTileGeometry(QPainter& painter, const PlacedView& pl, double k);
+  // A stable per-tile key that survives the setSheet() of a dimension edit: the
+  // standard-view index, or the movable tile's placeKey. Empty = not cacheable.
+  static QString tileId(const PlacedView& pl);
   // View-local model-mm -> widget px as an affine QTransform, so the geometry
   // (edges / hatch / fills) can be handed to QPainter unmapped and in one batch
   // instead of transforming every endpoint here. Same mapping as mapToWidget().
@@ -308,6 +334,23 @@ private:
   // Dragging a movable (section / detail) tile to reposition it.
   int tileDrag{-1};        // placement being moved, or -1
   QPointF tileGrabMm;      // press point - tile origin, in sheet drawing-mm
+
+  // Per-tile cached rasterisation of the geometry layer (fills + hatch + edges),
+  // keyed on tileId() so it outlives the setSheet() that every dimension edit fires.
+  // Compositing the sheet is then a blit per tile plus the live overlay; pan and
+  // tile-drag move where a pixmap lands, they do not redraw geometry.
+  struct TileLayer {
+    QPixmap px;
+    double builtScale{0.0};  // px per model-mm the pixmap was rendered at
+    int builtVersion{-1};    // geometry version it was rendered from
+  };
+  QHash<QString, TileLayer> tileLayers;
+  int geomVersion{0};        // owner bumps this when the mesh changes
+  // Zoom is two-phase: a wheel step blits the existing pixmaps scaled (responsive but
+  // soft) and (re)arms this timer; when it fires, the pixmaps are rebuilt at the new
+  // scale (crisp). `zooming` is true between the wheel step and the rebuild.
+  QTimer *zoomSettleTimer{nullptr};
+  bool zooming{false};
 };
 
 /*!
@@ -325,6 +368,9 @@ public:
   ~DrawingViewDock() override;
 
   void setViews(const QList<OrthoViewData>& views, const QStringList& titles);
+  // Forwarded to the sheet: bump when the mesh changed so the per-tile geometry
+  // pixmap cache survives a dimension edit but drops on a real geometry change.
+  void setGeometryVersion(int version);
   // Section-view tiles ("Řez A–A"), shown below the standard views and appended
   // to the export. Each carries edges + cut-face hatch; titles come from the data.
   void setSectionViews(const QList<OrthoViewData>& sections);

@@ -25,6 +25,8 @@
 #include <QPixmap>
 #include <QPolygonF>
 #include <QPushButton>
+#include <QSet>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -58,6 +60,14 @@ DrawingSheetWidget::DrawingSheetWidget(QWidget *parent) : QWidget(parent)
 {
   setMinimumSize(160, 120);
   setMouseTracking(false);
+  // Fires ~150 ms after the last wheel step: leaves the responsive scaled-blit mode
+  // and repaints, which rebuilds the per-tile pixmaps crisply at the new zoom.
+  this->zoomSettleTimer = new QTimer(this);
+  this->zoomSettleTimer->setSingleShot(true);
+  connect(this->zoomSettleTimer, &QTimer::timeout, this, [this] {
+    this->zooming = false;
+    update();
+  });
 }
 
 void DrawingSheetWidget::setSheet(const QVector<PlacedView>& placements, double wMm, double hMm)
@@ -70,7 +80,24 @@ void DrawingSheetWidget::setSheet(const QVector<PlacedView>& placements, double 
   this->draggingLabel = -1;
   this->draggingText = -1;
   this->tileDrag = -1;
+  // Prune cached layers for tiles no longer on the sheet (toggled-off views); the
+  // survivors are reused as long as geomVersion / scale match. Kept across setSheet
+  // on purpose — that is what makes a dimension edit cheap.
+  QSet<QString> live;
+  for (const auto& pl : this->places) {
+    const QString id = tileId(pl);
+    if (!id.isEmpty()) live.insert(id);
+  }
+  for (auto it = this->tileLayers.begin(); it != this->tileLayers.end();)
+    it = live.contains(it.key()) ? std::next(it) : this->tileLayers.erase(it);
   update();
+}
+
+void DrawingSheetWidget::setGeometryVersion(int version)
+{
+  if (version == this->geomVersion) return;
+  this->geomVersion = version;
+  this->tileLayers.clear();  // mesh changed: every cached pixmap is stale
 }
 
 void DrawingSheetWidget::setDetailMode(bool on)
@@ -84,6 +111,7 @@ void DrawingSheetWidget::setDetailMode(bool on)
 void DrawingSheetWidget::clear()
 {
   this->places.clear();
+  this->tileLayers.clear();
   this->sheetWmm = this->sheetHmm = 0.0;
   this->userZoom = 1.0;
   this->userPan = QPointF();
@@ -243,8 +271,10 @@ void DrawingSheetWidget::paintEvent(QPaintEvent *)
 
   recomputeFit();  // fit the whole sheet (drawing-mm) into the widget
   // Antialiasing costs real time on edge-heavy sheets, so drop it while a drag is
-  // in flight and put it back on the frame after the mouse is released.
+  // in flight and put it back on the frame after the mouse is released. Smooth pixmap
+  // transform keeps the scaled-blit zoom phase from looking blocky.
   painter.setRenderHint(QPainter::Antialiasing, !interacting());
+  painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
   for (const auto& pl : this->places) paintPlacement(painter, pl);
 
   // "New detail" rubber-band circle (widget space).
@@ -260,10 +290,142 @@ void DrawingSheetWidget::paintEvent(QPaintEvent *)
   }
 }
 
+QString DrawingSheetWidget::tileId(const PlacedView& pl)
+{
+  if (pl.viewIndex >= 0) return QStringLiteral("v%1").arg(pl.viewIndex);
+  if (!pl.data.placeKey.isEmpty()) return "k:" + pl.data.placeKey;
+  return QString();  // unnamed section etc. — not cacheable, direct-drawn
+}
+
+void DrawingSheetWidget::renderTileGeometry(QPainter& painter, const PlacedView& pl, bool cull,
+                                            const QRectF& visLocal) const
+{
+  // Runs with `painter` already transformed to this tile's view-local mm; pens are
+  // cosmetic so their widths stay in device px under that transform. `cull` clips to
+  // visLocal (the direct-draw path when zoomed in); the pixmap-build path passes the
+  // whole tile (cull=false), so all segments go to QPainter in one batch, no copy.
+  const OrthoViewData& data = pl.data;
+  auto drawSegs = [&](const QList<QLineF>& segs) {
+    if (segs.isEmpty()) return;
+    if (!cull) {
+      painter.drawLines(segs.constData(), segs.size());
+      return;
+    }
+    QVector<QLineF> keep;
+    keep.reserve(segs.size());
+    for (const auto& e : segs) {
+      if (std::max(e.x1(), e.x2()) < visLocal.left() ||
+          std::min(e.x1(), e.x2()) > visLocal.right() ||
+          std::max(e.y1(), e.y2()) < visLocal.top() ||
+          std::min(e.y1(), e.y2()) > visLocal.bottom())
+        continue;
+      keep.append(e);
+    }
+    if (!keep.isEmpty()) painter.drawLines(keep.constData(), keep.size());
+  };
+
+  // Coloured face fills (fill-colors mode), painted first so edges sit on top.
+  if (!data.fills.isEmpty()) {
+    painter.setPen(Qt::NoPen);
+    for (const auto& f : data.fills) {
+      if (cull && !visLocal.intersects(f.poly.boundingRect())) continue;
+      painter.setBrush(f.color);
+      painter.drawPolygon(f.poly);
+    }
+  }
+
+  // Section cut-face hatching next, so edges sit on top of it.
+  if (!data.hatch.isEmpty()) {
+    QPen hatchPen(QColor(90, 90, 90));
+    hatchPen.setWidthF(std::max(0.4, absPx(0.13)));
+    hatchPen.setCosmetic(true);
+    painter.setPen(hatchPen);
+    painter.setBrush(Qt::NoBrush);
+    drawSegs(data.hatch);
+  }
+
+  // The line drawing itself: silhouette + feature edges.
+  QPen edgePen(Qt::black);
+  edgePen.setWidthF(std::max(0.6, absPx(0.3)));
+  edgePen.setCapStyle(Qt::RoundCap);
+  edgePen.setCosmetic(true);
+  painter.setPen(edgePen);
+  drawSegs(data.edges);
+}
+
+bool DrawingSheetWidget::blitTileGeometry(QPainter& painter, const PlacedView& pl, double k)
+{
+  const OrthoViewData& data = pl.data;
+  const QString id = tileId(pl);
+  const QSizeF sz = data.sizeMm;
+  // A tile's pixmap at scale k is sz*k device-independent px. Beyond a cap it would
+  // be huge (deep zoom on a big tile) — fall back to direct-draw there; culling keeps
+  // that bounded, and you don't reposition tiles at deep zoom anyway.
+  const double capPx = 6000.0;
+  const bool tooBig = sz.width() * k > capPx || sz.height() * k > capPx;
+  if (id.isEmpty() || tooBig) return false;
+
+  TileLayer& L = this->tileLayers[id];
+  const bool stale = L.px.isNull() || L.builtVersion != this->geomVersion ||
+                     (!this->zooming && std::abs(L.builtScale - k) > 1e-9);
+  if (stale) {
+    const double dpr = devicePixelRatioF();
+    const int wpx = std::max(1, static_cast<int>(std::ceil(sz.width() * k * dpr)));
+    const int hpx = std::max(1, static_cast<int>(std::ceil(sz.height() * k * dpr)));
+    QPixmap px(wpx, hpx);
+    px.setDevicePixelRatio(dpr);
+    px.fill(Qt::transparent);
+    QPainter pp(&px);
+    pp.setRenderHint(QPainter::Antialiasing, true);  // cached once; keep it crisp
+    pp.setTransform(QTransform(k, 0, 0, k, 0, 0), /*combine=*/false);  // tile-mm -> pixmap px
+    renderTileGeometry(pp, pl, /*cull=*/false, QRectF());
+    pp.end();
+    L.px = px;
+    L.builtScale = k;
+    L.builtVersion = this->geomVersion;
+  }
+
+  // Blit at the tile's widget origin. If the current scale differs from the built one
+  // (a zoom in flight), scale the pixmap about that origin so it tracks until rebuilt.
+  const QPointF origin = mapToWidget(pl, QPointF(0, 0));
+  const double ratio = L.builtScale > 1e-9 ? k / L.builtScale : 1.0;
+  if (std::abs(ratio - 1.0) < 1e-6) {
+    painter.drawPixmap(origin, L.px);
+  } else {
+    painter.save();
+    painter.translate(origin);
+    painter.scale(ratio, ratio);
+    painter.drawPixmap(QPointF(0, 0), L.px);
+    painter.restore();
+  }
+  return true;
+}
+
 void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
 {
   const OrthoViewData& data = pl.data;
   if (!data.valid()) return;
+
+  // Geometry: from the per-tile pixmap cache when possible, else direct-draw.
+  const double k = this->fitScale * this->userZoom * (pl.drawScale > 1e-9 ? pl.drawScale : 1.0);
+  if (!blitTileGeometry(painter, pl, k)) {
+    painter.save();
+    const QTransform T = tileTransform(pl);
+    painter.setTransform(T, /*combine=*/false);
+    bool ok = false;
+    const QTransform inv = T.inverted(&ok);
+    const QRectF visLocal = ok ? inv.mapRect(QRectF(rect())) : QRectF();
+    const QRectF tileBox(0, 0, data.sizeMm.width(), data.sizeMm.height());
+    renderTileGeometry(painter, pl, /*cull=*/ok && !visLocal.contains(tileBox), visLocal);
+    painter.restore();
+  }
+
+  paintTileOverlay(painter, pl);
+}
+
+void DrawingSheetWidget::paintTileOverlay(QPainter& painter, const PlacedView& pl)
+{
+  const OrthoViewData& data = pl.data;
   auto map = [&](const QPointF& p) { return mapToWidget(pl, p); };
 
   painter.setFont(overlayFont());
@@ -273,72 +435,6 @@ void DrawingSheetWidget::paintPlacement(QPainter& painter, const PlacedView& pl)
   if (!data.title.isEmpty()) {
     painter.setPen(Qt::black);
     painter.drawText(map(QPointF(0, 0)) - QPointF(0, absPx(3.0)), data.title);
-  }
-
-  // Bulk geometry (fills / hatch / edges) is drawn through the tile's own transform
-  // so QPainter does the mapping in one batch — on an imported mesh a tile can be
-  // tens of thousands of segments, and per-endpoint mapping plus a drawLine() call
-  // each was the bulk of a repaint. Pens are cosmetic so their widths stay in
-  // device px under that transform.
-  {
-    painter.save();
-    const QTransform T = tileTransform(pl);
-    painter.setTransform(T, /*combine=*/false);
-    // Visible region in this tile's view-local mm, for culling when zoomed in.
-    bool ok = false;
-    const QTransform inv = T.inverted(&ok);
-    const QRectF visLocal = ok ? inv.mapRect(QRectF(rect())) : QRectF();
-    const QRectF tileBox(0, 0, data.sizeMm.width(), data.sizeMm.height());
-    // Culling only pays when part of the tile is off-screen; when the whole tile
-    // is visible the segments go to QPainter untouched (no copy at all).
-    const bool cull = ok && !visLocal.contains(tileBox);
-    auto drawSegs = [&](const QList<QLineF>& segs) {
-      if (segs.isEmpty()) return;
-      if (!cull) {
-        painter.drawLines(segs.constData(), segs.size());
-        return;
-      }
-      QVector<QLineF> keep;
-      keep.reserve(segs.size());
-      for (const auto& e : segs) {
-        if (std::max(e.x1(), e.x2()) < visLocal.left() ||
-            std::min(e.x1(), e.x2()) > visLocal.right() ||
-            std::max(e.y1(), e.y2()) < visLocal.top() ||
-            std::min(e.y1(), e.y2()) > visLocal.bottom())
-          continue;
-        keep.append(e);
-      }
-      if (!keep.isEmpty()) painter.drawLines(keep.constData(), keep.size());
-    };
-
-    // Coloured face fills (fill-colors mode), painted first so edges sit on top.
-    if (!data.fills.isEmpty()) {
-      painter.setPen(Qt::NoPen);
-      for (const auto& f : data.fills) {
-        if (cull && !visLocal.intersects(f.poly.boundingRect())) continue;
-        painter.setBrush(f.color);
-        painter.drawPolygon(f.poly);
-      }
-    }
-
-    // Section cut-face hatching next, so edges sit on top of it.
-    if (!data.hatch.isEmpty()) {
-      QPen hatchPen(QColor(90, 90, 90));
-      hatchPen.setWidthF(std::max(0.4, absPx(0.13)));
-      hatchPen.setCosmetic(true);
-      painter.setPen(hatchPen);
-      painter.setBrush(Qt::NoBrush);
-      drawSegs(data.hatch);
-    }
-
-    // The line drawing itself: silhouette + feature edges.
-    QPen edgePen(Qt::black);
-    edgePen.setWidthF(std::max(0.6, absPx(0.3)));
-    edgePen.setCapStyle(Qt::RoundCap);
-    edgePen.setCosmetic(true);
-    painter.setPen(edgePen);
-    drawSegs(data.edges);
-    painter.restore();
   }
 
   // Detail markers: a thin circle around each enlarged region, labelled with its
@@ -691,16 +787,11 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
     }
   }
 
-  // Left-drag a movable section / detail tile to reposition it in free space.
-  if (pi >= 0 && this->places.at(pi).data.movable) {
-    this->tileDrag = pi;
-    this->tileGrabMm = widgetToSheet(click) - this->places.at(pi).originMm;
-    setCursor(Qt::ClosedHandCursor);
-    return;
-  }
-
   // Anchor click (create dimensions) — in the tile under the cursor; anchors are
-  // feature points, always inside their tile.
+  // feature points, always inside their tile. This must precede the movable-tile
+  // drag below: a section tile is `movable`, so a click on one of its anchor dots
+  // would otherwise start a tile drag and never create a dimension. Anchors have a
+  // small hit radius, so a click that misses them still falls through to the drag.
   if (pi >= 0 && !this->places.at(pi).data.projKey.isEmpty() && this->showAnchors) {
     const PlacedView& pl = this->places.at(pi);
     const double radius = 12.0;
@@ -736,6 +827,16 @@ void DrawingSheetWidget::mousePressEvent(QMouseEvent *event)
         return;
       }
     }
+  }
+
+  // Left-drag a movable section / detail tile to reposition it in free space. After
+  // the anchor / label-marker checks above, so clicking a dot in a section creates a
+  // dimension rather than dragging the tile.
+  if (pi >= 0 && this->places.at(pi).data.movable) {
+    this->tileDrag = pi;
+    this->tileGrabMm = widgetToSheet(click) - this->places.at(pi).originMm;
+    setCursor(Qt::ClosedHandCursor);
+    return;
   }
 
   // Otherwise the click is on empty space / a display-only tile: pan the sheet.
@@ -970,6 +1071,10 @@ void DrawingSheetWidget::wheelEvent(QWheelEvent *event)
   // Keep sheetAt under the cursor: solve userPan from sheetToWidget(sheetAt) == cursor.
   const double s = this->fitScale * this->userZoom;
   this->userPan = cursor - this->fitOffset - sheetAt * s;
+  // Two-phase zoom: paint blits the existing pixmaps scaled (responsive but soft) and
+  // the pixmaps are rebuilt at the new scale only once the wheel settles.
+  this->zooming = true;
+  this->zoomSettleTimer->start(150);
   update();
 }
 
@@ -1271,6 +1376,11 @@ void DrawingViewDock::setViews(const QList<OrthoViewData>& newViews, const QStri
     if (!titles.at(i).isEmpty()) this->views[i].title = titles.at(i);
   rebuildSheet();
   updateExportEnabled();
+}
+
+void DrawingViewDock::setGeometryVersion(int version)
+{
+  if (this->sheet) this->sheet->setGeometryVersion(version);
 }
 
 void DrawingViewDock::setSectionViews(const QList<OrthoViewData>& sections)
