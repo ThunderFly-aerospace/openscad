@@ -192,6 +192,9 @@ private:
   void onDetailRequested(const QString& projKey, double cx, double cy, double r);
   // A section / detail tile was dragged to free space: write its at=x,y back.
   void onTilePlaced(const QString& placeKey, double x, double y);
+  // A persisted sheet setting changed in the dock: write the // @sheet comment from
+  // the dock's current state, then reproject.
+  void onDrawingSheetSettingsChanged();
 
   // Interactive dimension creation: the first anchor clicked in the drawing
   // dock, pending the second. Empty = no pending pick.

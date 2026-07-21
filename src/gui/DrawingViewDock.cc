@@ -1252,13 +1252,37 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
     auto *cb = new QCheckBox(tr(viewNames[i]), viewsRow);
     cb->setChecked(kViewDefault[i]);
     connect(cb, &QCheckBox::toggled, this, [this](bool) {
-      emit viewSelectionChanged();
+      emit sheetSettingsChanged();
       updateExportEnabled();
     });
     viewsLayout->addWidget(cb);
     this->viewChecks.append(cb);
   }
   viewsLayout->addStretch(1);
+
+  // Inter-view spacing (mm) + an "auto" button that clears the dimensions. Both live
+  // on the views row; the value is persisted in // @sheet as gap=.
+  viewsLayout->addWidget(new QLabel(tr("Gap:"), viewsRow));
+  this->gapSpin = new QDoubleSpinBox(viewsRow);
+  this->gapSpin->setRange(0.0, 200.0);
+  this->gapSpin->setDecimals(1);
+  this->gapSpin->setSingleStep(1.0);
+  this->gapSpin->setValue(16.0);
+  this->gapSpin->setSuffix(tr(" mm"));
+  this->gapSpin->setToolTip(tr("Spacing between the standard views on the sheet."));
+  connect(this->gapSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this](double) { emit sheetSettingsChanged(); });
+  viewsLayout->addWidget(this->gapSpin);
+  this->autoGapButton = new QPushButton(tr("auto"), viewsRow);
+  this->autoGapButton->setToolTip(
+    tr("Set the gap so the dimensions of adjacent views don't collide."));
+  connect(this->autoGapButton, &QPushButton::clicked, this, [this] {
+    const double g = computeAutoGap();
+    QSignalBlocker block(this->gapSpin);
+    this->gapSpin->setValue(g);
+    emit sheetSettingsChanged();
+  });
+  viewsLayout->addWidget(this->autoGapButton);
 
   this->placeholder = new QLabel(tr("Render (F5) to generate orthographic views."), central);
   this->placeholder->setAlignment(Qt::AlignCenter);
@@ -1340,14 +1364,12 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   connect(this->sheet, &DrawingSheetWidget::detailModeFinished, this,
           [this] { this->detailButton->setChecked(false); });
   connect(this->showRefsCheck, &QCheckBox::toggled, this, &DrawingViewDock::setShowAnchors);
-  // Toggling fill mode needs the owner to reproject (faces must be computed), so
-  // reuse the view-selection-changed path.
+  // Fill mode, scale and gap are all persisted sheet settings: a user change writes
+  // // @sheet and reprojects (fill needs faces; the projection cache keeps it cheap).
   connect(this->fillColorsCheck, &QCheckBox::toggled, this,
-          [this](bool) { emit viewSelectionChanged(); });
-  // The scale changes the sheet layout (view sizes and spacing) but not the
-  // geometry, so just recompute the layout — no reprojection / re-render.
+          [this](bool) { emit sheetSettingsChanged(); });
   connect(this->scaleSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-          [this](double) { rebuildSheet(); });
+          [this](double) { emit sheetSettingsChanged(); });
 }
 
 double DrawingViewDock::exportScale() const
@@ -1356,9 +1378,86 @@ double DrawingViewDock::exportScale() const
   return denom > 1e-6 ? 1.0 / denom : 1.0;  // drawing-mm per model-mm
 }
 
+double DrawingViewDock::scaleDenom() const
+{
+  return this->scaleSpin ? this->scaleSpin->value() : 1.0;
+}
+
 bool DrawingViewDock::fillColors() const
 {
   return this->fillColorsCheck && this->fillColorsCheck->isChecked();
+}
+
+double DrawingViewDock::sheetGap() const
+{
+  return this->gapSpin ? this->gapSpin->value() : 16.0;
+}
+
+void DrawingViewDock::applySheetSettings(double gapMm, double scaleDenominator, bool fill,
+                                         const std::vector<bool>& viewsShown)
+{
+  // Set the controls from the parsed // @sheet without emitting sheetSettingsChanged
+  // (blocked), so reading source never writes it straight back.
+  if (this->gapSpin) {
+    QSignalBlocker b(this->gapSpin);
+    this->gapSpin->setValue(gapMm);
+  }
+  if (this->scaleSpin && scaleDenominator > 1e-6) {
+    QSignalBlocker b(this->scaleSpin);
+    this->scaleSpin->setValue(scaleDenominator);
+  }
+  if (this->fillColorsCheck) {
+    QSignalBlocker b(this->fillColorsCheck);
+    this->fillColorsCheck->setChecked(fill);
+  }
+  for (int i = 0; i < this->viewChecks.size() && i < static_cast<int>(viewsShown.size()); ++i) {
+    QSignalBlocker b(this->viewChecks.at(i));
+    this->viewChecks.at(i)->setChecked(viewsShown[i]);
+  }
+}
+
+double DrawingViewDock::computeAutoGap() const
+{
+  // Clearance to leave between the drawn extents (geometry + dimensions + labels) of
+  // adjacent tiles, in drawing-mm.
+  constexpr double kAutoGapTargetMm = 10.0;
+
+  // The extent a tile actually draws beyond its geometry bounding box, on each side,
+  // in drawing-mm. Dimensions sit off the geometry by their offset; // @label text
+  // and dragged dimension labels sit at their own offsets — all in view-local mm, so
+  // multiply by the tile's drawScale to get drawing-mm. The px-sized bits (arrowheads,
+  // label boxes) are ignored: they don't scale with mm and are small next to the
+  // offsets that drive collisions.
+  double maxL = 0, maxR = 0, maxT = 0, maxB = 0;  // overhang beyond bbox per side
+  auto consider = [&](const OrthoViewData& d, double drawScale) {
+    if (!d.valid()) return;
+    const double w = d.sizeMm.width(), h = d.sizeMm.height();
+    auto include = [&](const QPointF& p) {
+      maxL = std::max(maxL, (0.0 - p.x()) * drawScale);
+      maxR = std::max(maxR, (p.x() - w) * drawScale);
+      maxT = std::max(maxT, (0.0 - p.y()) * drawScale);
+      maxB = std::max(maxB, (p.y() - h) * drawScale);
+    };
+    for (const auto& dim : d.dims) {
+      QPointF p0, p1;
+      dimLineEnds(dim, p0, p1);
+      include(p0);
+      include(p1);
+      include(labelPosOf(dim));
+    }
+    for (const auto& lb : d.labels) include(lb.anchor + lb.off);
+    for (const auto& a : d.angles) { include(a.a); include(a.b); }
+  };
+  for (int i = 0; i < this->views.size(); ++i)
+    if (isViewSelected(i)) consider(this->views.at(i), exportScale());
+  for (const auto& s : this->sectionViews) consider(s, exportScale());
+
+  // One gap value: size it for the tighter of the two directions (a horizontal gap
+  // must clear the right overhang of one view plus the left overhang of its neighbour;
+  // likewise vertical), so the tightest adjacency still clears the target.
+  const double needH = kAutoGapTargetMm + maxL + maxR;
+  const double needV = kAutoGapTargetMm + maxT + maxB;
+  return std::clamp(std::max(needH, needV), kAutoGapTargetMm, 200.0);
 }
 
 void DrawingViewDock::setShowAnchors(bool show)
@@ -1403,7 +1502,7 @@ void DrawingViewDock::rebuildSheet()
   std::vector<bool> sel(kViewCount, false);
   for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
   const double scale = exportScale();
-  const double marginMm = 10.0, gapMm = 16.0, titleMm = 7.0;
+  const double marginMm = 10.0, gapMm = sheetGap(), titleMm = 7.0;
   const QVector<SheetTile> tiles =
     collectSheetTiles(this->views, this->sectionViews, this->detailViews, sel, scale);
   const SheetLayoutResult lay = computeSheetLayout(tiles, marginMm, gapMm, titleMm);
@@ -1477,7 +1576,7 @@ void DrawingViewDock::exportDrawing()
 
   const double dpi = 96.0;
   const double mmToPx = dpi / 25.4;
-  const double marginMm = 10.0, gapMm = 16.0, titleMm = 7.0;
+  const double marginMm = 10.0, gapMm = sheetGap(), titleMm = 7.0;
   const double fontMm = 3.0, edgeMm = 0.3, dimMm = 0.25, witMm = 0.15, arrowMm = 2.5;
 
   struct Placement { const OrthoViewData *v; double ox, oy; QString slug; double drawScale; };

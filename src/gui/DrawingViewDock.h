@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include <QColor>
 #include <QFont>
 #include <QHash>
@@ -380,10 +382,20 @@ public:
   void clearViews();
   // Drawing scale as drawing-mm per model-mm (1/denominator from the spinbox).
   double exportScale() const;
+  // The scale denominator as shown in the spinbox ("Scale 1:N" -> N); persisted in
+  // // @sheet as scale=N.
+  double scaleDenom() const;
   // Is standard view `viewIndex` (0..5 = Front/Back/Left/Right/Top/Bottom) shown?
   bool isViewSelected(int viewIndex) const;
   // Whether the "Fill colors" mode is on (fill views with model color() colours).
   bool fillColors() const;
+  // The inter-view spacing in drawing-mm (gap= in // @sheet).
+  double sheetGap() const;
+  // Push the whole sheet state parsed from // @sheet onto the controls WITHOUT
+  // emitting sheetSettingsChanged (signals are blocked), so applying the source does
+  // not write it straight back. `viewsShown` is per standard view (0..5).
+  void applySheetSettings(double gapMm, double scaleDenominator, bool fill,
+                          const std::vector<bool>& viewsShown);
 
 signals:
   // Emitted when an anchor is clicked in one of the views (view index + name).
@@ -409,9 +421,11 @@ signals:
   void jumpToSource(int line);
   // Emitted when the user clicks "Materialize kvóty".
   void materializeRequested();
-  // Emitted when the set of shown views changes (a view checkbox toggled), so the
-  // owner can reproject only the now-visible views.
-  void viewSelectionChanged();
+  // Emitted when the user changes any persisted sheet setting (shown views, scale,
+  // fill mode, inter-view gap). The owner writes the // @sheet comment from the
+  // dock's current state and reprojects. Not emitted while applySheetSettings() sets
+  // the controls from source (signals blocked), so it never loops.
+  void sheetSettingsChanged();
   // Emitted when a detail circle is drawn over standard view `viewIndex`: centre and
   // radius in that view's view-local model-mm. The owner writes a // @detail line.
   void detailRequested(const QString& projKey, double cx, double cy, double r);
@@ -432,6 +446,10 @@ private:
   // the current scale and selection, and hand the placed views to the canvas. Cheap
   // (no reprojection): called after setViews / setSectionViews and on scale change.
   void rebuildSheet();
+  // Spacing (drawing-mm) that leaves ~kAutoGapTargetMm of clear space between the
+  // drawn extents (geometry + dimensions + labels) of adjacent tiles. Used by the
+  // "auto" button next to the gap field.
+  double computeAutoGap() const;
 
   DrawingSheetWidget *sheet{nullptr};
   QVector<class QCheckBox *> viewChecks;  // per-view enable (0..5)
@@ -446,5 +464,7 @@ private:
   QCheckBox *fillColorsCheck;
   QCheckBox *separateFilesCheck;
   QDoubleSpinBox *scaleSpin;
+  QDoubleSpinBox *gapSpin{nullptr};       // inter-view spacing (mm), persisted as gap=
+  QPushButton *autoGapButton{nullptr};    // set the gap to clear the dimensions
   QList<OrthoViewData> views;
 };

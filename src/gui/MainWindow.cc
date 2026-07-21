@@ -3791,9 +3791,10 @@ void MainWindow::setupDrawingDock()
   // Rotating a radial (⌀/R) dimension writes angle= back on release.
   QObject::connect(this->drawingDock, &DrawingViewDock::dimensionAngleChanged, this,
                    &MainWindow::onDimensionAngleChanged);
-  // Toggling which standard views are shown reprojects (mesh stays cached).
-  QObject::connect(this->drawingDock, &DrawingViewDock::viewSelectionChanged, this,
-                   [this] { refreshDrawingViews(); });
+  // A persisted sheet setting changed (shown views, scale, fill, gap): write the
+  // // @sheet comment from the dock's state, then reproject (mesh stays cached).
+  QObject::connect(this->drawingDock, &DrawingViewDock::sheetSettingsChanged, this,
+                   &MainWindow::onDrawingSheetSettingsChanged);
   // Dragging a label writes laboff= back on release.
   QObject::connect(this->drawingDock, &DrawingViewDock::labelOffsetChanged, this,
                    &MainWindow::onLabelOffsetChanged);
@@ -4086,6 +4087,44 @@ void MainWindow::onTilePlaced(const QString& placeKey, double x, double y)
     }
   } else {
     return;
+  }
+  refreshDrawingViews();
+}
+
+void MainWindow::onDrawingSheetSettingsChanged()
+{
+  if (!activeEditor || !this->drawingDock) return;
+  // Build the whole // @sheet line from the dock's current state (gap / scale / shown
+  // views / fill). One comment carries the sheet configuration so it travels with the
+  // file and the export matches the dock.
+  static const char *const slug[6] = {"front", "back", "left", "right", "top", "bottom"};
+  QStringList shown;
+  for (int i = 0; i < 6; ++i)
+    if (this->drawingDock->isViewSelected(i)) shown << slug[i];
+
+  const QString line =
+    QString("// @sheet gap=%1 scale=%2 views=%3 fill=%4")
+      .arg(this->drawingDock->sheetGap(), 0, 'g', 5)
+      .arg(this->drawingDock->scaleDenom(), 0, 'g', 5)
+      .arg(shown.isEmpty() ? QStringLiteral("none") : shown.join(','),
+           this->drawingDock->fillColors() ? QStringLiteral("on") : QStringLiteral("off"));
+
+  QStringList lines = activeEditor->toPlainText().split('\n');
+  static const QRegularExpression sheetRe(R"(^\s*//\s*@sheet\b)");
+  int found = -1;
+  for (int i = 0; i < lines.size(); ++i)
+    if (sheetRe.match(lines.at(i)).hasMatch()) { found = i; break; }
+  if (found >= 0) {
+    if (lines.at(found) == line) return;  // no change: don't churn the document
+    lines[found] = line;
+    activeEditor->setPlainText(lines.join('\n'));
+  } else {
+    activeEditor->setCursorPosition(lines.size() - 1,
+                                    lines.isEmpty() ? 0 : lines.last().length());
+    QString ins;
+    if (!lines.isEmpty() && !lines.last().isEmpty()) ins += "\n";
+    ins += line + "\n";
+    activeEditor->insertOrReplaceText(ins);
   }
   refreshDrawingViews();
 }
@@ -5113,6 +5152,43 @@ void MainWindow::refreshDrawingViews()
   const auto dimrefs =
     this->rootNode ? collectDimrefs(this->rootNode) : std::vector<DimrefInfo>{};
   const QString source = activeEditor ? activeEditor->toPlainText() : QString();
+
+  // Sheet-level settings live in a single // @sheet comment (gap / scale / shown
+  // views / fill). Parse it and push it onto the dock's controls BEFORE the layout
+  // below reads them, so the source is authoritative; applySheetSettings blocks the
+  // controls' signals so this does not write straight back. Missing tokens keep the
+  // dock's current value.
+  {
+    static const char *const slug[6] = {"front", "back", "left", "right", "top", "bottom"};
+    double gap = this->drawingDock->sheetGap();
+    double scaleDen = this->drawingDock->scaleDenom();
+    bool fill = this->drawingDock->fillColors();
+    std::vector<bool> shown(6);
+    for (int i = 0; i < 6; ++i) shown[i] = this->drawingDock->isViewSelected(i);
+    static const QRegularExpression sheetRe(R"(^\s*//\s*@sheet\b(.*)$)");
+    for (const QString& L : source.split('\n')) {
+      const auto m = sheetRe.match(L);
+      if (!m.hasMatch()) continue;
+      for (const QString& tok :
+           m.captured(1).split(QRegularExpression("\\s+"), Qt::SkipEmptyParts)) {
+        const int eq = tok.indexOf('=');
+        if (eq < 0) continue;
+        const QString k = tok.left(eq), v = tok.mid(eq + 1);
+        if (k == "gap") gap = v.toDouble();
+        else if (k == "scale") { const double d = v.toDouble(); if (d > 1e-6) scaleDen = d; }
+        else if (k == "fill") fill = (v == "on" || v == "1" || v == "true");
+        else if (k == "views") {
+          for (int i = 0; i < 6; ++i) shown[i] = false;
+          for (const QString& s : v.split(',', Qt::SkipEmptyParts))
+            for (int i = 0; i < 6; ++i)
+              if (s.compare(slug[i], Qt::CaseInsensitive) == 0) shown[i] = true;
+        }
+      }
+      break;  // first // @sheet wins
+    }
+    this->drawingDock->applySheetSettings(gap, scaleDen, fill, shown);
+  }
+
   const ResolvedDrawing resolved = resolveDrawing(dimrefs, source, /*warn=*/true);
   const std::vector<AnchorRec>& anchorRecs = resolved.anchors;
   const std::vector<ResolvedDim>& dims = resolved.dims;
