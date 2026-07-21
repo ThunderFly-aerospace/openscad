@@ -945,7 +945,16 @@ Zpětná vazba z reálného projektu (2 naimportované STL plošňáku, 2026-07-
 Rozhodnuto rozdělit do **dvou kroků** (13A rendering, pak 13B layout); oba naplánovány
 teď, implementují se po sobě.
 
-### 13A — vrstvy + pixmap cache (per-dlaždice)  🔶
+### 13A — vrstvy + pixmap cache (per-dlaždice)  ✅ HOTOVO (2026-07-21)
+
+Commit `dc5944b76`. Bug (pořadí hit-testů) opraven a ověřen headless (klik na kotvu
+v řezu zapsal `// @dim TOP R proj=sectiona`). Vrstvení: geometrie dlaždice do vlastní
+cache `QPixmap` (`DrawingSheetWidget::TileLayer`, klíč `tileId`), `paintPlacement`
+rozdělen na `renderTileGeometry` (do pixmapy) + `paintTileOverlay` (živě). Zoom
+dvoufázově přes `zoomSettleTimer` (150 ms); scaled blit sedí s overlayem, protože
+`ratio*builtScale == k`. Cache přežije `setSheet` editace kóty, dropne se na změnu
+meshe přes `drawingGeomVersion` (MainWindow bumpuje spolu s projekční cache). Ověřeno
+headless: tažení kóty drží kurzor, pan i zoom zarovnané, bez vizuální regrese.
 
 Rozhodnutí (uživatel, 2026-07-21): **každá dlaždice — pohled, řez i detail — je vlastní
 vrstva (pixmapa).** Posun dlaždice po listu pak není zvláštní případ, je to „pan jedné
@@ -982,7 +991,7 @@ reálně přerovnávají) se celá vejde → plynulé. Paměť ohraničená.
 kotvu / label-marker PŘED tažením dlaždice. Kotva má malý poloměr zásahu (12 px), klik
 mimo tečky spadne dál na tažení dlaždice — správná priorita.
 
-### 13B — nastavitelné rozestupy standardních pohledů (staví na 13A)  🔶
+### 13B — nastavitelné rozestupy + `// @sheet` (staví na 13A)  🔶
 
 Standardní pohledy zůstávají v pevném ISO-E rozvržení, mění se jen **rozestup mezi nimi**.
 Řezy se dál tahají (`at=` do zdroje) — beze změny. Rozhodnutí uživatele (2026-07-21):
@@ -992,16 +1001,43 @@ Standardní pohledy zůstávají v pevném ISO-E rozvržení, mění se jen **ro
 - **Tlačítko „auto"**: z rozložení kót spočítá rozestup tak, aby mezi sousedními
   dlaždicemi zůstala cílová mezera (default 10 mm).
 
-Tři dopřesnění (odsouhlaseno):
+Dopřesnění (odsouhlaseno):
 1. **Co „auto" měří:** skutečný nakreslený rozsah dlaždice **včetně přesahu kót a
    labelů**, ne jen bbox geometrie — jinak kóty pořád přetečou do souseda. Rozsah =
    geometrie + kótovací čáry + popisky; mezera se počítá mezi těmito rozšířenými rozsahy.
-2. **Kam se rozestup uloží:** do zdroje novým komentářem **`// @sheet gap=N`** (tlačítko
-   „auto" tam zapíše spočítanou hodnotu). Drží WYSIWYG (dok == export), přežije reload.
-   (Ne jen UI stav doku — ten by se s exportem rozešel.)
-3. **Jedna hodnota, ne H/V zvlášť** (pro začátek): „auto" nastaví tu, co je potřeba na
-   těsnějším směru. Případné rozdělení na vodorovnou/svislou mezeru později, když bude
-   vadit.
+2. **Jedna hodnota, ne H/V zvlášť** (pro začátek): „auto" nastaví tu, co je potřeba na
+   těsnějším směru. Případné rozdělení později.
+
+**`// @sheet` nese CELÝ stav listu** (rozhodnutí uživatele 2026-07-21, AskUserQuestion —
+vybráno gap + views + scale + fill). Jeden komentář, sheet-level, drží WYSIWYG (dok ==
+export) a přežije reload:
+
+```
+// @sheet gap=12 scale=2 views=front,top,right fill=on
+```
+
+- **`gap=`** rozestup v mm (13B jádro).
+- **`views=`** které z 6 standardních pohledů jsou zaškrtnuté (nápad uživatele — dnes jen
+  UI stav doku, po uložení cestuje se souborem).
+- **`scale=`** měřítko listu (dnes spinbox „Scale", neperzistentní).
+- **`fill=`** barevná výplň on/off (dnes checkbox, neperzistentní).
+
+Důsledek: přepnutí zaškrtávátka pohledu / změna scale / fill / gap **zapíše do zdroje**
+(jako řezy/kóty), a `refreshDrawingViews` čte `// @sheet` a nastaví ovládací prvky doku
+podle něj. Pozor na zpětnou vazbu: při nastavování ovládacích prvků ze zdroje **blokovat
+signály**, jinak smyčka. Chybí-li `// @sheet`, platí dnešní defaulty; první změna řádek
+vytvoří (vzor `// @section … at=`).
+
+### 13C — neblokující přestavba pixmap (staví na 13A, po 13B)  🔶
+
+Zpětná vazba (uživatel, 2026-07-21): „když běží překreslení, nedá se tahat" — jednorázová
+přestavba pixmap (po F5 / doostření zoomu / přepnutí pohledu) běží synchronně na UI vlákně
+a na velkém meshi UI na chvíli zamrzne. Ovládání je jinak „výrazně lepší". Řešení:
+- **Inkrementální render** (jedna dlaždice za cyklus event-loop, `QTimer(0)`), nebo
+- **worker vlákno** (`QImage` v threadu → `QPixmap` na UI po dokončení).
+Během přestavby ukazovat starou (scaled) pixmapu, jak už dělá zoom. Rozhodnuto řešit
+**až po 13B a změřit** — možná stačí to, co je.
 
 ### Pořadí
-Bug (hit-test) → 13A (vrstvy/pixmapy) → **reálné měření uživatelem** → 13B (rozestupy).
+Bug (hit-test) → 13A (vrstvy/pixmapy) ✅ → měření uživatelem ✅ (výrazně lepší, zbývá
+blokování při přestavbě) → 13B (rozestupy + `// @sheet`) → 13C (neblokující render).
