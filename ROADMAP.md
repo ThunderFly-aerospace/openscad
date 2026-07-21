@@ -925,3 +925,83 @@ kružnicí detailu (kružnice se aproximuje polygonem, přesný ořez by znamena
 hrany) a kreslí se ve stejném painter's pořadí jako u rodiče. Kóty se do detailu
 **nedědí** — dlaždice detailu zůstává zobrazovací (`annotated=false`); kótovat detail
 zvlášť je samostatné rozhodnutí, ne bugfix.
+
+## Fáze 13 — vícevrstvé zobrazení výkresu + nastavitelné rozestupy  🔶 naplánováno (2026-07-21)
+
+Zpětná vazba z reálného projektu (2 naimportované STL plošňáku, 2026-07-21): Fáze 11
+(cache projekce + levný paint) použitelnost **nezachránila**. Dva problémy:
+
+1. **Bug — klik na kotvu v řezu nejde.** Body kotev se zobrazí, ale levý klik do řezové
+   dlaždice spustí **posun dlaždice**, ne tvorbu kóty. Příčina: pořadí hit-testů v
+   `DrawingSheetWidget::mousePressEvent` — kontrola „táhni pohyblivou dlaždici"
+   (`DrawingViewDock.cc:695`) je PŘED „klik na kotvu" (`:704`), a řezy jsou `movable`.
+   Ve standardních pohledech se to nestane (nejsou `movable`).
+2. **Výkon — tažení kóty i posun řezu je pomalé.** Kóta se nedrží kurzoru, skočí až po
+   puštění, pak se vše překreslí. Příčina: každý snímek tažení (`mouseMoveEvent` →
+   `update()` → `paintEvent`) překreslí VŠECHNU geometrii všech dlaždic. 11C zlevnilo
+   jeden paint, ale u velkého meshe je i jeden kompletní repaint delší než interval myši
+   → Qt snímky slučuje a zahazuje. Potvrzuje, že 11B/11C nestačí a je nutné vrstvení.
+
+Rozhodnuto rozdělit do **dvou kroků** (13A rendering, pak 13B layout); oba naplánovány
+teď, implementují se po sobě.
+
+### 13A — vrstvy + pixmap cache (per-dlaždice)  🔶
+
+Rozhodnutí (uživatel, 2026-07-21): **každá dlaždice — pohled, řez i detail — je vlastní
+vrstva (pixmapa).** Posun dlaždice po listu pak není zvláštní případ, je to „pan jedné
+dlaždice": změní se její origin, list se přeskládá blitováním. Sjednotí to všechny
+operace:
+
+| operace | co se děje | cena |
+|---|---|---|
+| skládání listu | blit každé dlaždice na její pozici | — |
+| posun dlaždice (řez/detail) | změň origin jedné, přeblituj | okamžité |
+| pan | posuň blity všech | okamžité |
+| tažení kóty/labelu | živé kóty nad hotovými pixmapami | okamžité |
+| zoom | škálovaný (rozmazaný) blit, přerender po ~150 ms | okamžité + doostření |
+| změna geometrie (F5/F6) | přerender pixmap | jednorázově |
+
+Práce:
+1. **Rozdělit `paintPlacement`** na `renderTileGeometry` (výplně + šrafa + hrany → do
+   pixmapy) a `paintTileOverlay` (titulek, kóty, úhly, řezové čáry, detail-značky,
+   labely, kotvy → kreslí se živě nad blit).
+2. **Cache pixmap per dlaždice** (klíč = identita dlaždice), s uloženým měřítkem, při
+   kterém byla postavená. Invalidace jen při: změně geometrie, změně zoomu, expozici
+   nové oblasti panem.
+3. **`paintEvent`**: pro každou viditelnou dlaždici zajisti aktuální pixmapu → blit na
+   pozici → živý overlay.
+4. **Zoom dvoufázově**: `QTimer` ~150 ms; během točení kolečka škálovaný blit, po ustání
+   přerender + swap.
+
+Háček (ne rozhodnutí, jen omezení): při velkém zoomu je pixmapa dlaždice mnohem větší
+než plátno → rasterizovat jen `bbox ∩ (plátno + okraj)`. Důsledek: tažení dlaždice hodně
+daleko při velkém zoomu dorenderuje kraj se zpožděním. Při fit-zoomu (kdy se dlaždice
+reálně přerovnávají) se celá vejde → plynulé. Paměť ohraničená.
+
+**Bug s klikem na kotvu v řezu** se opraví zvlášť a jako první (nezávislé): otestovat
+kotvu / label-marker PŘED tažením dlaždice. Kotva má malý poloměr zásahu (12 px), klik
+mimo tečky spadne dál na tažení dlaždice — správná priorita.
+
+### 13B — nastavitelné rozestupy standardních pohledů (staví na 13A)  🔶
+
+Standardní pohledy zůstávají v pevném ISO-E rozvržení, mění se jen **rozestup mezi nimi**.
+Řezy se dál tahají (`at=` do zdroje) — beze změny. Rozhodnutí uživatele (2026-07-21):
+
+- **Číselné pole „rozestup (mm)"** u zaškrtávátek pohledů. Nahradí dnešní pevný `gapMm`
+  (16) uživatelskou hodnotou → jde do `computeSheetLayout`.
+- **Tlačítko „auto"**: z rozložení kót spočítá rozestup tak, aby mezi sousedními
+  dlaždicemi zůstala cílová mezera (default 10 mm).
+
+Tři dopřesnění (odsouhlaseno):
+1. **Co „auto" měří:** skutečný nakreslený rozsah dlaždice **včetně přesahu kót a
+   labelů**, ne jen bbox geometrie — jinak kóty pořád přetečou do souseda. Rozsah =
+   geometrie + kótovací čáry + popisky; mezera se počítá mezi těmito rozšířenými rozsahy.
+2. **Kam se rozestup uloží:** do zdroje novým komentářem **`// @sheet gap=N`** (tlačítko
+   „auto" tam zapíše spočítanou hodnotu). Drží WYSIWYG (dok == export), přežije reload.
+   (Ne jen UI stav doku — ten by se s exportem rozešel.)
+3. **Jedna hodnota, ne H/V zvlášť** (pro začátek): „auto" nastaví tu, co je potřeba na
+   těsnějším směru. Případné rozdělení na vodorovnou/svislou mezeru později, když bude
+   vadit.
+
+### Pořadí
+Bug (hit-test) → 13A (vrstvy/pixmapy) → **reálné měření uživatelem** → 13B (rozestupy).
