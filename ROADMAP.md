@@ -926,7 +926,7 @@ hrany) a kreslí se ve stejném painter's pořadí jako u rodiče. Kóty se do d
 **nedědí** — dlaždice detailu zůstává zobrazovací (`annotated=false`); kótovat detail
 zvlášť je samostatné rozhodnutí, ne bugfix.
 
-## Fáze 13 — vícevrstvé zobrazení výkresu + nastavitelné rozestupy  🔶 naplánováno (2026-07-21)
+## Fáze 13 — vícevrstvé zobrazení výkresu + nastavitelné rozestupy  ✅ HOTOVO (2026-07-21)
 
 Zpětná vazba z reálného projektu (2 naimportované STL plošňáku, 2026-07-21): Fáze 11
 (cache projekce + levný paint) použitelnost **nezachránila**. Dva problémy:
@@ -991,7 +991,7 @@ reálně přerovnávají) se celá vejde → plynulé. Paměť ohraničená.
 kotvu / label-marker PŘED tažením dlaždice. Kotva má malý poloměr zásahu (12 px), klik
 mimo tečky spadne dál na tažení dlaždice — správná priorita.
 
-### 13B — nastavitelné rozestupy + `// @sheet` (staví na 13A)  🔶
+### 13B — nastavitelné rozestupy + `// @sheet` (staví na 13A)  ✅ HOTOVO (2026-07-21)
 
 Standardní pohledy zůstávají v pevném ISO-E rozvržení, mění se jen **rozestup mezi nimi**.
 Řezy se dál tahají (`at=` do zdroje) — beze změny. Rozhodnutí uživatele (2026-07-21):
@@ -1028,7 +1028,7 @@ podle něj. Pozor na zpětnou vazbu: při nastavování ovládacích prvků ze z
 signály**, jinak smyčka. Chybí-li `// @sheet`, platí dnešní defaulty; první změna řádek
 vytvoří (vzor `// @section … at=`).
 
-### 13C — neblokující přestavba pixmap (staví na 13A, po 13B)  🔶
+### 13C — neblokující přestavba pixmap (staví na 13A, po 13B)  ✅ HOTOVO (2026-07-21)
 
 Zpětná vazba (uživatel, 2026-07-21): „když běží překreslení, nedá se tahat" — jednorázová
 přestavba pixmap (po F5 / doostření zoomu / přepnutí pohledu) běží synchronně na UI vlákně
@@ -1039,5 +1039,6 @@ Během přestavby ukazovat starou (scaled) pixmapu, jak už dělá zoom. Rozhodn
 **až po 13B a změřit** — možná stačí to, co je.
 
 ### Pořadí
-Bug (hit-test) → 13A (vrstvy/pixmapy) ✅ → měření uživatelem ✅ (výrazně lepší, zbývá
-blokování při přestavbě) → 13B (rozestupy + `// @sheet`) → 13C (neblokující render).
+Bug (hit-test) ✅ → 13A (vrstvy/pixmapy) ✅ → měření uživatelem ✅ → 13B (rozestupy +
+`// @sheet`) ✅ → 13C (neblokující render) ✅. Celá Fáze 13 hotová 2026-07-21, ověřeno
+headless; čeká na měření uživatele na reálném projektu.
