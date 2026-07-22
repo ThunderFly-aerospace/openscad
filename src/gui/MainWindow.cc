@@ -5258,6 +5258,14 @@ void MainWindow::refreshDrawingViews()
     this->drawingProjCache.geom = geom;
     ++this->drawingGeomVersion;
   }
+  // The colour fills are baked into the tile geometry pixmaps, so toggling fill mode
+  // (mesh and scale unchanged) must invalidate them too — otherwise the cached pixmap
+  // keeps its old fill state. Treat it like a geometry change and bump the version.
+  const bool fillNow = this->drawingDock->fillColors();
+  if (fillNow != this->drawingLastFill) {
+    ++this->drawingGeomVersion;
+    this->drawingLastFill = fillNow;
+  }
   this->drawingDock->setGeometryVersion(this->drawingGeomVersion);
   auto cachedEdges = [this, &ps](int vi, const LineDrawingView& v)
     -> const std::vector<LineDrawingSeg2D>& {

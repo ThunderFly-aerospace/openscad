@@ -231,6 +231,9 @@ private:
   // geometry pixmap cache is dropped only on a real geometry change, not on a
   // dimension edit (which re-runs refreshDrawingViews with the same mesh).
   int drawingGeomVersion{0};
+  // Last fill-colors mode the tile pixmaps were built for. A change bumps the version
+  // above, since fills are baked into those pixmaps (default off).
+  bool drawingLastFill{false};
 
 protected:
   void closeEvent(QCloseEvent *event) override;
