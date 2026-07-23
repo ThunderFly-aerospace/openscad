@@ -69,6 +69,13 @@ i její **testy** — bez zelených testů není fáze hotová.
   pravý klik skok do zdroje. Ověřeno vizuálně v GUI; relevantní regrese
   (dimref/camera/obj dump-echo) zelené.
 
+- **Fáze 14 (`bend()`)** — ✅ **HOTOVO** (2026-07-23). Builtin `bend(at, r, angle,
+  xlim, ylim, zlim)` ohýbá i importovaná STL (nelineární mapa pod úrovní meshe,
+  což knihovny jako BOSL2 neumí). Analytická C1 mapa, dělení trojúhelníků jen
+  v pásmu ohybu a na rovinách masky, detekce trhlin a minimálního poloměru,
+  zachované barvy facy. 23 testů (dump/echo, obrazové na obou backendech,
+  export-stl, 8 unit testů) zelených.
+
 ---
 
 ## Fáze 0 — baseline (než sáhneme na kód)  ✅ HOTOVO
@@ -1042,3 +1049,183 @@ Během přestavby ukazovat starou (scaled) pixmapu, jak už dělá zoom. Rozhodn
 Bug (hit-test) ✅ → 13A (vrstvy/pixmapy) ✅ → měření uživatelem ✅ → 13B (rozestupy +
 `// @sheet`) ✅ → 13C (neblokující render) ✅. Celá Fáze 13 hotová 2026-07-21, ověřeno
 headless; čeká na měření uživatele na reálném projektu.
+
+---
+
+## Fáze 14 — `bend()`: ohyb geometrie (flex PCB)  ✅ HOTOVO (2026-07-23)
+
+### Motivace
+
+Uživatel má STL flexibilního PCB, které je exportované **ploché**. Do modelu ho
+potřebuje dostat ohnuté. Dnes to nejde nijak: OpenSCAD umí jen afinní
+transformace (`multmatrix`), a knihovní řešení (BOSL2 `skin`/`path_sweep`)
+pracují jen nad geometrií, kterou si samy vygenerují — **importované STL
+deformovat neumí**. Vestavěný uzel pod úrovní meshe to umí.
+
+### Zvažovaná alternativa (zamítnuto)
+
+Původní úvaha byla obecný `deform(from=[…], to=[…])` — dva stejně dlouhé
+seznamy bodů, geometrie uvnitř konvexního obalu se mapuje na obal výstupní.
+Zamítnuto: pro N > 4 bodů afinní mapa neexistuje, takže „lineárně" musí být
+buď po částech lineární (Delaunay tetraedralizace + barycentrické souřadnice),
+nebo klec se zobecněnými barycentrickými souřadnicemi, nebo RBF/TPS — každá
+volba má jiné chování a uživatel by musel trefovat body. Pro reálnou úlohu
+(ohnout flex) je analytický ohyb jednodušší, přesnější a lépe ovladatelný.
+
+### Zadání (ROZHODNUTO 2026-07-23)
+
+```scad
+bend(at = 10, r = 2, angle = 90, xlim = [undef, 60], ylim = [-6, 6], zlim = [-1, 5])
+  children();
+```
+
+- **Orientace natvrdo**: deska leží v XY podél +X, ohyb kolem osy **Y**,
+  neutrální vlákno **z = 0**, kladný `angle` zakřivuje k **+Z**. Jiná orientace
+  se řeší obalujícím `rotate()`. Volitelná osa **zamítnuta** — měnila by
+  význam `ylim`/`zlim` a byla by matoucí.
+- **`at`** — x dělicí roviny, **`r`** — poloměr neutrálního vlákna (> 0),
+  **`angle`** — úhel ohybu ve stupních (0 = identita).
+- **`xlim`/`ylim`/`zlim`** — nepovinné rozsahy `[lo, hi]`, `undef` na kterékoli
+  pozici = neomezeno. Vrchol musí projít **všemi** zadanými limity, jinak se ho
+  ohyb **vůbec nedotkne** (identita). Limity se vyhodnocují ve **vstupních**
+  (tj. aktuálních, už možná ohnutých) souřadnicích.
+- **`$fa`/`$fs`/`$fn`** řídí počet segmentů oblouku přes `CurveDiscretizer`
+  (stejná sémantika jako u `cylinder`).
+  ⚠️ **Pozor na default `$fs = 2`**: u malých poloměrů je to vazbová podmínka
+  a ohyb vyjde hrubý — `r=2, angle=90` dá s defaulty jen 2 segmenty a `$fa` na
+  tom nic nezmění (min() vybere hrubší z obou, přesně jako u `cylinder`).
+  Změřeno na desce 30×10×0.4: defaulty 84 trojúhelníků, `$fs=0.2` i `$fn=32`
+  444. Pro reálný flex tedy nastavovat `$fn` nebo `$fs`.
+
+### Mapa (jedna formule, C1 spojitá)
+
+`Θ` = `angle` v radiánech, `R = sign(Θ)·r`, `L = r·|Θ|`, střed `C = (at, 0, R)`.
+
+```
+u = x - at
+u ≤ 0  → θ = 0,    s = u        (pevná část, identita)
+u ≥ L  → θ = Θ,    s = u - L    (tuhá zóna za obloukem)
+jinak  → θ = u/R,  s = 0        (oblouk)
+
+bent = C + Ry(-θ) · (s, y, z - R)
+```
+
+Ověření: pro `u ≤ 0` vyjde přesně `(x,y,z)`; pro `u = L` se obě větve
+shodují. Vlákna nad neutrální rovinou se natahují, pod ní stlačují — to je
+fyzikálně správné chování flexu a uživatel to tak chce.
+
+Koncový rámec oblouku je `translate([at + r·sin(angle), 0, r - r·cos(angle)])
+rotate([0, -angle, 0])` — jeho inverze slouží uživateli ke srovnání výsledku
+zpět do XY před dalším ohybem.
+
+### Řetězení (model uživatele)
+
+Uživatel **nezanořuje bendy přímo do sebe**; mezi ně vkládá `rotate`/`translate`,
+aby další ohýbaná část zase ležela v XY:
+
+```scad
+bend(…)                      // 3. ohyb
+  rotate(…) translate(…)     // srovnat do XY
+    bend(…)                  // 2. ohyb
+      rotate(…) translate(…)
+        bend(…)              // 1. ohyb
+          import("pcb.stl");
+```
+
+Důsledek: **`bend` je bezstavový**, pracuje jen v aktuálních souřadnicích,
+nepamatuje si žádnou rozvinutou délku a nezáleží na pořadí zanoření. Limity
+pak řeší reálné situace: `ylim` vybere úzký výběžek, `xlim` shora usekne tuhou
+zónu, `zlim` vyloučí to, co předchozí ohyby už vyzvedly do výšky a co náhodou
+zasahuje do X-rozsahu aktuálního ohybu.
+
+### Diskretizace
+
+Ploché STL má obdélník ze dvou trojúhelníků — bez dělení by se ohyb neprojevil.
+Řezné roviny (Sutherland–Hodgman na trojúhelnících, půlky se vějířovitě
+triangulují):
+
+1. **roviny masky** (`xlim`/`ylim`/`zlim`, jen konečné meze) — na všechny
+   trojúhelníky; díky tomu je případná trhlina **čistý otvor s rovnou hranou**
+   místo natažené blány,
+2. **roviny pásma** `x = at + k·L/N`, `k = 0…N` (`N` z `CurveDiscretizer`) —
+   jen na trojúhelníky, které mají aspoň jeden vrchol uvnitř masky.
+
+Trojúhelníky, které rovinu neprotínají, projdou beze změny → dělení je
+automaticky lokální, mimo pásmo nic nepřibude.
+
+Dělicí bod se počítá z **kanonicky uspořádané** dvojice vrcholů (lexikograficky),
+aby dva sousední trojúhelníky sdílející hranu dostaly bit-identický bod a
+`PolySetBuilder` (Reindexer) je spojil → mesh zůstane manifold.
+
+Barvy facy (`color_indices`/`colors`) se při dělení dědí.
+
+### Kontroly
+
+- **Trhliny**: hrana, jejíž jeden vrchol projde maskou a druhý ne, **a zároveň**
+  se ten průchozí vrchol reálně posune (v oblasti `x < at` je mapa identita, ty
+  hrany se nepočítají). Hlásí se **Warning**, ne Error — roztržený model může
+  být záměr a tvrdá chyba by byla otravná; ale mlčet nelze, protože nemanifoldní
+  mesh položí následné booleany v Manifoldu s nesrozumitelnou chybou jinde.
+  ```
+  WARNING: bend(): region boundary cuts through material (247 edges, max gap 3.8)
+  ```
+- **Minimální poloměr ohybu**: `r ≤ max(z)` na vnitřní straně → mapa se převrátí
+  a mesh se sám prosekne. Warning, fyzikálně = „minimum bend radius" flexu.
+- `r ≤ 0` → Error, prázdná geometrie. `angle == 0` → identita bez dělení.
+- 2D děti → Warning „bend() requires 3D geometry", děti projdou beze změny.
+
+### Zapojení do enginu
+
+- `GeometryEvaluator::visit(BendNode)` podle vzoru `visit(RenderNode)`
+  (`GeometryEvaluator.cc:637`): `applyToChildren(UNION)` →
+  `PolySetUtils::getGeometryAsPolySet()` → `bendPolySet()`.
+- `CSGTreeEvaluator::visit(BendNode)` podle vzoru `visit(RenderNode)`
+  (`CSGTreeEvaluator.cc:302`): nelineární mapa se do CSG stromu nevejde
+  (`CSGLeaf` nese 4×4 matici), takže se podstrom **zmaterializuje jako jeden
+  leaf** — `bend()` se v F5 chová jako `render()`.
+  **Cena je u cílového případu nulová**: dítě je jediný `import()`, tedy už
+  hotový PolySet, žádné booleany se nedělají.
+
+### Kroky implementace
+
+1. `src/core/BendNode.{h,cc}` — uzel, `toString()` (musí vypsat `at/r/angle` i
+   limity, jinak by se dva různé ohyby srazily v `GeometryCache`),
+   `register_builtin_bend()` podle vzoru `color()`.
+2. Zapojení: `NodeVisitor.h`, `Builtins.cc`, `node_clone.cc`, `CMakeLists.txt`.
+3. `src/geometry/bend.{h,cc}` — řezání rovinou, mapa, statistika trhlin.
+4. `GeometryEvaluator` + `CSGTreeEvaluator`.
+5. Testy.
+
+### Testy  ✅ 23 testů, všechny zelené
+
+- `tests/data/scad/misc/bend-node.scad` → `dump-bend-node`/`echo-bend-node`:
+  dump nese všechny parametry včetně limitů a `$fn/$fa/$fs` (nutné kvůli
+  `GeometryCache`), echo chytá varování pro vadný a prázdný rozsah.
+- `tests/data/scad/3D/features/bend-tests.scad` — auto-globnuto do
+  `dump`/`render-{cgal,manifold}`/`preview-*`/`throwntogether-*`/`render-csg-cgal`
+  (5 případů: 90°, záporný úhel, `ylim` na jednom ze dvou výběžků, řetězení,
+  `angle=0`). Zlaté PNG ověřeny okem.
+- `tests/data/scad/stl/bend-export.scad` v `EXPORT_STL_TEST_FILES` → `export-stl`,
+  `-stdout`, `-manifold`, `export-binstl`, `-stdout`. **Oba backendy dávají
+  bajtově identický výstup**, takže sdílený zlatý soubor drží.
+- `src/geometry/bend_test.cc` (8 Catch2 testů): identita pro `angle=0`, bbox a
+  vodotěsnost po ohybu, lokálnost dělení (deska 30 a 60 dá stejný počet
+  trojúhelníků), maska mimo materiál = identita, detekce i nedetekce trhliny,
+  příznak minimálního poloměru, záporný úhel.
+  Glob v `CMakeLists.txt` bere jen `src/utils/*_test.cc`, proto je soubor
+  přidaný **explicitně** přes `list(APPEND TEST_SOURCES …)` — širší glob by
+  vtáhl i mrtvý `src/geometry/linear_extrude_test.cc`.
+
+### Co odhalily testy
+
+Unit test „maska mimo materiál" našel reálnou chybu: v pevné části (`u ≤ 0`)
+mapa počítala `at + (x - at)`, což se v plovoucí čárce **nevrací bit po bitu**.
+Vrchol na hranici masky pak dostal o jeden ulp jinou souřadnici než jeho soused
+z nemaskované strany, `Reindexer` je nespojil a mesh se tiše otevřel — a to bez
+varování, protože posun ~1e-16 je pod prahem detekce trhlin. Opraveno: pro
+`u ≤ 0` se vrací vstupní bod beze změny.
+
+### Regrese
+
+Celá sada `xvfb-run ctest -j6`: 5 selhání, všechna z hrstky známých flaky
+image testů pod llvmpipe (viz Fáze 0) — v `-j1` projdou 100 %. Nic navíc.

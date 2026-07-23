@@ -1006,6 +1006,7 @@ set(CORE_SOURCES
   src/core/Builtins.cc
   src/core/CSGNode.cc
   src/core/CSGTreeEvaluator.cc
+  src/core/BendNode.cc
   src/core/CameraNode.cc
   src/core/DimrefNode.cc
   src/core/SectionNode.cc
@@ -1086,6 +1087,7 @@ set(CORE_SOURCES
   src/geometry/Polygon2d.cc
   src/geometry/boolean_utils.cc
   src/geometry/linalg.cc
+  src/geometry/bend.cc
   src/geometry/linear_extrude.cc
   src/geometry/rotate_extrude.cc
   src/glview/Camera.cc
@@ -1586,6 +1588,9 @@ endif()
 file(GLOB_RECURSE TEST_SOURCES
   "src/utils/*_test.cc"
 )
+# Co-located tests outside src/utils are listed explicitly, so that stale test
+# files elsewhere in the tree do not get pulled into the build by a wide glob.
+list(APPEND TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/geometry/bend_test.cc")
 file(GLOB_RECURSE GUI_TEST_SOURCES
   "src/gui/*_test.cc"
 )

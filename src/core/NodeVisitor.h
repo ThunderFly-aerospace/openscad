@@ -30,6 +30,7 @@ class NodeVisitor : public BaseVisitor,
                     public Visitor<class DimrefNode>,
                     public Visitor<class SectionNode>,
                     public Visitor<class LabelNode>,
+                    public Visitor<class BendNode>,
                     public Visitor<class OffsetNode>
 {
 public:
@@ -135,6 +136,12 @@ public:
   // empty group so it stays invisible in preview/render/export and does not break
   // measurement.
   Response visit(State& state, const LabelNode& node) override
+  {
+    return visit(state, (const AbstractNode&)node);
+  }
+  // bend() deforms its children non-affinely; visitors that do not know about
+  // it (dumper, cache, ...) can treat it like a plain group.
+  Response visit(State& state, const BendNode& node) override
   {
     return visit(state, (const AbstractNode&)node);
   }

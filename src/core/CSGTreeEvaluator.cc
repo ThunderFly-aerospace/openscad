@@ -14,6 +14,7 @@
 #include "core/ColorNode.h"
 #include "core/CsgOpNode.h"
 #include "core/ModuleInstantiation.h"
+#include "core/BendNode.h"
 #include "core/RenderNode.h"
 #include "core/State.h"
 #include "core/TransformNode.h"
@@ -306,6 +307,31 @@ Response CSGTreeEvaluator::visit(State& state, const RenderNode& node)
     std::shared_ptr<const Geometry> geom;
     if (this->geomevaluator) {
       geom = this->geomevaluator->evaluateGeometry(node, false);
+      if (geom) {
+        t1 = evaluateCSGNodeFromGeometry(state, geom, node.modinst, node);
+      } else {
+        t1 = CSGNode::createEmptySet();
+      }
+      node.progress_report();
+    }
+    this->stored_term[node.index()] = t1;
+    addToParent(state, node);
+  }
+  return Response::ContinueTraversal;
+}
+
+/*!
+   A non-affine deformation cannot live in the CSG tree (a CSGLeaf only carries
+   a 4x4 matrix), so the subtree is materialized into a single leaf, exactly
+   like render() does. In practice bend() wraps an import(), which is already a
+   plain PolySet, so nothing extra is paid for it.
+ */
+Response CSGTreeEvaluator::visit(State& state, const BendNode& node)
+{
+  if (state.isPostfix()) {
+    std::shared_ptr<CSGNode> t1;
+    if (this->geomevaluator) {
+      std::shared_ptr<const Geometry> geom = this->geomevaluator->evaluateGeometry(node, false);
       if (geom) {
         t1 = evaluateCSGNodeFromGeometry(state, geom, node.modinst, node);
       } else {

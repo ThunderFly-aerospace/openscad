@@ -45,6 +45,7 @@ public:
   Response visit(State& state, const CgalAdvNode& node) override;
   Response visit(State& state, const ProjectionNode& node) override;
   Response visit(State& state, const RenderNode& node) override;
+  Response visit(State& state, const BendNode& node) override;
   Response visit(State& state, const TextNode& node) override;
   Response visit(State& state, const OffsetNode& node) override;
 

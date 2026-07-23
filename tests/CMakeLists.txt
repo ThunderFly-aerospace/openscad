@@ -888,6 +888,7 @@ add_cmdline_test(echo EXPERIMENTAL OPENSCAD SUFFIX echo FILES ${OBJECT_TEST} ARG
 
 list(APPEND EXPORT_STL_TEST_FILES
   ${TEST_SCAD_DIR}/stl/stl-export.scad
+  ${TEST_SCAD_DIR}/stl/bend-export.scad
   ${TEST_SCAD_DIR}/misc/utf8-☠-3D.scad
 )
 
@@ -1132,6 +1133,8 @@ add_cmdline_test(dump-section-node         OPENSCAD SUFFIX csg  FILES ${TEST_SCA
 add_cmdline_test(echo-section-node         OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/section-node.scad)
 add_cmdline_test(dump-label-node           OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/label-node.scad)
 add_cmdline_test(echo-label-node           OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/label-node.scad)
+add_cmdline_test(dump-bend-node            OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/bend-node.scad)
+add_cmdline_test(echo-bend-node            OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/bend-node.scad)
 
 set(CAMERA_TEST           "${TEST_SCAD_DIR}/3D/misc/camera-tests.scad")
 set(CAMERA_TEST_OFFCENTER "${TEST_SCAD_DIR}/3D/misc/camera-tests-offcenter.scad")

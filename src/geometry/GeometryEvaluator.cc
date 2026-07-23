@@ -18,6 +18,7 @@
 #include "core/ModuleInstantiation.h"
 #include "core/OffsetNode.h"
 #include "core/ProjectionNode.h"
+#include "core/BendNode.h"
 #include "core/RenderNode.h"
 #include "core/RoofNode.h"
 #include "core/RotateExtrudeNode.h"
@@ -34,6 +35,7 @@
 #include "geometry/PolySetBuilder.h"
 #include "geometry/PolySetUtils.h"
 #include "geometry/Polygon2d.h"
+#include "geometry/bend.h"
 #include "geometry/boolean_utils.h"
 #include "geometry/cgal/cgal.h"
 #include "geometry/linalg.h"
@@ -647,6 +649,68 @@ Response GeometryEvaluator::visit(State& state, const RenderNode& node)
       auto mutableGeom = res.asMutableGeometry();
       if (mutableGeom) mutableGeom->setConvexity(node.convexity);
       geom = mutableGeom;
+    } else {
+      geom = smartCacheGet(node, state.preferNef());
+    }
+    node.progress_report();
+    addToParent(state, node, geom);
+  }
+  return Response::ContinueTraversal;
+}
+
+/*!
+   bend() wraps its children onto a circular arc. The map is not affine, so the
+   children have to be materialized into a mesh first; the CSG tree side of this
+   is handled in CSGTreeEvaluator::visit(BendNode).
+ */
+Response GeometryEvaluator::visit(State& state, const BendNode& node)
+{
+  if (state.isPrefix() && isSmartCached(node)) return Response::PruneTraversal;
+  if (state.isPostfix()) {
+    std::shared_ptr<const Geometry> geom;
+    if (!isSmartCached(node)) {
+      const std::shared_ptr<const Geometry> childgeom =
+        applyToChildren(node, OpenSCADOperator::UNION).constptr();
+      if (!childgeom || childgeom->isEmpty()) {
+        geom = childgeom;
+      } else if (childgeom->getDimension() != 3) {
+        LOG(message_group::Warning, node.modinst->location(), this->tree.getDocumentPath(),
+            "bend() requires 3D geometry, children passed through unchanged");
+        geom = childgeom;
+      } else if (node.r <= 0) {
+        LOG(message_group::Error, node.modinst->location(), this->tree.getDocumentPath(),
+            "bend() requires r > 0, got %1$f", node.r);
+        geom = PolySet::createEmpty();
+      } else if (const auto ps = PolySetUtils::getGeometryAsPolySet(childgeom)) {
+        BendParams params;
+        params.at = node.at;
+        params.r = node.r;
+        params.angle = node.angle;
+        params.xmin = node.xmin;
+        params.xmax = node.xmax;
+        params.ymin = node.ymin;
+        params.ymax = node.ymax;
+        params.zmin = node.zmin;
+        params.zmax = node.zmax;
+        params.segments =
+          node.discretizer.getCircularSegmentCount(node.r, node.angle).value_or(1);
+
+        BendStats stats;
+        auto bent = bendPolySet(*ps, params, stats);
+        if (stats.torn_edges > 0) {
+          LOG(message_group::Warning, node.modinst->location(), this->tree.getDocumentPath(),
+              "bend(): region boundary cuts through material (%1$d edges, max gap %2$.3f) - "
+              "result is not manifold",
+              stats.torn_edges, stats.max_gap);
+        }
+        if (stats.inverted) {
+          LOG(message_group::Warning, node.modinst->location(), this->tree.getDocumentPath(),
+              "bend(): r = %1$f is below the distance of the bent material from the neutral "
+              "plane - the inner surface folds through the bend axis",
+              node.r);
+        }
+        geom = std::move(bent);
+      }
     } else {
       geom = smartCacheGet(node, state.preferNef());
     }

@@ -28,6 +28,7 @@
 #include <memory>
 #include <vector>
 
+#include "core/BendNode.h"
 #include "core/CgalAdvNode.h"
 #include "core/ColorNode.h"
 #include "core/CsgOpNode.h"
@@ -70,7 +71,7 @@ NodeCloneFunc(CubeNode) NodeCloneFunc(SphereNode) NodeCloneFunc(CylinderNode)
       NodeCloneFunc(RotateExtrudeNode) NodeCloneFunc(LinearExtrudeNode) NodeCloneFunc(CsgOpNode)
         NodeCloneFunc(CgalAdvNode) NodeCloneFunc(RenderNode) NodeCloneFunc(SurfaceNode)
           NodeCloneFunc(TextNode) NodeCloneFunc(OffsetNode) NodeCloneFunc(ProjectionNode)
-            NodeCloneFunc(GroupNode) NodeCloneFunc(ImportNode)
+            NodeCloneFunc(GroupNode) NodeCloneFunc(ImportNode) NodeCloneFunc(BendNode)
 #if defined(ENABLE_EXPERIMENTAL) && defined(ENABLE_CGAL)
               NodeCloneFunc(RoofNode)
 #endif
@@ -84,7 +85,7 @@ NodeCloneFunc(CubeNode) NodeCloneFunc(SphereNode) NodeCloneFunc(CylinderNode)
         NodeCloneUse(LinearExtrudeNode) NodeCloneUse(CsgOpNode) NodeCloneUse(CgalAdvNode)
           NodeCloneUse(RenderNode) NodeCloneUse(SurfaceNode) NodeCloneUse(TextNode)
             NodeCloneUse(OffsetNode) NodeCloneUse(ProjectionNode) NodeCloneUse(GroupNode)
-              NodeCloneUse(ImportNode)
+              NodeCloneUse(ImportNode) NodeCloneUse(BendNode)
 #if defined(ENABLE_EXPERIMENTAL) && defined(ENABLE_CGAL)
                 NodeCloneUse(RoofNode)
 #endif
