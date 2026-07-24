@@ -73,8 +73,11 @@ i její **testy** — bez zelených testů není fáze hotová.
   xlim, ylim, zlim)` ohýbá i importovaná STL (nelineární mapa pod úrovní meshe,
   což knihovny jako BOSL2 neumí). Analytická C1 mapa, dělení trojúhelníků jen
   v pásmu ohybu a na rovinách masky, detekce trhlin a minimálního poloměru,
-  zachované barvy facy. 23 testů (dump/echo, obrazové na obou backendech,
-  export-stl, 8 unit testů) zelených.
+  zachované barvy facy. **14B**: zbytek modelu se klasifikuje podle **souvislosti
+  meshe** — co visí na ohýbaném konci, jede tuze s ním (široká plocha za úzkým
+  žebrem), co visí na pevné části, stojí; nespojené skořepiny podle vlastní
+  polohy. 26 testů (dump/echo, obrazové na obou backendech, export-stl,
+  11 unit testů) zelených.
 
 ---
 
@@ -1229,3 +1232,77 @@ varování, protože posun ~1e-16 je pod prahem detekce trhlin. Opraveno: pro
 
 Celá sada `xvfb-run ctest -j6`: 5 selhání, všechna z hrstky známých flaky
 image testů pod llvmpipe (viz Fáze 0) — v `-j1` projdou 100 %. Nic navíc.
+
+---
+
+### 14B — klasifikace zbytku podle souvislosti  ✅ HOTOVO (2026-07-23)
+
+**Problém, který 14A neuměla.** Maska říká „co se ohýbá", a všechno ostatní
+zamrzne. Jenže typický flex je **úzké žebro mezi dvěma širokými plochami**:
+maskou `ylim` vybereš šířku žebra, čímž z masky vypadne i široká plocha na
+druhém konci, která je fyzicky připojená k ohýbanému konci a musí odjet s ním.
+Ve 14A zůstala stát a deska se roztrhla.
+
+**Zamítnuto: ruční `carry_*` oblasti.** Byly by to tři parametry navíc a
+uživatel by musel oblast trefovat. Nápad uživatele (2026-07-23) je lepší.
+
+**Zvolené řešení — souvislost meshe.** Žádný nový parametr:
+
+1. Trojúhelníky **uvnitř masky** dostanou štítek podle `x`: `fixed` (`x < at`),
+   `arc`, `carried` (`x > at+L`).
+2. Trojúhelníky **mimo masku** se flood-fillem přes **sdílené hrany** (ne přes
+   sdílený vrchol) pospojují do skupin.
+3. Skupina zdědí osud maskovaného materiálu, kterého se dotýká: připojená před
+   dělicí rovinou → stojí, připojená za obloukem → jede tuhým pohybem.
+
+Tuhý pohyb je `BendMap::rigid()` — **záměrně tentýž výraz** jako větev `u ≥ L`
+v `operator()`, takže vezený materiál a ohnutý konec se napojí bit po bitu a
+šev nevzniká. To je hlavní důvod, proč je celé to schéma použitelné: carry
+oblast se nemusí trefovat přesně.
+
+**Tři patologie, každá se hlásí:**
+
+| případ | chování |
+|---|---|
+| skupina se dotýká **fixed i carried** (most kolem ohybu) | žádný tuhý pohyb nesedí → zamrazit + Warning |
+| skupina visí na **oblouku** | utrhne se → Warning |
+| skupina se nedotýká **ničeho** (samostatná skořepina — součástka, co na desce jen leží) | posoudit podle **vlastní polohy**: celá za pásmem → jede, jinak stojí |
+| nespojená skupina leží **napříč** ohybem | tatáž nejednoznačnost jako most → zamrazit + počítá se do `conflict` |
+
+Plus vždy jednořádkové shrnutí (`message_group::NONE`), ať je vidět, co se
+stalo: `bend(): 4 part(s) outside the bend region: 2 fixed, 2 carried along
+(0 of them connected to nothing, placed by position)`. `fixed + carried` vždy
+dá dohromady `groups`; `conflict`/`on_arc`/`isolated` jsou ortogonální poznámky.
+
+**Robustnost.** Graf souvislosti stojí nad **svařenými** pozicemi
+(`Grid3d<int>(GRID_FINE)`, kontroluje i sousední buňky), takže vlásečnicové
+trhlinky z konverze STEPu mesh nerozpadnou. Výstupní geometrie se svařováním
+nemění, používá se jen ke klasifikaci. Ověřeno, že `import_stl.cc` staví mesh
+přes `PolySetBuilder`/`Reindexer`, tj. **importované STL má vrcholy sjednocené**
+(round-trip: kvádr = 12 trojúhelníků nad 8 vrcholy, 0 nespárovaných půlhran).
+
+**Pořadí kroků (důležité).** Klasifikace běží **po** řezech maskou, ale **před**
+řezy pásma. Kdyby se pásmo řezalo dřív, vznikly by na hranici masky T-junctions
+(ohýbaný trojúhelník rozříznut, jeho nemaskovaný soused ne) a hrana by v grafu
+zmizela → skupina by se špatně naseedovala. Detekce trhlin běží na stejném
+edge-mapu a je nově třístavová.
+
+**Co to nenahrazuje.** `zlim` zůstává. Maska rozhoduje, co se **deformuje**;
+souvislost rozhoduje, co se stane se **zbytkem**. Výběžek vyzvednutý předchozím
+ohybem leží prostorově uvnitř maskovacího kvádru, takže bez `zlim` by se pořád
+deformoval.
+
+**Výkon.** Analýza souvislosti nestojí nic měřitelného: deska se 149 004 facy
+(`import` STL) trvá **1,55 s s maskou i bez ní** — čas žere import, tesselace a
+export, ne ohyb. Není důvod ji dělat volitelnou.
+
+**Testy:** +3 unit testy (žebro mezi dvěma plochami: 4 skupiny, 2 stojí, 2 jedou,
+0 trhlin, vodotěsné; most přes ohyb: 2 konflikty; nespojená skořepina před
+pásmem / za pásmem / napříč) — celkem 11 unit testů, 51 assertions. Do
+`bend-tests.scad` přibyl šestý případ (žebro) a zlaté PNG jsou přegenerované
+a ověřené okem. Pomocník `makePlate()` v testu staví plát na **sdílené mřížce
+vrcholů** — kvádry poskládané vedle sebe nejsou hranově spojené a testovaly by
+nesmysl.
+
+**Regrese.** Celá sada `-j6`: 1 selhání (`render-dxf_text-metrics`), sériově
+projde — opět jen llvmpipe flakyness, a jiný test než minule.

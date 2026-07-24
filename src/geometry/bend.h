@@ -44,8 +44,8 @@ struct BendParams
  */
 struct BendStats
 {
-  // Edges where one adjacent triangle is bent and the other is not, and the
-  // two sides actually come apart. Such a mesh is no longer manifold.
+  // Edges whose two adjacent triangles end up under different transforms and
+  // really do come apart. Such a mesh is no longer manifold.
   int torn_edges{0};
   double max_gap{0.0};
 
@@ -53,6 +53,16 @@ struct BendStats
   // from the neutral fibre on the inner side: the map folds through the bend
   // axis and the result self-intersects (the "minimum bend radius").
   bool inverted{false};
+
+  // How the material outside the bend region was classified. Connected groups
+  // inherit the fate of the bent material they hang off; groups that touch
+  // nothing are judged by their own position instead.
+  int groups{0};
+  int groups_fixed{0};
+  int groups_carried{0};
+  int groups_isolated{0};
+  int groups_conflict{0};  // hangs off both the fixed and the moving side
+  int groups_on_arc{0};    // hangs off material that is being deformed
 };
 
 /*!

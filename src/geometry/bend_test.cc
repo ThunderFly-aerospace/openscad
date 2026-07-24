@@ -1,6 +1,7 @@
 #include "geometry/bend.h"
 
 #include <catch2/catch_all.hpp>
+#include <functional>
 #include <cmath>
 #include <map>
 #include <utility>
@@ -30,6 +31,71 @@ std::unique_ptr<PolySet> makeBox(const Vector3d& lo, const Vector3d& hi)
   ps->setTriangular(true);
   ps->setManifold(true);
   return ps;
+}
+
+/*!
+   A closed prismatic plate of arbitrary orthogonal outline, built on a shared
+   vertex grid so that neighbouring cells really are edge-connected. Boxes
+   merely placed next to each other would not be, and connectivity is exactly
+   what these tests are about.
+ */
+std::unique_ptr<PolySet> makePlate(int nx, int ny, const Vector3d& origin, double cell,
+                                   double thickness,
+                                   const std::function<bool(int, int)>& inside)
+{
+  auto ps = std::make_unique<PolySet>(3);
+  const int stride = ny + 1;
+  const int top = (nx + 1) * (ny + 1);
+  for (int layer = 0; layer < 2; ++layer) {
+    for (int i = 0; i <= nx; ++i) {
+      for (int j = 0; j <= ny; ++j) {
+        ps->vertices.emplace_back(origin.x() + i * cell, origin.y() + j * cell,
+                                  origin.z() + layer * thickness);
+      }
+    }
+  }
+  const auto b = [&](int i, int j) { return i * stride + j; };
+  const auto t = [&](int i, int j) { return top + i * stride + j; };
+  const auto quad = [&](int a, int bb, int c, int d) {
+    ps->indices.push_back({a, bb, c});
+    ps->indices.push_back({a, c, d});
+  };
+
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < ny; ++j) {
+      if (!inside(i, j)) continue;
+      quad(b(i, j), b(i, j + 1), b(i + 1, j + 1), b(i + 1, j));  // -z
+      quad(t(i, j), t(i + 1, j), t(i + 1, j + 1), t(i, j + 1));  // +z
+      // Walls wherever the neighbour is not part of the plate. The corner pairs
+      // run counter-clockwise seen from +z, which makes the walls face outwards.
+      const int corners[4][2] = {{i, j}, {i + 1, j}, {i + 1, j + 1}, {i, j + 1}};
+      const int neighbour[4][2] = {{i, j - 1}, {i + 1, j}, {i, j + 1}, {i - 1, j}};
+      for (int e = 0; e < 4; ++e) {
+        const int ni = neighbour[e][0];
+        const int nj = neighbour[e][1];
+        const bool outside =
+          ni < 0 || nj < 0 || ni >= nx || nj >= ny || !inside(ni, nj);
+        if (!outside) continue;
+        const int *A = corners[e];
+        const int *B = corners[(e + 1) % 4];
+        quad(b(A[0], A[1]), b(B[0], B[1]), t(B[0], B[1]), t(A[0], A[1]));
+      }
+    }
+  }
+  ps->setTriangular(true);
+  return ps;
+}
+
+//! Appends one mesh into another as a separate, unconnected shell.
+void appendShell(PolySet& into, const PolySet& shell)
+{
+  const int base = static_cast<int>(into.vertices.size());
+  into.vertices.insert(into.vertices.end(), shell.vertices.begin(), shell.vertices.end());
+  for (const auto& face : shell.indices) {
+    IndexedFace moved;
+    for (const auto& idx : face) moved.push_back(idx + base);
+    into.indices.push_back(moved);
+  }
 }
 
 //! Number of half-edges without an opposite twin; 0 means the mesh is closed.
@@ -194,6 +260,121 @@ TEST_CASE("bend() flags a radius below the minimum bend radius", "[bend]")
 
   auto bent = bendPolySet(*block, params, stats);
   CHECK(stats.inverted);
+}
+
+namespace {
+
+//! Board of two wide plates joined by a narrow rib, the shape the bend region
+//! cannot cover on its own: x 0..10 and x 30..45 span the full width, the rib
+//! between them is only y -3..3.
+std::unique_ptr<PolySet> makeRibBoard()
+{
+  return makePlate(45, 30, {0, -15, 0}, 1.0, 0.4, [](int i, int j) {
+    if (i < 10 || i >= 30) return true;
+    return j >= 12 && j < 18;
+  });
+}
+
+BendParams ribBend()
+{
+  BendParams params;
+  params.at = 15;
+  params.r = 2;
+  params.angle = 90;
+  params.ymin = -4;
+  params.ymax = 4;
+  params.segments = 8;
+  return params;
+}
+
+}  // namespace
+
+TEST_CASE("bend() carries material connected past the bend along with it", "[bend]")
+{
+  auto board = makeRibBoard();
+  const BendParams params = ribBend();
+  BendStats stats;
+
+  auto bent = bendPolySet(*board, params, stats);
+
+  // Four pieces sit outside the region: the two wings of each wide plate. The
+  // near ones hang off the fixed side, the far ones off the moving side.
+  CHECK(stats.groups == 4);
+  CHECK(stats.groups_fixed == 2);
+  CHECK(stats.groups_carried == 2);
+  CHECK(stats.groups_conflict == 0);
+  CHECK(stats.groups_on_arc == 0);
+  CHECK(stats.groups_isolated == 0);
+  // Carried material joins the bent end seamlessly, so nothing tears.
+  CHECK(stats.torn_edges == 0);
+  CHECK(unpairedHalfEdges(*bent) == 0);
+
+  // The far plate stood up: it used to reach x = 45 and z = 0.4 only.
+  const BoundingBox box = bbox(*bent);
+  CHECK(box.max().x() < 20.0);
+  CHECK(box.max().z() == Catch::Approx(2.0 + (45.0 - 15.0 - 2.0 * M_PI / 2.0)));
+}
+
+TEST_CASE("bend() reports a part that bridges the bend", "[bend]")
+{
+  // A plate of constant width: the material outside the region runs from the
+  // fixed side all the way to the moving side, so no rigid motion fits it.
+  auto plate = makePlate(40, 30, {0, -15, 0}, 1.0, 0.4, [](int, int) { return true; });
+  const BendParams params = ribBend();
+  BendStats stats;
+
+  auto bent = bendPolySet(*plate, params, stats);
+
+  CHECK(stats.groups == 2);
+  CHECK(stats.groups_conflict == 2);
+  CHECK(stats.groups_fixed == 2);  // frozen, since neither motion is right
+  CHECK(stats.groups_carried == 0);
+  CHECK(stats.torn_edges > 0);
+}
+
+TEST_CASE("bend() places a disconnected part by its own position", "[bend]")
+{
+  // A part that merely rests on the board - a separate shell, as a component in
+  // an imported STL usually is - has nothing to inherit from.
+  const BendParams params = ribBend();
+  const double past = params.at + params.r * M_PI / 2.0;
+
+  SECTION("past the bend it travels with the moving end")
+  {
+    auto board = makeRibBoard();
+    appendShell(*board, *makePlate(4, 4, {past + 5, 5, 0.5}, 1.0, 3.0,
+                                   [](int, int) { return true; }));
+    BendStats stats;
+    auto bent = bendPolySet(*board, params, stats);
+    CHECK(stats.groups == 5);
+    CHECK(stats.groups_isolated == 1);
+    CHECK(stats.groups_carried == 3);
+  }
+
+  SECTION("in front of the bend line it stays put")
+  {
+    auto board = makeRibBoard();
+    appendShell(*board, *makePlate(4, 4, {5, 5, 0.5}, 1.0, 3.0, [](int, int) { return true; }));
+    BendStats stats;
+    auto bent = bendPolySet(*board, params, stats);
+    CHECK(stats.groups == 5);
+    CHECK(stats.groups_isolated == 1);
+    CHECK(stats.groups_fixed == 3);
+  }
+
+  SECTION("lying across the bend is reported, not silently frozen")
+  {
+    // Spans x = 13..20, i.e. from in front of the bend line to past the arc.
+    // No single rigid motion describes where such a part should end up.
+    auto board = makeRibBoard();
+    appendShell(*board, *makePlate(7, 4, {13, 5, 0.5}, 1.0, 3.0, [](int, int) { return true; }));
+    BendStats stats;
+    auto bent = bendPolySet(*board, params, stats);
+    CHECK(stats.groups == 5);
+    CHECK(stats.groups_isolated == 1);
+    CHECK(stats.groups_conflict == 1);
+    CHECK(stats.groups_fixed == 3);
+  }
 }
 
 TEST_CASE("bend() with a negative angle curves the other way", "[bend]")

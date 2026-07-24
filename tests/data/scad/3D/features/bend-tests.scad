@@ -35,3 +35,14 @@ translate([0, 45, 0])
 // angle = 0 is the identity.
 translate([0, 55, 0])
   bend(at = 5, r = 2, angle = 0) cube([10, 6, 0.6]);
+
+// Two wide plates joined by a narrow rib. Only the rib is inside the region,
+// but the far plate hangs off the moving end, so connectivity carries it along
+// rather than leaving it behind; the near plate hangs off the fixed side and
+// stays put.
+translate([0, 75, 0])
+  bend(at = 10, r = 1.5, angle = 90, ylim = [-3, 3]) {
+    translate([0, -8, 0]) cube([6, 16, 0.6]);
+    translate([6, -2, 0]) cube([12, 4, 0.6]);
+    translate([18, -8, 0]) cube([8, 16, 0.6]);
+  }

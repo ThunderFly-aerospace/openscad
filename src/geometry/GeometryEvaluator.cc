@@ -709,6 +709,24 @@ Response GeometryEvaluator::visit(State& state, const BendNode& node)
               "plane - the inner surface folds through the bend axis",
               node.r);
         }
+        if (stats.groups_conflict > 0) {
+          LOG(message_group::Warning, node.modinst->location(), this->tree.getDocumentPath(),
+              "bend(): %1$d part(s) outside the bend region span the bend (attached to both "
+              "sides, or lying across it) - no rigid motion fits, so they were left in place",
+              stats.groups_conflict);
+        }
+        if (stats.groups_on_arc > 0) {
+          LOG(message_group::Warning, node.modinst->location(), this->tree.getDocumentPath(),
+              "bend(): %1$d part(s) outside the bend region hang off material that is being "
+              "deformed and will tear",
+              stats.groups_on_arc);
+        }
+        if (stats.groups > 0) {
+          LOG(message_group::NONE, node.modinst->location(), this->tree.getDocumentPath(),
+              "bend(): %1$d part(s) outside the bend region: %2$d fixed, %3$d carried along "
+              "(%4$d of them connected to nothing, placed by position)",
+              stats.groups, stats.groups_fixed, stats.groups_carried, stats.groups_isolated);
+        }
         geom = std::move(bent);
       }
     } else {
