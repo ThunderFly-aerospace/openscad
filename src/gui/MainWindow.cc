@@ -4533,19 +4533,46 @@ void measureAxes(const QString& proj, int& hAxis, int& vAxis)
   else { hAxis = 0; vAxis = 2; }  // front / back (and default): XZ
 }
 
+// Section frames by their proj token ("section" + lowercased name), so that a
+// dimension in a section can be measured in the plane it is actually drawn in.
+using SectionFrames = QHash<QString, Transform3d>;
+
+// World-space directions that map to the horizontal / vertical screen directions
+// of a view. The six standard views run along world axes, but a section is an
+// arbitrary frame in space (projectSection draws screen x = the frame's local X,
+// y = its local Y), which no pair of axis indices can express — hence the frame
+// lookup. Falls back to the standard views, and to front when proj is unknown.
+void measureDirs(const QString& proj, const SectionFrames& sectionFrames,
+                 Eigen::Vector3d& hDir, Eigen::Vector3d& vDir)
+{
+  const auto it = sectionFrames.constFind(proj.toLower());
+  if (it != sectionFrames.constEnd()) {
+    // Normalized because the accumulated transform may carry a scale; a
+    // non-uniform one would skew the projection itself, not just the value.
+    hDir = it->linear().col(0).normalized();
+    vDir = it->linear().col(1).normalized();
+    return;
+  }
+  int hAxis, vAxis;
+  measureAxes(proj, hAxis, vAxis);
+  hDir = Eigen::Vector3d::Unit(hAxis);
+  vDir = Eigen::Vector3d::Unit(vAxis);
+}
+
 // Measured length of a dimension per its measure mode, relative to its
 // projection plane. direct = true 3D distance |b-a|; planar = distance in the
 // view plane; h/v = the horizontal/vertical component in the view. Holds
 // h² + v² = planar².
 double dimLength(const Eigen::Vector3d& a, const Eigen::Vector3d& b,
-                 const QString& measure, const QString& proj)
+                 const QString& measure, const QString& proj,
+                 const SectionFrames& sectionFrames)
 {
   const Eigen::Vector3d d = b - a;
   if (measure.isEmpty() || measure == "direct") return d.norm();
-  int hAxis, vAxis;
-  measureAxes(proj, hAxis, vAxis);
-  const double h = std::abs(d[hAxis]);
-  const double v = std::abs(d[vAxis]);
+  Eigen::Vector3d hDir, vDir;
+  measureDirs(proj, sectionFrames, hDir, vDir);
+  const double h = std::abs(d.dot(hDir));
+  const double v = std::abs(d.dot(vDir));
   if (measure == "h") return h;
   if (measure == "v") return v;
   if (measure == "planar") return std::hypot(h, v);
@@ -4565,7 +4592,8 @@ struct ResolvedDrawing {
 // drawing export. `warn` emits the duplicate-name warning once (secondary
 // callers pass false to avoid repeats).
 ResolvedDrawing resolveDrawing(const std::vector<DimrefInfo>& dimrefs,
-                               const QString& source, bool warn)
+                               const QString& source, bool warn,
+                               const SectionFrames& sectionFrames)
 {
   // World positions per dimref name, in tree (DFS) order — index = occurrence, so
   // a duplicated name can be pinned as name#index (a plain name takes the first).
@@ -4749,7 +4777,7 @@ ResolvedDrawing resolveDrawing(const std::vector<DimrefInfo>& dimrefs,
         rd.offsetMm = off;
         rd.sourceLine = li;  // whole chain shares the line; drag shifts the base
         rd.label = makeLabel(haveLabel ? labelTemplate : QString(),
-                             dimLength(A, B, measure, proj), prec);
+                             dimLength(A, B, measure, proj, sectionFrames), prec);
         dims.push_back(rd);
       };
       if (running) {
@@ -4837,16 +4865,14 @@ ResolvedDrawing resolveDrawing(const std::vector<DimrefInfo>& dimrefs,
       rd.kind = wantRadius ? DimKind::Radius : DimKind::Diameter;
       dispValue = wantRadius ? radius : diameter;
       // Draw direction: the view's horizontal axis rotated by angle=, in-plane.
-      int hAxis, vAxis;
-      measureAxes(rd.proj.isEmpty() ? "front" : rd.proj, hAxis, vAxis);
-      Eigen::Vector3d hv = Eigen::Vector3d::Zero(); hv[hAxis] = 1.0;
-      Eigen::Vector3d vv = Eigen::Vector3d::Zero(); vv[vAxis] = 1.0;
+      Eigen::Vector3d hv, vv;
+      measureDirs(rd.proj.isEmpty() ? "front" : rd.proj, sectionFrames, hv, vv);
       const double rad = angleDeg * M_PI / 180.0;
       const Eigen::Vector3d dir = std::cos(rad) * hv + std::sin(rad) * vv;
       if (wantRadius) { rd.a = center; rd.b = center + dir * radius; }
       else { rd.a = center - dir * (diameter / 2.0); rd.b = center + dir * (diameter / 2.0); }
     } else {
-      dispValue = dimLength(rd.a, rd.b, rd.measure, rd.proj);
+      dispValue = dimLength(rd.a, rd.b, rd.measure, rd.proj, sectionFrames);
     }
 
     // Radial dims get a ⌀/R prefix by default; a custom label= still wins.
@@ -5189,7 +5215,17 @@ void MainWindow::refreshDrawingViews()
     this->drawingDock->applySheetSettings(gap, scaleDen, fill, shown);
   }
 
-  const ResolvedDrawing resolved = resolveDrawing(dimrefs, source, /*warn=*/true);
+  // Section frames, so that h/v/planar dimensions inside a section are measured
+  // in the section's own plane rather than in the front view's world axes.
+  SectionFrames sectionFrames;
+  if (this->rootNode) {
+    for (const auto& info : collectSections(this->rootNode)) {
+      const QString nm = QString::fromStdString(info.node->section_name);
+      if (!nm.isEmpty()) sectionFrames.insert("section" + nm.toLower(), info.world);
+    }
+  }
+
+  const ResolvedDrawing resolved = resolveDrawing(dimrefs, source, /*warn=*/true, sectionFrames);
   const std::vector<AnchorRec>& anchorRecs = resolved.anchors;
   const std::vector<ResolvedDim>& dims = resolved.dims;
 

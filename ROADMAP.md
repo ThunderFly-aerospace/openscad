@@ -924,6 +924,34 @@ Nad rámec původního plánu bylo nutné dodělat:
 - **Dropdown projekcí v editoru kót** doplněn o řezy modelu + fallback „(not on the
   sheet)" pro `proj=`, který na listu není.
 
+### Bugfix (2026-07-24): `measure=h/v/planar` v řezu počítalo špatnou hodnotu
+
+Nahlásil uživatel: v řezu se kóta **nakreslí správně**, ale **hodnota je špatně**;
+jinde je to v pořádku.
+
+Příčina: `measureAxes()` (`MainWindow.cc`) mapovala `proj` na **indexy world os**
+a znala jen šest standardních pohledů. Řez má `proj = "section<jméno>"`, což
+neodpovídá žádné větvi a **tiše propadlo na default = nárys (XZ)** — takže se
+`h`/`v` v řezu měřily podél world X/Z bez ohledu na natočení roviny řezu. Čára
+byla správně, protože ta jde jinou cestou (`fillAnnotations` promítá přes
+`info.world.inverse()`).
+
+Indexy os to principiálně vyjádřit nemohly: řez je **libovolný rámec v prostoru**
+(screen x = jeho lokální X, y = lokální Y). Nahrazeno `measureDirs()`, které
+vrací dva světové směry — pro řez sloupce 0 a 1 z `info.world` (normalizované,
+kdyby transformace nesla měřítko), jinak jednotkové osy jako dosud. `dimLength()`
+počítá `|d·hDir|`; pro standardní pohledy je to bitově totéž co dřív
+(`d.dot(Unit(k)) == d[k]`). Rámce řezů se sbírají přes `collectSections()`
+a předávají do `resolveDrawing()`.
+
+Postižené bylo i `measure=planar` a **směr radiálních kót** (`angle=`) v řezu —
+opraveno spolu s tím. `measure=direct` chybu nemělo (3D vzdálenost na rámci
+nezávisí).
+
+Ověřeno headless v GUI: řez `rotate([90,0,90]) section("A")` má h = world Y;
+kóta `measure=h` mezi body lišícími se jen v Y o 15 ukazuje **15** (před opravou
+by dala 0). 107 regresních testů (dimref/camera/label/section/bend) zelených.
+
 ### Vedlejší bug (Fáze 10B), opravit spolu s tím
 Dlaždice **detailu** (`MainWindow.cc:5481-5508`) přebírá z rodiče jen `edges` a `hatch` →
 detail nemá ani kóty, ani **barevnou výplň**, i když ji rodič má. `fills` se neořezávají
