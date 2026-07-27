@@ -136,6 +136,9 @@
 #include "gui/FboSnapshotView.h"
 #include "gui/DrawingViewDock.h"
 #include "core/CameraNode.h"
+#include "core/ViewNode.h"
+#include "core/SourceFile.h"
+#include "gui/ViewScope.h"
 #include "core/DimrefNode.h"
 #include "core/LabelNode.h"
 #include "core/SectionNode.h"
@@ -319,6 +322,7 @@ MainWindow::MainWindow(const QStringList& filenames) : rubberBandManager(this)
   setupAIDock();
   setupCameraDock();
   setupDrawingDock();
+  setupViewSwitcher();
   setupDocks();
 
   setup3DView();
@@ -1609,11 +1613,12 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 
 void MainWindow::setRenderVariables(ContextHandle<BuiltinContext>& context)
 {
-  const RenderVariables r = {
+  RenderVariables r = {
     .preview = this->isPreview,
     .time = this->animateWidget->getAnimTval(),
     .camera = qglview->cam,
   };
+  r.viewPath = this->activeViewPath;
   r.applyToContext(context);
 }
 
@@ -1897,6 +1902,7 @@ void MainWindow::csgRender()
 
   refreshCameras();
   refreshDrawingViews();
+  refreshViewSwitcher();
 
   compileEnded();
 }
@@ -3828,6 +3834,140 @@ void MainWindow::setupDrawingDock()
                    &MainWindow::onTilePlaced);
 }
 
+// --- Fáze 15: switchable model views -------------------------------------
+
+void MainWindow::setupViewSwitcher()
+{
+  this->viewSwitcher = new QComboBox(this);
+  this->viewSwitcher->setToolTip(_("Active model view — select which view() is shown"));
+  this->viewSwitcher->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  // Sit at the front of the editor toolbar; hidden until the model has a view().
+  if (this->editortoolbar) {
+    const auto acts = this->editortoolbar->actions();
+    if (acts.isEmpty()) this->editortoolbar->addWidget(this->viewSwitcher);
+    else this->editortoolbar->insertWidget(acts.first(), this->viewSwitcher);
+  }
+  this->viewSwitcher->hide();
+  // activated() fires only on user choice, so repopulating it never recompiles.
+  connect(this->viewSwitcher, QOverload<int>::of(&QComboBox::activated), this,
+          &MainWindow::onViewSwitcherChanged);
+}
+
+// Rebuild the switcher from the parsed source after every compile. The view tree
+// is read from the AST (collectViews), so inactive/nested views — including ones
+// pulled in via include<> — all appear regardless of which view is active.
+void MainWindow::refreshViewSwitcher()
+{
+  if (!this->viewSwitcher) return;
+
+  const auto views = this->rootFile ? collectViews(this->rootFile.get()) : std::vector<ViewInfo>{};
+
+  if (views.empty()) {
+    // Model has no view(): behave exactly like before (switcher hidden, root).
+    this->viewSwitcher->hide();
+    this->viewSwitcher->clear();
+    this->activeViewPath.clear();
+    return;
+  }
+
+  QStringList active;
+  for (const auto& s : this->activeViewPath) active << QString::fromStdString(s);
+
+  const QSignalBlocker block(this->viewSwitcher);
+  this->viewSwitcher->clear();
+  this->viewSwitcher->addItem(_("(all / common)"), QStringList{});  // root
+  for (const auto& v : views) {
+    QStringList path;
+    for (const auto& s : v.fullPath) path << QString::fromStdString(s);
+    const QString label = QString(v.depth * 2, ' ') + QString::fromStdString(v.name);
+    this->viewSwitcher->addItem(label, path);
+  }
+
+  // Re-select the active path if it still exists; otherwise fall back to root.
+  int sel = 0;
+  for (int i = 0; i < this->viewSwitcher->count(); ++i) {
+    if (this->viewSwitcher->itemData(i).toStringList() == active) {
+      sel = i;
+      break;
+    }
+  }
+  this->viewSwitcher->setCurrentIndex(sel);
+  if (this->viewSwitcher->itemData(sel).toStringList() != active) {
+    // The view we were showing was edited away: revert to root on next compile.
+    this->activeViewPath.clear();
+  }
+  this->viewSwitcher->show();
+}
+
+void MainWindow::onViewSwitcherChanged(int index)
+{
+  if (!this->viewSwitcher || index < 0) return;
+  const QStringList path = this->viewSwitcher->itemData(index).toStringList();
+  std::vector<std::string> newPath;
+  newPath.reserve(path.size());
+  for (const auto& s : path) newPath.push_back(s.toStdString());
+  if (newPath == this->activeViewPath) return;
+
+  this->activeViewPath = std::move(newPath);
+  // Re-evaluate with the new $view: preview, cameras and drawing all rebuild from
+  // the re-instantiated tree.
+  actionRenderPreview();
+}
+
+std::vector<ViewScope::Block> MainWindow::resolveViewBlocks(const QString& source) const
+{
+  std::vector<ViewScope::Block> blocks;
+  if (!this->rootFile) return blocks;
+
+  const std::string mainPath = this->rootFile->getFullpath();
+  std::vector<ViewScope::ViewRef> refs;
+  std::vector<ViewScope::ViewRef> all;
+  for (const auto& v : collectViews(this->rootFile.get())) {
+    ViewScope::ViewRef r;
+    r.path = v.fullPath;
+    r.firstLine1 = v.firstLine;
+    all.push_back(r);
+    // Annotations read here are lines of the main editor file, so only view()
+    // blocks in that file can enclose them.
+    if (mainPath.empty() || v.path == mainPath) refs.push_back(std::move(r));
+  }
+  // Fallback for a single-file model whose path string did not compare equal:
+  // use every view (their line numbers are all in this one file anyway).
+  if (refs.empty()) refs = std::move(all);
+
+  std::vector<std::string> lines;
+  for (const QString& L : source.split('\n')) lines.push_back(L.toStdString());
+  return ViewScope::resolveBlocks(lines, refs);
+}
+
+void MainWindow::insertAnnotationLine(const QString& annLine)
+{
+  if (!activeEditor) return;
+  const QString source = activeEditor->toPlainText();
+  const QStringList lines = source.split('\n');
+  const auto blocks = resolveViewBlocks(source);
+  const std::vector<std::string> active(this->activeViewPath.begin(), this->activeViewPath.end());
+  const int at = ViewScope::insertLine(blocks, active);
+
+  if (at < 0 || at >= lines.size()) {
+    // Root, or a view with no brace body: append at end of file (as before).
+    activeEditor->setCursorPosition(lines.size() - 1, lines.isEmpty() ? 0 : lines.last().length());
+    QString ins;
+    if (!lines.isEmpty() && !lines.last().isEmpty()) ins += "\n";
+    ins += annLine + "\n";
+    activeEditor->insertOrReplaceText(ins);
+    return;
+  }
+
+  // Insert before the closing-brace line, indented one step past the brace.
+  const QString braceLine = lines.at(at);
+  int ws = 0;
+  while (ws < braceLine.size() && (braceLine.at(ws) == ' ' || braceLine.at(ws) == '\t')) ++ws;
+  const QString indent = braceLine.left(ws) + "  ";
+  activeEditor->setCursorPosition(at, 0);
+  activeEditor->insertOrReplaceText(indent + annLine + "\n");
+}
+
 namespace {
 // Canonical proj= token per standard view, indexed by the Drawing dock's view
 // index (0..5), matching DrawingViewDock's checkbox order.
@@ -4109,22 +4249,26 @@ void MainWindow::onDrawingSheetSettingsChanged()
       .arg(shown.isEmpty() ? QStringLiteral("none") : shown.join(','),
            this->drawingDock->fillColors() ? QStringLiteral("on") : QStringLiteral("off"));
 
-  QStringList lines = activeEditor->toPlainText().split('\n');
+  // Fáze 15: the // @sheet belongs to the active view. Replace the one owned
+  // exactly by the active view (not an inherited common one); if none exists yet,
+  // write a fresh // @sheet into that view's block (or EOF for the root).
+  const QString source = activeEditor->toPlainText();
+  QStringList lines = source.split('\n');
+  const auto blocks = resolveViewBlocks(source);
+  const std::vector<std::string> active(this->activeViewPath.begin(),
+                                        this->activeViewPath.end());
   static const QRegularExpression sheetRe(R"(^\s*//\s*@sheet\b)");
   int found = -1;
-  for (int i = 0; i < lines.size(); ++i)
-    if (sheetRe.match(lines.at(i)).hasMatch()) { found = i; break; }
+  for (int i = 0; i < lines.size(); ++i) {
+    if (!sheetRe.match(lines.at(i)).hasMatch()) continue;
+    if (ViewScope::ownerPath(blocks, i) == active) { found = i; break; }
+  }
   if (found >= 0) {
     if (lines.at(found) == line) return;  // no change: don't churn the document
     lines[found] = line;
     activeEditor->setPlainText(lines.join('\n'));
   } else {
-    activeEditor->setCursorPosition(lines.size() - 1,
-                                    lines.isEmpty() ? 0 : lines.last().length());
-    QString ins;
-    if (!lines.isEmpty() && !lines.last().isEmpty()) ins += "\n";
-    ins += line + "\n";
-    activeEditor->insertOrReplaceText(ins);
+    insertAnnotationLine(line);
   }
   refreshDrawingViews();
 }
@@ -4237,12 +4381,7 @@ void MainWindow::onLabelAnchorClicked(const QString& projKey, const QString& nam
   const QString proj = projKey;  // "front".."bottom" or "section<name>"
   const QString labLine = QString("// @label %1 proj=%2").arg(name, proj);
 
-  const QStringList lines = activeEditor->toPlainText().split('\n');
-  activeEditor->setCursorPosition(lines.size() - 1, lines.isEmpty() ? 0 : lines.last().length());
-  QString insertText;
-  if (!lines.isEmpty() && !lines.last().isEmpty()) insertText += "\n";
-  insertText += labLine + "\n";
-  activeEditor->insertOrReplaceText(insertText);
+  insertAnnotationLine(labLine);  // into the active view's block (Fáze 15E)
   refreshDrawingViews();
   this->statusBar()->showMessage(tr("Added label %1 (proj=%2)").arg(name, proj), 4000);
 }
@@ -4448,16 +4587,12 @@ void MainWindow::onDrawingAnchorClicked(const QString& projKey, const QString& n
 
   const QString proj = projKey;  // "front".."bottom" or "section<name>" 
 
-  // Append a // @dim line at the end of the document (the "list of pairs") and
-  // reproject: an @dim line is a comment, so the geometry (and dimref world
-  // positions) is unchanged and the overlay updates without an F5.
+  // Write a // @dim line into the active view's block (before its closing brace),
+  // or at end of file when the active view is the root (Fáze 15E). An @dim line is
+  // a comment, so the geometry (and dimref world positions) is unchanged and the
+  // overlay updates without an F5.
   auto appendDim = [&](const QString& dimLine, const QString& status) {
-    const QStringList lines = activeEditor->toPlainText().split('\n');
-    activeEditor->setCursorPosition(lines.size() - 1, lines.isEmpty() ? 0 : lines.last().length());
-    QString insertText;
-    if (!lines.isEmpty() && !lines.last().isEmpty()) insertText += "\n";
-    insertText += dimLine + "\n";
-    activeEditor->insertOrReplaceText(insertText);
+    insertAnnotationLine(dimLine);
     refreshDrawingViews();
     this->statusBar()->showMessage(status, 4000);
   };
@@ -5179,11 +5314,25 @@ void MainWindow::refreshDrawingViews()
     this->rootNode ? collectDimrefs(this->rootNode) : std::vector<DimrefInfo>{};
   const QString source = activeEditor ? activeEditor->toPlainText() : QString();
 
-  // Sheet-level settings live in a single // @sheet comment (gap / scale / shown
-  // views / fill). Parse it and push it onto the dock's controls BEFORE the layout
-  // below reads them, so the source is authoritative; applySheetSettings blocks the
-  // controls' signals so this does not write straight back. Missing tokens keep the
-  // dock's current value.
+  // Fáze 15D: resolve the view() blocks of the source and the active view path, so
+  // annotations (dims / labels / sheet) can be scoped to the active view. An
+  // annotation is visible when its owning view (deepest enclosing view() block, or
+  // the root) is a prefix of the active path. With no view() this is all-root and
+  // behaves exactly as before.
+  const auto viewBlocks = resolveViewBlocks(source);
+  const std::vector<std::string> activePath(this->activeViewPath.begin(),
+                                            this->activeViewPath.end());
+  const QStringList sourceLinesForScope = source.split('\n');
+  auto ownerOnActivePath = [&](int line0) {
+    return ViewScope::isPrefix(ViewScope::ownerPath(viewBlocks, line0), activePath);
+  };
+
+  // Sheet-level settings live in // @sheet comments (gap / scale / shown views /
+  // fill). Each view can carry its own; pick the one whose owner is the deepest
+  // prefix of the active path (so a view's sheet overrides the common one). Parse
+  // it onto the dock's controls BEFORE the layout below reads them, so the source
+  // is authoritative; applySheetSettings blocks the controls' signals so this does
+  // not write straight back. Missing tokens keep the dock's current value.
   {
     static const char *const slug[6] = {"front", "back", "left", "right", "top", "bottom"};
     double gap = this->drawingDock->sheetGap();
@@ -5192,11 +5341,22 @@ void MainWindow::refreshDrawingViews()
     std::vector<bool> shown(6);
     for (int i = 0; i < 6; ++i) shown[i] = this->drawingDock->isViewSelected(i);
     static const QRegularExpression sheetRe(R"(^\s*//\s*@sheet\b(.*)$)");
-    for (const QString& L : source.split('\n')) {
-      const auto m = sheetRe.match(L);
+    int bestOwnerLen = -1;
+    QString bestTokens;
+    for (int li = 0; li < sourceLinesForScope.size(); ++li) {
+      const auto m = sheetRe.match(sourceLinesForScope.at(li));
       if (!m.hasMatch()) continue;
+      const auto owner = ViewScope::ownerPath(viewBlocks, li);
+      if (!ViewScope::isPrefix(owner, activePath)) continue;  // not this view's sheet
+      const int len = static_cast<int>(owner.size());
+      if (len > bestOwnerLen) {  // deeper (more specific) wins; ties keep the first
+        bestOwnerLen = len;
+        bestTokens = m.captured(1);
+      }
+    }
+    if (bestOwnerLen >= 0) {
       for (const QString& tok :
-           m.captured(1).split(QRegularExpression("\\s+"), Qt::SkipEmptyParts)) {
+           bestTokens.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts)) {
         const int eq = tok.indexOf('=');
         if (eq < 0) continue;
         const QString k = tok.left(eq), v = tok.mid(eq + 1);
@@ -5210,7 +5370,6 @@ void MainWindow::refreshDrawingViews()
               if (s.compare(slug[i], Qt::CaseInsensitive) == 0) shown[i] = true;
         }
       }
-      break;  // first // @sheet wins
     }
     this->drawingDock->applySheetSettings(gap, scaleDen, fill, shown);
   }
@@ -5227,7 +5386,13 @@ void MainWindow::refreshDrawingViews()
 
   const ResolvedDrawing resolved = resolveDrawing(dimrefs, source, /*warn=*/true, sectionFrames);
   const std::vector<AnchorRec>& anchorRecs = resolved.anchors;
-  const std::vector<ResolvedDim>& dims = resolved.dims;
+  // Keep only dimensions whose // @dim line is owned by a view on the active path
+  // (kvota= dims have sourceLine -1 -> owner root -> always shown).
+  std::vector<ResolvedDim> dims;
+  dims.reserve(resolved.dims.size());
+  for (const auto& d : resolved.dims) {
+    if (ownerOnActivePath(d.sourceLine)) dims.push_back(d);
+  }
 
   // Resolve label() markers + // @label callouts (view-independent), shared with
   // the camera overlay.
@@ -5235,7 +5400,12 @@ void MainWindow::refreshDrawingViews()
     this->rootNode ? collectLabels(this->rootNode) : std::vector<LabelInfo>{};
   const ResolvedLabels resolvedLabels = resolveLabels(labelInfos, source);
   const std::vector<LabelAnchorRec>& labelAnchorRecs = resolvedLabels.anchors;
-  const std::vector<ResolvedLabel>& labels = resolvedLabels.labels;
+  // Same view scoping for // @label callouts.
+  std::vector<ResolvedLabel> labels;
+  labels.reserve(resolvedLabels.labels.size());
+  for (const auto& l : resolvedLabels.labels) {
+    if (ownerOnActivePath(l.sourceLine)) labels.push_back(l);
+  }
 
   // Push dimref markers (anchor crosses + dimension lines) to the 3D view. This
   // happens on every preview, like camera frustums, regardless of dock state.

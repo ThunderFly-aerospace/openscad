@@ -58,6 +58,7 @@ class ThrownTogetherRenderer;
 class AIDock;
 class CameraViewDock;
 class DrawingViewDock;
+namespace ViewScope { struct Block; }
 
 #include "RenderStatistic.h"
 #include "core/Tree.h"
@@ -110,6 +111,12 @@ public:
   AIDock *aiDock;
   CameraViewDock *cameraDock;
   DrawingViewDock *drawingDock;
+
+  // Fáze 15: switchable model views. `viewSwitcher` is a combo on the editor
+  // toolbar (hidden when the model has no view()); `activeViewPath` is the
+  // selected view path fed into $view on every compile (empty = root).
+  class QComboBox *viewSwitcher = nullptr;
+  std::vector<std::string> activeViewPath;
 
   std::shared_ptr<const Geometry> rootGeom;
   std::shared_ptr<Renderer> geomRenderer;
@@ -168,6 +175,16 @@ private:
   void setupAIDock();
   void setupCameraDock();
   void setupDrawingDock();
+  void setupViewSwitcher();
+  void refreshViewSwitcher();
+  void onViewSwitcherChanged(int index);
+  // Resolve the view() blocks of the current source (main file) to line ranges,
+  // for scoping annotations to the active view (Fáze 15D/E).
+  std::vector<ViewScope::Block> resolveViewBlocks(const QString& source) const;
+  // Insert a new annotation line (// @dim / // @label) inside the active view's
+  // block (before its closing brace), or at end of file when the active view is
+  // the root or has no brace body.
+  void insertAnnotationLine(const QString& annLine);
   // Re-render offscreen snapshots from the model's camera() markers into the
   // camera dock (only when it is visible). Called after each preview.
   void refreshCameras();
