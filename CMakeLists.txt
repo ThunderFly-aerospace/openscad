@@ -1011,6 +1011,7 @@ set(CORE_SOURCES
   src/core/DimrefNode.cc
   src/core/SectionNode.cc
   src/core/LabelNode.cc
+  src/core/ViewNode.cc
   src/core/CgalAdvNode.cc
   src/core/Children.cc
   src/core/ColorNode.cc
@@ -1322,6 +1323,7 @@ set(GUI_SOURCES
   src/gui/LibraryInfoDialog.cc
   src/gui/MainWindow.cc
   src/gui/Measurement.cc
+  src/gui/ViewScope.cc
   src/gui/Animate.cc
   src/gui/FontList.cc
   src/gui/ColorList.cc

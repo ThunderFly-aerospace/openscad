@@ -90,6 +90,7 @@
 #include "core/Context.h"
 #include "core/EvaluationSession.h"
 #include "core/RenderVariables.h"
+#include "core/ViewNode.h"
 #include "core/ScopeContext.h"
 #include "core/Settings.h"
 #include "core/customizer/CommentParser.h"
@@ -179,6 +180,12 @@ struct CommandLine {
   const AnimateArgs animate;
   const std::vector<std::string> summaryOptions;
   const std::string summaryFile;
+  // Fáze 15: model views to export. Each entry is a slash-separated view path
+  // (e.g. "assembly/exploded"); empty list = the root (current behaviour). When
+  // allModelViews is set, the list is ignored and every view() in the source is
+  // exported, one file each.
+  const std::vector<std::string> modelViews;
+  const bool allModelViews;
 };
 
 namespace {
@@ -736,39 +743,85 @@ int cmdline(const CommandLine& cmd)
     .camera = cmd.camera,
   };
 
-  if (cmd.animate.frames == 0) {
-    render_variables.time = 0;
-    return do_export(cmd, render_variables, export_format, root_file);
+  // Fáze 15: resolve which model views to export. Each spec is an active view
+  // path plus a filename tag; the default single spec (empty path, no tag) is the
+  // root and reproduces the previous behaviour exactly.
+  struct ViewSpec {
+    std::vector<std::string> path;
+    std::string tag;
+  };
+  std::vector<ViewSpec> specs;
+  if (cmd.allModelViews) {
+    for (const auto& info : collectViews(root_file)) {
+      specs.push_back({info.fullPath, boost::algorithm::join(info.fullPath, "_")});
+    }
+    if (specs.empty()) {
+      LOG("--all-model-views: no view() found in '%1$s', exporting the root.", cmd.filename);
+      specs.push_back({{}, ""});
+    }
+  } else if (!cmd.modelViews.empty()) {
+    for (const auto& v : cmd.modelViews) {
+      std::vector<std::string> path;
+      boost::split(path, v, boost::is_any_of("/"));
+      path.erase(std::remove(path.begin(), path.end(), std::string()), path.end());
+      specs.push_back({path, boost::algorithm::join(path, "_")});
+    }
   } else {
-    // export the requested number of animated frames
-    const unsigned start_frame = ((cmd.animate.shard - 1) * cmd.animate.frames) / cmd.animate.num_shards;
-    const unsigned limit_frame = (cmd.animate.shard * cmd.animate.frames) / cmd.animate.num_shards;
-    for (unsigned frame = start_frame; frame < limit_frame; ++frame) {
-      render_variables.time = frame * (1.0 / cmd.animate.frames);
+    specs.push_back({{}, ""});
+  }
+  const bool multi = specs.size() > 1;
 
-      std::ostringstream oss;
-      oss << std::setw(5) << std::setfill('0') << frame;
+  int rc = 0;
+  for (const auto& spec : specs) {
+    render_variables.viewPath = spec.path;
 
-      auto frame_file = fs::path(cmd.output_file);
-      auto extension = frame_file.extension();
-      frame_file.replace_extension();
-      frame_file += oss.str();
-      frame_file.replace_extension(extension);
-      std::string const frame_str = frame_file.generic_string();
-
-      LOG("Exporting %1$s...", cmd.filename);
-
-      CommandLine frame_cmd = cmd;
-      frame_cmd.output_file = frame_str;
-
-      int const r = do_export(frame_cmd, render_variables, export_format, root_file);
-      if (r != 0) {
-        return r;
-      }
+    // Inject the view tag into the output filename so a batch does not overwrite
+    // itself (out.svg -> out_assembly.svg). Skip for stdout.
+    // A single explicit --model-view keeps the -o name as given; a batch
+    // (several views, or --all-model-views over a template) tags each file.
+    const bool tagFile = !spec.tag.empty() && (multi || cmd.allModelViews);
+    CommandLine viewCmd = cmd;
+    if (tagFile && !cmd.is_stdout) {
+      fs::path p(cmd.output_file);
+      auto ext = p.extension();
+      p.replace_extension();
+      p += "_" + spec.tag;
+      p.replace_extension(ext);
+      viewCmd.output_file = p.generic_string();
+    } else if (tagFile && cmd.is_stdout) {
+      LOG("Multiple model views to stdout; only the last output will remain.");
     }
 
-    return 0;
+    if (cmd.animate.frames == 0) {
+      render_variables.time = 0;
+      rc |= do_export(viewCmd, render_variables, export_format, root_file);
+    } else {
+      // export the requested number of animated frames
+      const unsigned start_frame =
+        ((cmd.animate.shard - 1) * cmd.animate.frames) / cmd.animate.num_shards;
+      const unsigned limit_frame = (cmd.animate.shard * cmd.animate.frames) / cmd.animate.num_shards;
+      for (unsigned frame = start_frame; frame < limit_frame; ++frame) {
+        render_variables.time = frame * (1.0 / cmd.animate.frames);
+
+        std::ostringstream oss;
+        oss << std::setw(5) << std::setfill('0') << frame;
+
+        auto frame_file = fs::path(viewCmd.output_file);
+        auto extension = frame_file.extension();
+        frame_file.replace_extension();
+        frame_file += oss.str();
+        frame_file.replace_extension(extension);
+
+        LOG("Exporting %1$s...", cmd.filename);
+
+        CommandLine frame_cmd = viewCmd;
+        frame_cmd.output_file = frame_file.generic_string();
+
+        rc |= do_export(frame_cmd, render_variables, export_format, root_file);
+      }
+    }
   }
+  return rc;
 }
 
 template <class Seq, typename ToString>
@@ -986,6 +1039,10 @@ int openscad_main(int argc, char **argv)
       "cores or machines.")
     ("view", po::value<CommaSeparatedVector>(),
       ("=view options: " + boost::algorithm::join(viewOptions.names(), " | ")).c_str())
+    ("model-view", po::value<std::vector<std::string>>(),
+      "=view path (e.g. assembly or assembly/exploded) selecting which view()s are active; "
+      "repeat to export several views, one file each (Fáze 15)")
+    ("all-model-views", "export every view() in the source, one file each (Fáze 15)")
     ("projection", po::value<std::string>(), "=(o)rtho or (p)erspective when exporting png")
     ("csglimit", po::value<unsigned int>(), "=n -stop rendering at n CSG elements when exporting png")
     ("summary", po::value<std::vector<std::string>>(),
@@ -1285,7 +1342,11 @@ int openscad_main(int argc, char **argv)
                                 animate,
                                 vm.count("summary") ? vm["summary"].as<std::vector<std::string>>()
                                                     : std::vector<std::string>{},
-                                vm.count("summary-file") ? vm["summary-file"].as<std::string>() : ""};
+                                vm.count("summary-file") ? vm["summary-file"].as<std::string>() : "",
+                                vm.count("model-view")
+                                  ? vm["model-view"].as<std::vector<std::string>>()
+                                  : std::vector<std::string>{},
+                                vm.count("all-model-views") > 0};
           rc |= cmdline(cmd);
         }
       }

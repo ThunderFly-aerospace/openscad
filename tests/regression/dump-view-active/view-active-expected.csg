@@ -1,0 +1,10 @@
+view(name = "assembly", active = true) {
+	cube(size = [30, 10, 2], center = false);
+	view(name = "exploded", active = true) {
+		multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 20], [0, 0, 0, 1]]) {
+			cube(size = [5, 5, 5], center = false);
+		}
+	}
+}
+view(name = "other");
+

@@ -30,6 +30,7 @@ class NodeVisitor : public BaseVisitor,
                     public Visitor<class DimrefNode>,
                     public Visitor<class SectionNode>,
                     public Visitor<class LabelNode>,
+                    public Visitor<class ViewNode>,
                     public Visitor<class BendNode>,
                     public Visitor<class OffsetNode>
 {
@@ -136,6 +137,13 @@ public:
   // empty group so it stays invisible in preview/render/export and does not break
   // measurement.
   Response visit(State& state, const LabelNode& node) override
+  {
+    return visit(state, (const AbstractNode&)node);
+  }
+  // view() is a switchable-view container: a transparent group. When it is not on
+  // the active path it simply has no children (see ViewNode); visitors treat it
+  // like a plain group and its children (if any) render normally.
+  Response visit(State& state, const ViewNode& node) override
   {
     return visit(state, (const AbstractNode&)node);
   }

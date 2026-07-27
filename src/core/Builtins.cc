@@ -56,6 +56,7 @@ extern void register_builtin_dimref();
 extern void register_builtin_section();
 extern void register_builtin_label();
 extern void register_builtin_bend();
+extern void register_builtin_view();
 extern void register_builtin_primitives();
 extern void register_builtin_surface();
 extern void register_builtin_control();
@@ -92,6 +93,7 @@ void Builtins::initialize()
   register_builtin_section();
   register_builtin_label();
   register_builtin_bend();
+  register_builtin_view();
   register_builtin_primitives();
   register_builtin_surface();
   register_builtin_control();
@@ -137,6 +139,10 @@ Builtins::Builtins()
   this->assignments.emplace_back(new Assignment("$vpr", zeroVector));
   this->assignments.emplace_back(new Assignment("$vpd", std::make_shared<Literal>(500.0)));
   this->assignments.emplace_back(new Assignment("$vpf", std::make_shared<Literal>(22.5)));
+  // Active view path for view() (Fáze 15). Empty vector = root: every view() is
+  // inactive, only geometry outside any view() block shows. Overwritten per
+  // render (see RenderVariables) with the GUI/CLI-selected view path.
+  this->assignments.emplace_back(new Assignment("$view", std::make_shared<Vector>(Location::NONE)));
 }
 
 void Builtins::initKeywordList()

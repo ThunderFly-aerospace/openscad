@@ -1,0 +1,9 @@
+cube(size = [10, 10, 10], center = false);
+view(name = "a");
+view(name = "b");
+multmatrix([[1, 0, 0, 20], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	multmatrix([[0, -1, 0, 0], [1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+		view(name = "placed");
+	}
+}
+
