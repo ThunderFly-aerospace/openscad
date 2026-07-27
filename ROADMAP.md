@@ -79,6 +79,33 @@ i její **testy** — bez zelených testů není fáze hotová.
   polohy. 26 testů (dump/echo, obrazové na obou backendech, export-stl,
   11 unit testů) zelených.
 
+- **Fáze 15 (`view()` — pohledy)** — ✅ **HOTOVO** (2026-07-27; 15A–F). Jádro
+  jazyka + GUI přepínač + headless dávka + strukturální scoping anotací.
+  Přepínatelné „pohledy" = pojmenované stavy modelu (`view("jméno"){ … }`):
+  jedna aktivní cesta ve **stromu pohledů**, re-instanciace při přepnutí,
+  akumulace **dolů** (vnější geometrie i anotace platí i uvnitř). Default =
+  **root** (jen společné, dnešní chování).
+  - **HOTOVO 15A/B**: builtin `view()` + `ViewNode` (průhledný kontejner) +
+    speciální proměnná `$view` (vektor stringů = zbývající aktivní cesta); děti se
+    instanciují jen na aktivní cestě, s převázáním `$view := tail`. Testy
+    `dump/echo-view-node` (default root) + `dump-view-active`
+    (`--model-view assembly/exploded`) zelené; vnoření/akumulace ověřeny.
+  - **HOTOVO 15C**: GUI přepínač (combo na editor-toolbaru, strom s odsazením),
+    skrytý bez `view()`; výběr → recompile s aktivní cestou → **preview, kamery
+    i výkres se přepočtou z re-instanciovaného stromu** (per-view geometrie
+    „zadarmo", protože obojí projektuje `rootNode`).
+  - **HOTOVO 15F**: headless `--model-view A` (single), opakované/`A/B` (seznam),
+    `--all-model-views` (všechny) → soubor na pohled (tag ve jméně). Ověřeno na
+    STL exportech.
+  - **HOTOVO 15D/E**: strukturální scoping anotací podle obalujícího `view()`
+    bloku. `src/gui/ViewScope.{h,cc}` (pure, unit-test `ViewScope_test.cc`, 26
+    assertions): brace-matching → rozsahy bloků, `ownerPath(řádek)`, `isPrefix`
+    (viditelnost = owner je prefix aktivní cesty), `insertLine` (cíl zápisu).
+    `refreshDrawingViews` filtruje kóty/labely podle owner-prefixu a vybírá
+    **nejhlubší `// @sheet` na aktivní cestě** (per-view list). Klikané `// @dim`/
+    `// @label` a `// @sheet` se píšou **dovnitř aktivního bloku** (root → EOF).
+    Bez `view()` = chování identické jako dřív.
+
 ---
 
 ## Fáze 0 — baseline (než sáhneme na kód)  ✅ HOTOVO
@@ -1334,3 +1361,179 @@ nesmysl.
 
 **Regrese.** Celá sada `-j6`: 1 selhání (`render-dxf_text-metrics`), sériově
 projde — opět jen llvmpipe flakyness, a jiný test než minule.
+
+## Fáze 15 — `view()`: přepínatelné pohledy (stavy modelu) + per-view výkresy/kamery  🔶 naplánováno
+
+### Zadání / motivace
+Dnes existuje **právě jedna implicitní scéna** = celý `rootNode`; výkres i
+kamery projektují/renderují celý strom (`MainWindow::refreshDrawingViews`,
+`refreshCameras`). Autor ale potřebuje z **jednoho zdrojáku** ukazovat a měřit
+**různé komponenty a stavy sestavy**: samostatnou součástku s jejími kótami,
+pak přepnout na celek s jinými kótami, případně „složeno / rozloženo". Cíl:
+zavést **pojmenované pohledy**, které jdou přepínat v GUI, a v **headless**
+z nich dávkově generovat PNG (kamery) i technické výkresy.
+
+### Rozhodnutí (probráno 2026-07-27)
+- **Dvě kolmé osy, ne jeden seznam.** „Pohled" = *co* se zobrazuje (výběr/stav).
+  *Jak* se na to díváš (kamera vs. výkres) zůstává druhá osa → dosavadní dvě
+  okna `CameraViewDock` a `DrawingViewDock` **zůstávají oddělená**, jen reagují
+  na společný přepínač aktivního pohledu. Ke komponentě lze mít 3D i výkres.
+- **Syntaxe = strukturální modul `view("jméno"){ … }`**, ne hromada `if
+  ($view==…)`. Čitelnější a — hlavně — anotace uvnitř bloku k němu **strukturálně
+  patří** (viz scope níže). Prakticky je to cukr: aktivní pohled zapne, ostatní
+  vypne.
+- **Sémantika = re-instanciace, NE filtr viditelnosti.** Neaktivní `view()`
+  vrací prázdnou grupu (jako dnešní markery kamera/řez, viz CLAUDE.md), přepnutí
+  = re-evaluace stromu. **Žádný nový průřezový pojem viditelnosti** v
+  CSG/Geometry/exportu/pickingu/měření — neaktivní blok prostě není ve stromu.
+  (Zavržena tag-varianta „jedna evaluace + filtr" právě kvůli té invazivnosti.)
+- **Zvládá i „jinou polohu/stav", ne jen show/hide.** Komponenta se v každém
+  bloku napíše s vlastní transformací; `dimref()` uvnitř se instanciuje s
+  **maticí toho bloku**, takže kóty sedí per-pohled samy.
+
+### Sémantický model (6 pravidel)
+1. **Geometrie mimo všechny `view()` = společná, vždy viditelná.** Žádný `view()`
+   v modelu → přesně **dnešní chování** (vše vidět, jeden implicitní pohled) →
+   zpětná kompatibilita zdarma.
+2. **Pohledy tvoří strom** (sourozenci = alternativy, děti = zjemnění).
+   **Aktivní = jeden uzel.** Render = **společné + všechny `view()` bloky, které
+   jsou předek-nebo-on-sám aktivního uzlu**; sourozenci a nezvolené větve ne.
+3. **Akumulace dolů** („co je vně, je i uvnitř"): vnější obsah teče do vnitřního
+   pohledu. Př.: `view("assembly"){ housing(); view("exploded") …lid; }` — při
+   aktivním `exploded` je vidět `housing` **i** rozložené `lid`. Opačný směr by
+   ukázal víko ve dvou polohách = nesmysl. **Geometrie i anotace akumulují
+   stejně.**
+4. **Default = root** (jen společné). **Když je root prázdný** (celý model je
+   uvnitř bloků) → auto-posun na **prvního potomka**, jinak root.
+5. **Klikaná kóta/label → dovnitř nejhlubšího aktivního bloku** (před jeho
+   zavírací `}`). Root/žádný pohled → **na konec souboru jako dnes**. Přesun kóty
+   mezi pohledy = přesun jejího `// @dim` řádku.
+6. **Přepínač = strom** (root pojmenovat `(vše)`/`(společné)`). **Skrytý úplně,
+   pokud v modelu není žádný `view()`** → nulová změna UI pro stávající modely.
+
+### Scope anotací = strukturálně podle obalu (řeší i „třetí otázku")
+Anotace (`// @dim`, `// @sheet`, `// @detail`, `// @label`) se k pohledu vážou
+tím, že jejich **řádek leží uvnitř rozsahu `view()` bloku** — **žádný `view=`
+klíč**. Mechanika: `view("x")` je reálný `ModuleInstantiation` se scopem, z AST
+známe `[firstLine, lastLine]` (po `}`); sběrače/`CommentParser` jen zařadí každou
+anotaci do pohledu, do jehož rozsahu spadá (vnoření → nejhlubší). `// @sheet`
+(dnes **jediný globální**) se tím stává **per-view**. Seznam pohledů + jejich
+anotace se dají získat **jen z parsování zdrojáku** (bez evaluace); geometrii
+konkrétního pohledu až evaluací s daným aktivním pohledem.
+
+> Pozn.: zápis „dovnitř" potřebuje blokovou formu `{ }`. U `view("x") child();`
+> bez závorek není kam vložit → write-back blok **auto-obalí** do `{ }`, nebo si
+> řekneme, že pohled nesoucí anotace musí být blokový.
+
+### Kroky implementace
+- **15A — builtin `view()` marker.** ✅ HOTOVO. `ViewNode` (průhledný kontejner,
+  `src/core/ViewNode.{h,cc}`), registrace v `Builtins.cc`, `$view` default,
+  `NodeVisitor` forward na `AbstractNode`. Neaktivní = 0 dětí = prázdná grupa
+  (žádný speciál v evaluatorech netřeba). **Testy:** `dump/echo-view-node` zelené.
+- **15B — stav „aktivní pohled" + re-instanciace.** ✅ HOTOVO (jádro). `$view`
+  = vektor stringů (zbývající cesta); `view("x")` matchuje `$view[0]`, instanciuje
+  děti s `$view := tail` (control-style builtin, `Children(inst->scope, childCtx)`).
+  Injekce přes `RenderVariables.viewPath`. **Testy:** `dump-view-active` zelený;
+  vnoření + akumulace dolů ověřeny. (Auto-posun na 1. potomka při prázdném rootu =
+  odloženo, kosmetika.)
+- **15C — strom pohledů + přepínač v GUI.** ✅ HOTOVO. `collectViews(SourceFile*)`
+  z **AST** (ne z uzlů → vidí i neaktivní/vnořené a přes `include`). Combo na
+  editor-toolbaru (`setupViewSwitcher`/`refreshViewSwitcher`/`onViewSwitcherChanged`),
+  odsazený strom, skrytý bez `view()`; výběr → `actionRenderPreview()` s aktivní
+  cestou → preview+kamery+výkres se přepočtou. Smoke-test headless (Xvfb) bez
+  pádu; živé kliknutí ověří uživatel. (Formální Qt-Test = odloženo.)
+- **15D — bucketování anotací podle obalu.** ✅ HOTOVO. `src/gui/ViewScope.{h,cc}`
+  (pure, testovatelné): `resolveBlocks` (brace-matching, path-aware přes
+  `getFullpath`), `ownerPath`, `isPrefix`. `refreshDrawingViews`: per-view
+  `// @sheet` (nejhlubší owner-prefix aktivní cesty) + filtr kót/labelů podle
+  owner-prefixu (kvota= dims mají sourceLine -1 → owner root → vždy). **Testy:**
+  `ViewScope_test.cc` (26 assertions) zelené; regrese beze změny. Rozšířit `collectSections/
+  Dimrefs/Cameras` + čtení `// @…` o **zařazení do pohledu podle rozsahu řádků**
+  (nejhlubší obal). `// @sheet` se řeší per-view. Výkres kreslí anotace
+  aktivního pohledu + zděděné od předků. **Testy:** cmdline echo — anotace v
+  bloku patří jen jemu; anotace u předka se dědí do potomka.
+- **15E — write-back dovnitř bloku.** ✅ HOTOVO. `MainWindow::insertAnnotationLine`
+  vloží `// @dim`/`// @label` (a `// @sheet`) **před `}` aktivního bloku**
+  (`ViewScope::insertLine`), s odsazením; root nebo neblokový `view()` → EOF
+  (fallback = původní chování). `onDrawingSheetSettingsChanged` navíc **replace**
+  `// @sheet` vlastněného přesně aktivním pohledem. **Testy:** `ViewScope_test.cc`
+  (insertLine cíluje `}`, single-statement → -1); GUI smoke bez pádu. Živý
+  round-trip ověří uživatel. (Auto-obal jednořádkového `view()` = odloženo,
+  fallback na EOF.)
+- **15F — headless dávka (dva režimy výběru).** ✅ HOTOVO. Pro každý zvolený
+  pohled se nastaví `$view` a znovu vyhodnotí strom, pak proběhne stávající
+  export (STL/PNG/…; kamery přes `--export-cameras`, výkres 4C jedou stejnou
+  cestou). **Výběr pohledů** (volba `--model-view`, protože `--view` je obsazené
+  viewport-optionami):
+  - **A) všechny pohledy** — `--all-model-views` projede celý strom `view()`,
+    soubor na pohled.
+  - **B) zvolený seznam** — explicitní podmnožina, opakovaný
+    `--model-view A --model-view B`; vnořený pohled jako cesta
+    `--model-view assembly/exploded`.
+  Tag pohledu se vloží do jména výstupu (`out.stl` → `out_A.stl`,
+  `out_assembly_exploded.stl`); u **jediného** `--model-view` se `-o` nechává
+  beze změny. Bez `--model-view*` → root jako dnes. **Testy:** `dump-view-active`
+  (`--model-view` mění strom) zelený; ověřeno ručně: single/seznam/all/nested
+  STL exporty.
+
+### Headless (klíčová hodnota) — dva režimy výběru
+> **Pozn.:** volba se jmenuje `--model-view` (a `--all-model-views`), protože
+> `--view` už je obsazené (viewport display options: axes/edges/…). Tag pohledu
+> se vkládá do jména výstupu (`out.svg` → `out_assembly.svg`); u **jediného**
+> explicitního `--model-view` se `-o` nechává beze změny.
+
+Z jednoho `.scad` (dnes ověřeno na geometrických exportech; kamera/vektor jedou
+stejnou cestou přes aktivní `$view`):
+- **A) všechny pohledy** naráz: `openscad model.scad --all-model-views -o out.stl`
+  → `out_<pohled>.stl` pro každý `view()` (vč. vnořených jako `out_a_b.stl`).
+- **B) zvolený seznam** pohledů: `openscad model.scad --model-view pcb
+  --model-view housing -o out.stl` → `out_pcb.stl`, `out_housing.stl`. Vnořený
+  pohled jako cesta: `--model-view assembly/exploded`.
+
+Staví přímo na 4A (kamery) a 4C (vektor) — před evaluací každého pohledu se jen
+nastaví `$view` a znovu se vyhodnotí strom.
+
+### Zpětná kompatibilita
+Model bez `view()` = jeden root = vše společné = **beze změny** (přepínač
+skrytý, kóty na EOF, náhled ukazuje vše). Existující výkresy/kamery/`// @sheet`
+fungují jako dřív (spadají do rootu).
+
+### Import a více souborů (`import` / `include` / `use`)
+Čtyři případy, každý jinak:
+1. **`import("díl.stl")` (mesh):** žádná zvláštní interakce — obyčejná geometrie
+   ve `view()` bloku nebo ve společné části; neaktivní pohled ji neimportuje
+   (viz perf/mesh-cache).
+2. **`include <lib.scad>`:** vloží cizí top-level kód → jeho `view()` bloky se
+   stanou součástí stromu pohledů. **Nutné:** (a) **scope anotací path-aware** —
+   `// @dim` patří do bloku jen když **stejný soubor** i rozsah řádků; bucket-klíč
+   = `(path, řádek)` (`Location` už `path` nese). (b) **anotace nepřekračují
+   hranici souboru** do obalujícího pohledu (`// @dim` uvnitř includovaného
+   souboru se nezařadí do `view()` bloku v hlavním souboru). Pozn.: ověřit, že
+   `include` **uvnitř** `view(){ }` bloku gramatika dovolí.
+3. **`use <lib.scad>`:** jen definice, top-level `view()` se nevykoná; pohled
+   vznikne jen instanciací modulu (→ případ 4).
+4. **`view()` uvnitř modulu / smyčky (i z cizího souboru):** vzniká až evaluací,
+   statický scan zdrojáku ho nevidí; navíc vnořený neaktivní `view()` se
+   neinstanciuje → **nejde naráz enumerovat celý vnořený strom**. **Rozhodnutí
+   pro v1:** pohledy musí být **literální `view("jméno")` bloky** (i přes
+   `include`), enumerované scanem zdrojáku (path-aware). Modulem/smyčkou
+   generované pohledy s počítaným jménem = **mimo v1** (geometricky fungují, když
+   je jejich jméno aktivní, ale v přepínači se neukážou). Plná enumerace přes
+   zvláštní průchod = **později**.
+
+### Rizika
+- **Výkon re-evaluace** u těžkých importů (STL 149k facy, Fáze 14) → přepínání
+  může trhat. **Mesh-cache importu napříč re-evaluacemi = odloženo** (rozhodnuto
+  neřešit teď); pokud bude problém, řešit až měřením.
+- **Write-back do bloku** je křehčí než append na EOF (najít správnou `}`,
+  auto-obal jednořádkového `view()`). Dobře ohraničené, ale hlídat okrajové
+  případy (prázdný blok, komentář těsně před `}`).
+- **Prázdný root** nesmí uživatele překvapit prázdným náhledem → auto-posun na
+  prvního potomka (pravidlo 4).
+
+### Odloženo (forward-compat, ne teď)
+Dlouhodobě „SCAD-like" varianta: anotace jako **reálné child-moduly** uvnitř
+`view()` (`dim("a","b", offset=…)` místo `// @dim`) — lokace i world-matice z
+AST zadarmo, odpadá re-parsing zdrojáku a řádkové bucketování. `view()` kontejner
+je právě **schůdek** k tomu; migrace = přepis `comment_parser.y` + sběru =
+samostatný velký projekt, **až později**.
