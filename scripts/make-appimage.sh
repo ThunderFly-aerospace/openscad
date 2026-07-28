@@ -15,19 +15,43 @@
 # POŽADAVKY: docker nebo podman.
 #
 # Použití:
-#   scripts/make-appimage.sh [OUT_DIR]
-#   OUT_DIR  kam uložit .AppImage (default: kořen repa)
+#   scripts/make-appimage.sh [--headless] [OUT_DIR]
+#   --headless  postavit CLI variantu bez Qt GUI (-DHEADLESS=ON), ALE s OpenGL,
+#               takže render kamer (--export-cameras, PNG) dál funguje. Menší,
+#               míň závislostí; jméno dostane příponu "_headless".
+#   OUT_DIR     kam uložit .AppImage (default: kořen repa)
 #
-# Výsledek: OUT_DIR/OpenSCAD-<verze>[_<vetev>]-x86_64.AppImage
+# Výsledek: OUT_DIR/OpenSCAD-<verze>[_<vetev>][_headless]-x86_64.AppImage
 #
 set -euo pipefail
 
-# --- cesty -------------------------------------------------------------------
+# --- cesty + režim -----------------------------------------------------------
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]:-$0}" )" && pwd )"
 REPO="$( cd "$SCRIPT_DIR/.." && pwd )"
-OUT="${1:-$REPO}"
+
+HEADLESS_MODE=0
+OUT=""
+for arg in "$@"; do
+  case "$arg" in
+    --headless) HEADLESS_MODE=1 ;;
+    *)          OUT="$arg" ;;
+  esac
+done
+OUT="${OUT:-$REPO}"
 IMAGE="openscad-appimage-base"
-BUILD_DIR="build-appimage"   # oddělený od nativního build/ — nepřepsat ho!
+
+if [ "$HEADLESS_MODE" -eq 1 ]; then
+  BUILD_DIR="build-appimage-headless"   # oddělený od GUI varianty i nativního build/
+  CMAKE_HEADLESS_FLAG="-DHEADLESS=ON"    # bez Qt GUI; NULLGL NEzapínat → GL zůstane
+  LD_QT_PLUGIN=""                        # headless binárka nemá Qt → žádný qt plugin
+  OUTPUT_TAG="_headless"
+  echo ">> režim: HEADLESS (bez Qt GUI, s OpenGL pro render kamer)"
+else
+  BUILD_DIR="build-appimage"            # oddělený od nativního build/ — nepřepsat ho!
+  CMAKE_HEADLESS_FLAG=""
+  LD_QT_PLUGIN="--plugin qt"
+  OUTPUT_TAG=""
+fi
 
 mkdir -p "$OUT"
 OUT="$( cd "$OUT" && pwd )"
@@ -90,16 +114,17 @@ cmake .. \
     -DENABLE_TESTS=OFF \
     -DUSE_QT6=ON \
     -DSNAPSHOT=ON \
-    -DEXPERIMENTAL=ON
+    -DEXPERIMENTAL=ON \
+    ${CMAKE_HEADLESS_FLAG}
 cmake --build . -j"\$(nproc)"
 DESTDIR=./AppDir cmake --install .
 
 export PATH=/appimage/usr/bin:"\${PATH}"
 export EXTRA_QT_PLUGINS=svg
 export PYTHON_VERSION=\$(python3 -c 'import sys; v=sys.version_info; print(f"{v.major}.{v.minor}.{v.micro}")')
-export LINUXDEPLOY_OUTPUT_VERSION="\${OPENSCAD_VERSION}\${SUFFIX}"
+export LINUXDEPLOY_OUTPUT_VERSION="\${OPENSCAD_VERSION}\${SUFFIX}${OUTPUT_TAG}"
 export QMAKE=/usr/bin/qmake6
-linuxdeploy --plugin python --plugin qt --output appimage --appdir AppDir
+linuxdeploy --plugin python ${LD_QT_PLUGIN} --output appimage --appdir AppDir
 
 mkdir -p /out
 cp -v OpenSCAD-*.AppImage /out/

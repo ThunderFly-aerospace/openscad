@@ -1,3 +1,191 @@
+# OpenSCAD — rozšíření (fork `cam_and_drawings`)
+
+Tenhle fork přidává do OpenSCADu **kamery v modelu**, **technické výkresy s kótami**,
+**přepínatelné pohledy (stavy sestavy)**, **ohyb geometrie** a **barevný export**.
+Všechno se definuje přímo v `.scad` a aktualizuje se se změnou modelu. Detailní
+návrh a stav viz [`ROADMAP.md`](ROADMAP.md); orientace v kódu [`CLAUDE.md`](CLAUDE.md).
+
+## Cheatsheet — co fork přidává
+
+**Nové moduly ve zdrojáku** (neviditelné „markery", nerozbijí render/export):
+
+| modul | k čemu | hlavní argumenty |
+|---|---|---|
+| `camera(...)` | kamera v modelu → offscreen render (PNG, i s barvami) | `focal`,`sensor` **nebo** `fov`; `width`,`height`; `name`; `projection="perspective"\|"orthogonal"`; `marker` |
+| `dimref(...)` | kotva kóty (klikací bod pro rozměr) | `name`; `d=`/`r=` (⌀/R hodnota); `kvota=` (auto-pár podle jména) |
+| `section(...)` | rovina řezu pro výkres (řez = lokální XY, pohled +Z) | `name`; `flip`; `hatch` (rozteč šraf) |
+| `label(...)` | 3D textový popisek s odkazovou čárou | `name`; `text` |
+| `view(...) { ... }` | **přepínatelný pohled / stav** modelu | `name` |
+| `bend(...) { ... }` | ohyb geometrie i importovaného STL kolem osy ‖ Y | `at`,`r`,`angle`; `xlim`,`ylim`,`zlim` (maska) |
+
+**Anotace v komentářích** (spravuje je GUI — klikáním/tažením ve výkresu; píšou se
+samy do zdrojáku): `// @dim` (kóta), `// @sheet` (nastavení listu), `// @detail`
+(výřez ve větším měřítku), `// @label` (text popisku).
+
+**Nové CLI:** `--export-cameras <prefix>`, `--model-view <cesta>`,
+`--all-model-views` (viz [Rozšířené CLI](#rozšířené-cli) níže).
+
+**Barevný export:** `-o model.obj` zapíše i sesterský `.mtl` (barvy z `color()`),
+takže je přečte Blender; OFF/3MF barvy zachovají taky.
+
+---
+
+## Kamery v modelu — `camera()`
+
+Kamera je bod v modelu (pozici a natočení dědí z rodičovských transformací),
+který nese parametry objektivu a rozlišení. GUI dok **„Cameras"** z každé
+`camera()` vyrenderuje offscreen snímek (tlačítko *Save PNG*), včetně barev z
+`color()`. V hlavním 3D pohledu se kamery kreslí jako drátěné frustumy (skryté v F6).
+
+```scad
+translate([50, 50, 60]) rotate([0,0,135]) rotate([45,0,0])
+    camera(name = "hero", focal = 35, sensor = 24, width = 1920, height = 1080);
+
+camera(name = "top", projection = "orthogonal", marker = 40);   // ohnisko lze i přes fov=
+```
+
+Objektiv zadáš buď `focal`+`sensor` (svislý FOV se dopočítá), nebo přímo `fov`.
+`marker` = délka frustumu v mm (default auto). Headless dávkový render: `--export-cameras`.
+
+## Technické výkresy a kóty — `dimref()`, `section()`, `label()` + dok „Drawing"
+
+Dok **„Drawing"** je WYSIWYG vektorového výkresu: standardní ISO-E pohledy
+(nárys/bokorys/půdorys/…), řezy, detaily, kóty a popisky na jednom listu; co vidíš,
+to se vyexportuje (SVG/DXF přes *Save Sheet*).
+
+- **`dimref("A")`** je kotva rozměru. Ve výkresu (nebo v 3D po F6) klikneš dvě
+  kotvy → do zdrojáku se zapíše `// @dim A B proj=front`. Kótu pak **taháš myší**
+  (odsazení), otáčíš (⌀/R), dvojklikem edituješ (label/přesnost/šipky/projekce).
+  - `dimref("A", d=8)` (nebo `r=`) nese hodnotu pro **průměr/poloměr**;
+    `dimref("A", kvota="width")` spáruje dvě stejnojmenné kotvy automaticky.
+  - Typy kót: délka, ⌀/R, úhel (`// @dim angle V A B`), řetěz/kontinuální
+    (`// @dim chain A B C…`).
+- **`section("A")`** definuje rovinu řezu (rovina = lokální XY, pohled podél +Z);
+  `flip` obrátí, `hatch` řídí šrafy. Ve výkresu se řez vykreslí jako dlaždice
+  „Řez A–A" i s čárou řezu v odpovídajícím pohledu.
+- **`label("A", text="Motor mount")`** je 3D textový popisek s odkazovou čárou;
+  funguje ve výkrese i ve snímcích kamer.
+- **`// @sheet`** nese nastavení listu (zapnuté pohledy, měřítko, mezery, výplň),
+  **`// @detail`** výřez ve větším měřítku. Obojí spravuje dok, píše se do zdrojáku.
+
+Kóty/popisky jsou komentáře → přepočítají se bez F6 (geometrie se nemění).
+
+## Přepínatelné pohledy / stavy — `view()`
+
+`view("jméno"){ … }` je **přepínatelný stav modelu**. V GUI je nahoře v liště
+rozbalovací **přepínač pohledů**; přepnutím se model přepočítá a 3D náhled,
+kamery i výkres ukážou zvolený pohled. V headless se pohled volí přes `--model-view`.
+
+```scad
+base();                       // společné: mimo view() = vidět vždy
+
+view("pcb")      pcb();
+view("kryt")     housing();
+
+view("assembly") {            // celek; lze vnořit varianty
+    housing();
+    pcb();
+    view("exploded")          // "assembly/exploded" = celek + rozklad
+        translate([0,0,30]) lid();
+}
+```
+
+Pravidla: jeden aktivní pohled; zobrazí se **společná geometrie + zvolený pohled a
+jeho předci** (vnořené pohledy se **hromadí dolů**). Default = **root** (jen společné
+= chování jako bez `view()`, plná zpětná kompatibilita). Kóty/`// @sheet` psané
+uvnitř bloku patří tomu pohledu; kóta se kreslí, jen když je její pohled na aktivní
+cestě. Řídí se přes speciální proměnnou `$view` (vektor jmen; běžně ji nenastavuješ ručně).
+
+## Ohyb geometrie — `bend()`
+
+`bend()` ohne své děti (**i importované STL** — nelineárně, pod úrovní meshe)
+kolem osy rovnoběžné s Y. Materiál `x < at` stojí, pásmo `[at, at+r·|angle|]` se
+navine na oblouk o poloměru `r`, zbytek jede tuze za ním. `angle > 0` zvedá k +Z.
+
+```scad
+bend(at = 20, r = 5, angle = 90)
+    import("flex_pcb.stl");
+
+bend(at = 0, r = 3, angle = 45, xlim = [10, 40])   // maskou omez, co se ohýbá
+    children();
+```
+
+Maska `xlim`/`ylim`/`zlim` vymezí, co se deformuje (víc ohybů na různých místech
+desky je nezávislých); zbytek se klasifikuje podle souvislosti meshe.
+
+## Rozšířené CLI
+
+Nad rámec standardního OpenSCADu (`-o out.stl`, `--camera`, `-D`, …):
+
+| přepínač | co dělá |
+|---|---|
+| `--export-cameras <prefix>` | dávkový render **všech `camera()`** → `<prefix>_<jméno>.png`. Respektuje výběr pohledů: `--model-view A` renderuje i kamery uvnitř `view("A")`; `--all-model-views` projede všechny pohledy (tag pohledu ve jméně) |
+| `--model-view <cesta>` | zvolí aktivní pohled; vnořený jako cesta `assembly/exploded`. **Opakovatelný** = dávka vybraných pohledů (soubor na pohled). Jediný `--model-view` nechává `-o` beze změny |
+| `--all-model-views` | vyexportuje **každý `view()`** v modelu, jeden soubor na pohled |
+| `--export-drawing <prefix>` | **technický výkres** (ortho pohledy + kóty + řezy) zvolených pohledů → `<prefix>[_pohled].<fmt>`. `--drawing-format svg\|pdf\|png\|dxf` (default svg). Respektuje `--model-view`/`--all-model-views`. Potřebuje Qt + offscreen (běž pod `xvfb-run`) |
+| `-o model.obj` | OBJ **+ sesterský `.mtl`** s barvami z `color()` (pro Blender) |
+
+Tag pohledu se u dávky vkládá do jména výstupu: `out.stl` → `out_pcb.stl`,
+`out_assembly_exploded.stl`.
+
+> **Pozor:** `--view` zůstává původní přepínač zobrazení viewportu (axes/edges/…);
+> výběr pohledů modelu je proto `--model-view`.
+
+Příklady:
+
+```bash
+# render všech kamer
+openscad model.scad --export-cameras out_
+
+# jeden pohled do STL / všechny pohledy naráz
+openscad model.scad --model-view pcb            -o pcb.stl
+openscad model.scad --model-view assembly/exploded -o exploded.stl
+openscad model.scad --all-model-views           -o out.stl   # -> out_<pohled>.stl
+
+# barevný OBJ pro Blender
+openscad model.scad -o model.obj
+
+# technický výkres (kóty!) do SVG/PNG — pod xvfb (potřebuje Qt + offscreen)
+xvfb-run -a openscad model.scad --export-drawing out --model-view pcb           # out_pcb.svg
+xvfb-run -a openscad model.scad --export-drawing out --all-model-views --drawing-format pdf
+```
+
+### Headless build (pro CI / GitHub Actions)
+
+CLI + rozšíření modelu (`view()`, `--model-view`, `--export-cameras`, geometrické
+exporty) běží i **bez Qt GUI**, výrazně menší a s málo závislostmi. Doporučená
+varianta nechává **OpenGL zapnuté**, aby fungoval **render kamer**:
+
+```bash
+cmake -B build -G Ninja -DEXPERIMENTAL=1 -DCMAKE_BUILD_TYPE=Release -DHEADLESS=ON
+cmake --build build -j"$(nproc)"
+```
+
+- `-DHEADLESS=ON` vypustí Qt GUI frontend (doky Cameras/Drawing, editor). **Bez
+  Qt**, ~50 knihoven místo ~120; render kamer (`--export-cameras`, `-o *.png`)
+  **funguje** přes offscreen GL (`OffscreenView`).
+- `-DNULLGL=ON` (navíc) vypustí i OpenGL → **nejmíň** závislostí, ale **render
+  kamer/PNG přestane fungovat**; zbydou jen geometrické výstupy
+  (STL/OFF/3MF/OBJ/CSG/DXF/SVG) + `--model-view`/`--all-model-views`.
+- Render kamer potřebuje **GL kontext** → v CI spouštěj pod `xvfb-run` (Mesa/EGL
+  fallback na GLX), např. `xvfb-run -a openscad --export-cameras out_ model.scad`.
+- Interaktivní výkresy/kóty a GUI přepínač pohledů jsou součást GUI → v headless
+  nejsou; dávkový export pohledů přes `--model-view` funguje.
+
+**Přenositelné AppImage** — dvě varianty přes `scripts/make-appimage.sh` (Docker,
+Ubuntu 22.04 → glibc 2.35):
+
+```bash
+scripts/make-appimage.sh              # plná GUI verze
+scripts/make-appimage.sh --headless   # CLI + GL (bez Qt GUI), přípona _headless
+```
+
+---
+
+<sub>⬆ Výše je dokumentace tohoto forku. Níže následuje původní (upstream) README OpenSCADu.</sub>
+
+---
+
 [![GitHub (master)](https://img.shields.io/github/checks-status/openscad/openscad/master.svg?logo=github&label=build&logoColor=black&colorA=f9d72c&style=plastic)](https://github.com/openscad/openscad/actions)
 [![CircleCI (master)](https://img.shields.io/circleci/project/github/openscad/openscad/master.svg?logo=circleci&logoColor=black&colorA=f9d72c&style=plastic)](https://circleci.com/gh/openscad/openscad/tree/master)
 [![Coverity Scan](https://img.shields.io/coverity/scan/2510.svg?colorA=f9d72c&logoColor=black&style=plastic)](https://scan.coverity.com/projects/2510)

@@ -106,6 +106,17 @@ i její **testy** — bez zelených testů není fáze hotová.
     `// @label` a `// @sheet` se píšou **dovnitř aktivního bloku** (root → EOF).
     Bez `view()` = chování identické jako dřív.
 
+- **Fáze 16 (CLI kamery per-view + CLI výkres)** — ✅ **HOTOVO** (2026-07-27; 16A+16B).
+  - **16A**: `--export-cameras` respektuje výběr pohledů — `--model-view A`
+    vyrenderuje i kamery uvnitř `view("A")`, `--all-model-views` projede všechny
+    (tag pohledu ve jméně). `export_cameras` přepsán na smyčku přes pohledy,
+    sdílený `resolveViewSpecs` s `cmdline`.
+  - **16B**: CLI export **technického výkresu** vybraných pohledů —
+    `--export-drawing <prefix>` (+ `--drawing-format svg|pdf|png|dxf`). Recykluje
+    celý GUI pipeline (běží headless pod offscreen `QApplication`), respektuje
+    `--model-view`/`--all-model-views`. Přidán i **PNG** export (i do GUI doku).
+    Ověřeno (SVG/PNG, single/all); regrese zelené.
+
 ---
 
 ## Fáze 0 — baseline (než sáhneme na kód)  ✅ HOTOVO
@@ -1537,3 +1548,85 @@ Dlouhodobě „SCAD-like" varianta: anotace jako **reálné child-moduly** uvnit
 AST zadarmo, odpadá re-parsing zdrojáku a řádkové bucketování. `view()` kontejner
 je právě **schůdek** k tomu; migrace = přepis `comment_parser.y` + sběru =
 samostatný velký projekt, **až později**.
+
+## Fáze 16 — CLI: kamery per-view + technický výkres do souboru
+
+### Zadání / motivace
+Z jednoho `.scad` chce autor v **headless/CLI** vygenerovat pro vybrané pohledy
+(`--model-view` / `--all-model-views`): (A) **snímky kamer** a (B) **technický
+výkres** (ortho pohledy + kóty + řezy + detaily + list) do **SVG / PDF / PNG**
+(příp. DXF). Doplňuje headless dávku z Fáze 15 o vizuální výstupy.
+
+### 16A — CLI kamery per-view  ✅ HOTOVO (2026-07-27)
+`export_cameras` (`src/openscad.cc`) přepsán z jediné evaluace na **smyčku přes
+pohledy** (`resolveViewSpecs`, sdílené s `cmdline`): pro každý zvolený pohled
+přenastaví `$view`, re-instanciuje strom a vyrenderuje jeho `camera()` markery
+(`render_camera_preview` → offscreen GL). `--export-cameras out_` respektuje
+`--model-view A` (kamery uvnitř `view("A")`) i `--all-model-views` (tag pohledu ve
+jméně: `out__A_hero.png`). Bez výběru = root jako dřív. Ověřeno; regrese zelené.
+
+### 16B — CLI technický výkres  ✅ HOTOVO (2026-07-27)
+
+**Jak to dopadlo (implementace).** Místo riskantní extrakce 300řádkového
+`refreshDrawingViews` zvolena **nízkoriziková cesta k GUI**: CLI **recykluje celý
+existující pipeline** tím, že spustí `MainWindow` **headless** pod offscreen
+`QApplication` (jako gui-testy) a nechá dok postavit data:
+- **16B-1 (bezpečná extrakce)**: `renderToFile`+`Placement` vytaženy do file-scope
+  `renderSheetToFile` + přidán **PNG** (QImage); nová public statická
+  `DrawingViewDock::exportDrawingSheet(...)` a `exportToPath(path)` (export bez
+  dialogu). `exportDrawing` doku je teď tenký wrapper → GUI beze změny chování.
+- **16B-3 (řízení)**: `MainWindow::exportDrawingHeadless(modelViews, all, prefix,
+  ext)` — pro každý pohled nastaví `$view`, zavolá `actionRenderPreview()`
+  (**synchronní**: `compile`→`compileDone`→`csgRender`→`refreshDrawingViews`), pak
+  `dock->exportToPath()`. `gui()` dostal param `CliDrawingExport*` a přes
+  `QTimer::singleShot` export spustí a ukončí appku. Nová CLI volba
+  `--export-drawing <prefix>` (+ `--drawing-format`, default svg) v `openscad.cc`
+  routuje do `gui()` (guard `#ifndef OPENSCAD_NOGUI` — v headless-noQt hlásí chybu).
+- **16B-2 (extrakce build-strany)**: NEBYLA potřeba — headless běh doku ji
+  obešel. `refreshDrawingViews` zůstal netknutý → **nulové riziko regrese** GUI.
+
+**Runtime.** Potřebuje Qt (plný build) + offscreen GL/QPA: `xvfb-run openscad
+model.scad --export-drawing out --all-model-views` → `out_<pohled>.svg`. Ověřeno:
+SVG (25 polyline + text), PNG (325×280), single i `--all-model-views`.
+
+--- (původní plán níže, ponechán jako záznam) ---
+
+**Problém.** Celý výkresový pipeline je dnes **jen v GUI a přes Qt**:
+- **stavba listu**: `MainWindow::refreshDrawingViews` (~300 ř.) — projekce
+  geometrie (silueta + HLR), rozřešení kót/labelů (`resolveDrawing`/`resolveLabels`),
+  řezy, detaily, `// @sheet`, per-view scoping (Fáze 15D) → `OrthoViewData` na
+  pohled; provázané s členy `MainWindow`/`DrawingViewDock`.
+- **export**: `DrawingViewDock::exportDrawing` → lambda `renderToFile` (~240 ř.) —
+  kreslení primitiv přes **QPainter** → SVG (`QSvgGenerator`) / PDF (`QPrinter`),
+  + vlastní **DXF** writer. Layout listu (ISO-E) je `sheetLayout`.
+
+**Qt je OK.** `QSvgGenerator`/`QPainter`/`QPrinter` běží **i bez displeje**
+(offscreen), takže CLI výkres poběží v plném (Qt) buildu bez X. Headless-noQt
+variantu jsme opustili (úspora ~20 MB nestála za to), takže Qt v CLI nevadí.
+
+**Kroky (bezpečně, každý build+test, GUI průběžně nesmí regresovat):**
+- **16B-1** — vytáhnout `renderToFile` + `sheetLayout` do **ne-widget** funkcí
+  (nový `src/gui/DrawingExport.{h,cc}` nebo `src/io/`):
+  `renderDrawingSheet(places, sheetWmm, sheetHmm, path, format)`, kde `format ∈
+  {SVG,PDF,DXF,PNG}`. **Přidat PNG** (přes `QImage`+`QPainter`, DPI parametr).
+  `DrawingViewDock::exportDrawing` pak jen zavolá tuto funkci → neutrální refaktor.
+- **16B-2** — vytáhnout stavbu listu z `refreshDrawingViews` do
+  `buildDrawingSheet(rootNode, source, viewOptions, activeViewPath, sheetSettings)
+  → {places, sheetW, sheetH}`, odvázané od `MainWindow`/doku (dnešní členy
+  `viewPxPerMm` apod. si spočítat lokálně). GUI `refreshDrawingViews` i CLI pak
+  volají tentýž builder. **To je jádro rizika** (velká funkce, hodně stavu).
+- **16B-3** — CLI `--export-drawing <prefix>` (+ `--drawing-format svg|pdf|png|dxf`,
+  jinak dle přípony) pod **offscreen `QApplication`** (`QT_QPA_PLATFORM=offscreen`):
+  parse+`collectParameters`, smyčka přes `resolveViewSpecs` (sdíleno s 16A), pro
+  každý pohled `buildDrawingSheet` → `renderDrawingSheet` → `<prefix>_<pohled>.<ext>`.
+  Volitelně `--drawing-separate` (režim „každý pohled do svého souboru", už existuje
+  v doku).
+
+**Testy:** cmdline — `--export-drawing` na modelu s `dimref`/`section` vyprodukuje
+neprázdný SVG (a PNG > pár px barev); `--all-model-views` soubor na pohled; layout
+== GUI export (sdílená `sheetLayout`/`renderDrawingSheet`). Pozor na offscreen Qt
+v CI (`xvfb`/`-platform offscreen`).
+
+**Rizika.** 16B-2 je hlavní objem — odvázání od GUI stavu. Ověřovat, že dok kreslí
+i exportuje **beze změny** (regrese vizuálně + porovnáním exportů před/po). SVG/PDF
+přes QPainter je bez displeje OK; PNG rasterizace taky (QImage), GL netřeba.

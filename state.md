@@ -71,6 +71,25 @@ stav implementace** (co je hotové/ověřené, co zbývá, kde jsem skončil).
   `Children(inst->scope, childCtx).instantiate(node)`), `RenderVariables.cc`
   (injekce speciálních proměnných), `Builtins.cc:120-140` (defaulty `$vp*`).
 
+## Fáze 16 — CLI kamery per-view + CLI výkres
+- [x] **16A CLI kamery per-view/all** HOTOVO. `export_cameras` v `openscad.cc`
+      přepsán na smyčku přes pohledy; sdílený `resolveViewSpecs` (dedup s
+      `cmdline`). `--export-cameras` teď respektuje `--model-view`/`--all-model-views`
+      (kamery uvnitř `view()` bloků; tag pohledu ve jméně u dávky). Ověřeno +36 testů.
+- [x] **16B CLI výkres (SVG/PDF/PNG/DXF)** HOTOVO. Zvolena nízkoriziková cesta:
+      CLI recykluje celý GUI pipeline přes **headless MainWindow** (offscreen
+      QApplication), takže `refreshDrawingViews` zůstal netknutý (16B-2 nebyla třeba).
+      - 16B-1: `DrawingViewDock.cc` — `renderToFile`→file-scope `renderSheetToFile`
+        (+PNG), public `exportDrawingSheet(...)` a `exportToPath(path)`; `exportDrawing`
+        = tenký wrapper. `.h` public metody.
+      - 16B-3: `MainWindow::exportDrawingHeadless(modelViews, all, prefix, ext)`
+        (synchronní `actionRenderPreview` per pohled → `dock->exportToPath`).
+        `gui()` + `CliDrawingExport` (openscad_gui.{h,cc}) → `QTimer::singleShot`.
+        `openscad.cc`: `--export-drawing`/`--drawing-format` routuje do `gui()`
+        (guard `#ifndef OPENSCAD_NOGUI`).
+      - Ověřeno pod xvfb: `--model-view a` → out_a.svg (25 polyline+text); PNG 325×280;
+        `--all-model-views` → oba pohledy. Plná ctest zelená (9 flaky image, sériově OK).
+
 ## Log
 - 2026-07-27: 15A/B/C/F HOTOVÉ a otestované (jádro jazyka + GUI přepínač +
   headless). Plná `ctest -j6` zelená (3 image faily = známá llvmpipe flakyness,
