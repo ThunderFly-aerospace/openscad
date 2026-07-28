@@ -1061,6 +1061,11 @@ int openscad_main(int argc, char **argv)
       "=view path (e.g. assembly or assembly/exploded) selecting which view()s are active; "
       "repeat to export several views, one file each (Fáze 15)")
     ("all-model-views", "export every view() in the source, one file each (Fáze 15)")
+    ("export-drawing", po::value<std::string>(),
+      "=prefix : export the technical drawing (ortho views + dimensions) of the selected model "
+      "view(s) to <prefix>[_view].<fmt>. Honours --model-view / --all-model-views. Needs Qt "
+      "(run under xvfb or -platform offscreen). (Fáze 16B)")
+    ("drawing-format", po::value<std::string>(), "=svg|pdf|png|dxf output format for --export-drawing (default svg)")
     ("projection", po::value<std::string>(), "=(o)rtho or (p)erspective when exporting png")
     ("csglimit", po::value<unsigned int>(), "=n -stop rendering at n CSG elements when exporting png")
     ("summary", po::value<std::vector<std::string>>(),
@@ -1314,6 +1319,35 @@ int openscad_main(int argc, char **argv)
       rc = 1;
     }
     return rc;
+  }
+
+  // --export-drawing: technical drawing (ortho views + dimensions) of the selected
+  // model view(s) to SVG/PDF/PNG/DXF. It reuses the interactive Drawing pipeline,
+  // which needs Qt (QPainter), so it runs the GUI headlessly under an offscreen
+  // window rather than in the plain cmd-line path.
+  if (vm.count("export-drawing")) {
+    if (inputFiles.size() != 1) {
+      LOG("--export-drawing requires exactly one input file.");
+      return 1;
+    }
+#ifdef OPENSCAD_NOGUI
+    LOG("--export-drawing needs the Qt GUI build; this binary was built headless (no Qt).");
+    return 1;
+#else
+    CliDrawingExport req;
+    req.prefix = vm["export-drawing"].as<std::string>();
+    req.allModelViews = vm.count("all-model-views") > 0;
+    if (vm.count("model-view")) req.modelViews = vm["model-view"].as<std::vector<std::string>>();
+    std::string fmt = vm.count("drawing-format") ? vm["drawing-format"].as<std::string>() : "svg";
+    boost::algorithm::to_lower(fmt);
+    if (fmt != "svg" && fmt != "pdf" && fmt != "png" && fmt != "dxf") {
+      LOG("--drawing-format must be svg, pdf, png or dxf (got '%1$s').", fmt);
+      return 1;
+    }
+    req.ext = "." + fmt;
+    std::vector<std::string> guiInputs = inputFiles;
+    return gui(guiInputs, original_path, argc, argv, "none", false, &req);
+#endif
   }
 
   if (animate.frames) {

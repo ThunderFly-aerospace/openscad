@@ -201,7 +201,8 @@ void registerDefaultIcon(const QString&)
 #endif
 
 int gui(std::vector<std::string>& inputFiles, const std::filesystem::path& original_path, int argc,
-        char **argv, const std::string& gui_test, const bool reset_window_settings)
+        char **argv, const std::string& gui_test, const bool reset_window_settings,
+        const CliDrawingExport *drawingExport)
 {
   configureOpenGLContext();
   OpenSCADApp app(argc, argv);
@@ -325,7 +326,7 @@ int gui(std::vector<std::string>& inputFiles, const std::filesystem::path& origi
   for (const auto& infile : inputFiles) {
     inputFilesList.append(assemblePath(original_path, infile));
   }
-  new MainWindow(inputFilesList);
+  auto *mainwin = new MainWindow(inputFilesList);
   QObject::connect(&app, &QCoreApplication::aboutToQuit, []() {
     QSettingsCached{}.release();
 #ifdef Q_OS_MACOS
@@ -383,6 +384,19 @@ int gui(std::vector<std::string>& inputFiles, const std::filesystem::path& origi
     });
   }
 #endif  // ENABLE_GUI_TESTS
+
+  // Fáze 16B: headless CLI drawing export — drive the export after the window is
+  // up, then quit. The MainWindow is constructed (and shown) but never interacted
+  // with; under the offscreen QPA platform this needs no display.
+  if (drawingExport) {
+    QTimer::singleShot(0, [&app, mainwin, drawingExport]() {
+      const bool ok = mainwin->exportDrawingHeadless(
+        drawingExport->modelViews, drawingExport->allModelViews,
+        QString::fromStdString(drawingExport->prefix),
+        QString::fromStdString(drawingExport->ext));
+      app.exit(ok ? 0 : 1);
+    });
+  }
 
   InputDriverManager::instance()->init();
   return app.exec();

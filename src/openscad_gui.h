@@ -30,6 +30,16 @@
 #include <string>
 #include <vector>
 
+// Fáze 16B: a request to export the technical drawing headlessly from the CLI.
+// When present, gui() builds a (hidden) MainWindow, drives a synchronous compile
+// per view, exports the Drawing sheet, and exits — no interactive window.
+struct CliDrawingExport {
+  std::vector<std::string> modelViews;  // --model-view values (slash-nested); empty = root
+  bool allModelViews{false};            // --all-model-views: every view() in the model
+  std::string prefix;                   // output path stem
+  std::string ext;                      // ".svg" | ".pdf" | ".png" | ".dxf"
+};
+
 int gui(std::vector<std::string>& inputFiles, const std::filesystem::path& original_path, int argc,
-        char **argv, const std::string&, const bool);
+        char **argv, const std::string&, const bool, const CliDrawingExport *drawingExport = nullptr);
 void setGlobalTheme();

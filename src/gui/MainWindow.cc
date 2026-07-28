@@ -139,6 +139,7 @@
 #include "core/ViewNode.h"
 #include "core/SourceFile.h"
 #include "gui/ViewScope.h"
+#include <boost/algorithm/string/join.hpp>
 #include "core/DimrefNode.h"
 #include "core/LabelNode.h"
 #include "core/SectionNode.h"
@@ -3912,6 +3913,64 @@ void MainWindow::onViewSwitcherChanged(int index)
   // Re-evaluate with the new $view: preview, cameras and drawing all rebuild from
   // the re-instantiated tree.
   actionRenderPreview();
+}
+
+bool MainWindow::exportDrawingHeadless(const std::vector<std::string>& modelViews,
+                                       bool allModelViews, const QString& prefix, const QString& ext)
+{
+  if (!this->drawingDock || !this->activeEditor) {
+    LOG(message_group::Error, "Drawing export: no document loaded.");
+    return false;
+  }
+  // The dock only rebuilds the sheet data while it is visible (the projection needs
+  // the F6 mesh); the MainWindow is shown by gui(), so this makes the dock live.
+  this->drawingDock->show();
+
+  // Compile once at the root so rootFile is parsed (needed to enumerate views for
+  // --all-model-views). Synchronous: compile() -> compileDone() -> csgRender().
+  this->activeViewPath.clear();
+  actionRenderPreview();
+
+  // Resolve the view specs (path + filename tag) to export.
+  std::vector<std::pair<std::vector<std::string>, std::string>> specs;
+  if (allModelViews) {
+    if (this->rootFile) {
+      for (const auto& info : collectViews(this->rootFile.get())) {
+        specs.emplace_back(info.fullPath, boost::algorithm::join(info.fullPath, "_"));
+      }
+    }
+    if (specs.empty()) specs.emplace_back(std::vector<std::string>{}, std::string());
+  } else if (!modelViews.empty()) {
+    for (const auto& v : modelViews) {
+      std::vector<std::string> path;
+      for (const QString& s : QString::fromStdString(v).split('/', Qt::SkipEmptyParts))
+        path.push_back(s.toStdString());
+      specs.emplace_back(path, boost::algorithm::join(path, "_"));
+    }
+  } else {
+    specs.emplace_back(std::vector<std::string>{}, std::string());
+  }
+
+  bool ok = true;
+  for (const auto& [viewPath, tag] : specs) {
+    this->activeViewPath = viewPath;
+    actionRenderPreview();  // synchronous rebuild of the dock's sheet for this view
+
+    QString path = prefix;
+    if (!tag.empty()) path += "_" + QString::fromStdString(tag);
+    path += ext;
+    if (this->drawingDock->exportToPath(path)) {
+      LOG("Exported drawing (view '%1$s') to %2$s", tag.empty() ? std::string("(root)") : tag,
+          path.toStdString());
+    } else {
+      LOG(message_group::Warning,
+          "Drawing export: nothing to draw for view '%1$s' "
+          "(needs at least one selected view with geometry).",
+          tag.empty() ? std::string("(root)") : tag);
+      ok = false;
+    }
+  }
+  return ok;
 }
 
 std::vector<ViewScope::Block> MainWindow::resolveViewBlocks(const QString& source) const

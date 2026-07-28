@@ -20,6 +20,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QWheelEvent>
+#include <QImage>
 #include <QPainter>
 #include <QPen>
 #include <QPixmap>
@@ -1580,33 +1581,23 @@ void DrawingViewDock::saveSheet()
   shot.save(filename, "PNG");
 }
 
-void DrawingViewDock::exportDrawing()
+namespace {
+
+// One placed tile on the sheet: its view data, drawing-mm origin, slug, and this
+// tile's own drawing-mm-per-model-mm scale.
+struct Placement { const OrthoViewData *v; double ox, oy; QString slug; double drawScale; };
+
+// Build the placed views' primitives (drawing-mm, y-down) and render to `path`.
+// Format is chosen from the extension (.dxf / .pdf / .png / .svg); every format
+// consumes the same primitives, so all of them are truly WYSIWYG. File-scope (no
+// dock state) so the GUI and the CLI share one export path.
+static void renderSheetToFile(const QVector<Placement>& places, double sheetWmm,
+                              double sheetHmm, const QString& path)
 {
-  bool any = false;
-  for (int i = 0; i < this->views.size(); ++i)
-    if (isViewSelected(i) && this->views.at(i).valid()) any = true;
-  for (const auto& s : this->sectionViews)
-    if (s.valid()) any = true;
-  if (!any) return;
-
-  const double scale = exportScale();  // drawing-mm per model-mm
-
-  const QString filename = QFileDialog::getSaveFileName(
-    this, tr("Export drawing"), "drawing.svg",
-    tr("SVG (*.svg);;PDF (*.pdf);;DXF (*.dxf)"));
-  if (filename.isEmpty()) return;
-
   const double dpi = 96.0;
   const double mmToPx = dpi / 25.4;
-  const double marginMm = 10.0, gapMm = sheetGap(), titleMm = 7.0;
   const double fontMm = 3.0, edgeMm = 0.3, dimMm = 0.25, witMm = 0.15, arrowMm = 2.5;
-
-  struct Placement { const OrthoViewData *v; double ox, oy; QString slug; double drawScale; };
-  // Build the placed views' primitives (drawing-mm, y-down) and render to `path`.
-  // Both the QPainter (SVG/PDF) and the DXF writer consume the same primitives, so
-  // every format is truly WYSIWYG.
-  auto renderToFile = [&](const QVector<Placement>& places, double sheetWmm, double sheetHmm,
-                          const QString& path) {
+  {
     std::vector<QLineF> edgeSegs, hatchSegs, dimSegs, witSegs;
     std::vector<QPolygonF> arrows;
     std::vector<std::pair<QPolygonF, QColor>> fillPolys;  // coloured face fills (behind edges)
@@ -1830,42 +1821,59 @@ void DrawingViewDock::exportDrawing()
     }
   };
 
+  if (path.endsWith(".png", Qt::CaseInsensitive)) {
+    QImage img(std::max(1, sheetWpx), std::max(1, sheetHpx), QImage::Format_ARGB32);
+    img.fill(Qt::white);
+    QPainter p(&img);
+    paintSheet(p);
+    p.end();
+    img.save(path, "PNG");
+    return;
+  }
   if (path.endsWith(".pdf", Qt::CaseInsensitive)) {
-      QPdfWriter pdf(path);
-      pdf.setResolution(static_cast<int>(dpi));
-      pdf.setPageSize(QPageSize(QSizeF(sheetWmm, sheetHmm), QPageSize::Millimeter));
-      pdf.setPageMargins(QMarginsF(0, 0, 0, 0));
-      QPainter p(&pdf);
-      paintSheet(p);
-    } else {
-      QSvgGenerator svg;
-      svg.setFileName(path);
-      svg.setResolution(static_cast<int>(dpi));
-      svg.setSize(QSize(sheetWpx, sheetHpx));
-      svg.setViewBox(QRect(0, 0, sheetWpx, sheetHpx));
-      QPainter p(&svg);
-      paintSheet(p);
-    }
-  };  // renderToFile
+    QPdfWriter pdf(path);
+    pdf.setResolution(static_cast<int>(dpi));
+    pdf.setPageSize(QPageSize(QSizeF(sheetWmm, sheetHmm), QPageSize::Millimeter));
+    pdf.setPageMargins(QMarginsF(0, 0, 0, 0));
+    QPainter p(&pdf);
+    paintSheet(p);
+  } else {
+    QSvgGenerator svg;
+    svg.setFileName(path);
+    svg.setResolution(static_cast<int>(dpi));
+    svg.setSize(QSize(sheetWpx, sheetHpx));
+    svg.setViewBox(QRect(0, 0, sheetWpx, sheetHpx));
+    QPainter p(&svg);
+    paintSheet(p);
+  }
+  }  // scoped body block
+}  // renderSheetToFile
 
-  // Tiles to export: the selected standard views at their first-angle cells plus
-  // the valid section and detail tiles — the very same layout the canvas uses.
+}  // namespace
+
+bool DrawingViewDock::exportDrawingSheet(const QList<OrthoViewData>& views,
+                                         const QList<OrthoViewData>& sectionViews,
+                                         const QList<OrthoViewData>& detailViews,
+                                         const std::vector<bool>& selectedViews, double scale,
+                                         double gapMm, bool separateFiles, const QString& path)
+{
+  const double marginMm = 10.0, titleMm = 7.0;
   std::vector<bool> sel(kViewCount, false);
-  for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
-  const QVector<SheetTile> tiles =
-    collectSheetTiles(this->views, this->sectionViews, this->detailViews, sel, scale);
-  if (tiles.isEmpty()) return;
+  for (int i = 0; i < kViewCount && i < static_cast<int>(selectedViews.size()); ++i)
+    sel[i] = selectedViews[i];
+  const QVector<SheetTile> tiles = collectSheetTiles(views, sectionViews, detailViews, sel, scale);
+  if (tiles.isEmpty()) return false;
 
-  if (this->separateFilesCheck->isChecked()) {
+  if (separateFiles) {
     // One file per tile (name_slug.ext), each a single-view sheet.
     for (const auto& t : tiles) {
       const double w = t.v->sizeMm.width() * t.drawScale, h = t.v->sizeMm.height() * t.drawScale;
-      QString path = filename;
-      const int dot = path.lastIndexOf('.');
+      QString p = path;
+      const int dot = p.lastIndexOf('.');
       const QString slug = "_" + t.slug;
-      if (dot >= 0) path.insert(dot, slug); else path += slug;
-      renderToFile({{t.v, marginMm, marginMm + titleMm, t.slug, t.drawScale}}, w + 2 * marginMm,
-                   h + titleMm + 2 * marginMm, path);
+      if (dot >= 0) p.insert(dot, slug); else p += slug;
+      renderSheetToFile({{t.v, marginMm, marginMm + titleMm, t.slug, t.drawScale}},
+                        w + 2 * marginMm, h + titleMm + 2 * marginMm, p);
     }
   } else {
     // Composed first-angle sheet, laid out by the shared engine.
@@ -1874,6 +1882,31 @@ void DrawingViewDock::exportDrawing()
     for (int i = 0; i < tiles.size(); ++i)
       places.push_back({tiles.at(i).v, lay.origins.at(i).x(), lay.origins.at(i).y(),
                         tiles.at(i).slug, tiles.at(i).drawScale});
-    renderToFile(places, lay.wMm, lay.hMm, filename);
+    renderSheetToFile(places, lay.wMm, lay.hMm, path);
   }
+  return true;
+}
+
+bool DrawingViewDock::exportToPath(const QString& path)
+{
+  bool any = false;
+  for (int i = 0; i < this->views.size(); ++i)
+    if (isViewSelected(i) && this->views.at(i).valid()) any = true;
+  for (const auto& s : this->sectionViews)
+    if (s.valid()) any = true;
+  if (!any || path.isEmpty()) return false;
+
+  std::vector<bool> sel(kViewCount, false);
+  for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
+  return exportDrawingSheet(this->views, this->sectionViews, this->detailViews, sel, exportScale(),
+                            sheetGap(), this->separateFilesCheck->isChecked(), path);
+}
+
+void DrawingViewDock::exportDrawing()
+{
+  const QString filename = QFileDialog::getSaveFileName(
+    this, tr("Export drawing"), "drawing.svg",
+    tr("SVG (*.svg);;PDF (*.pdf);;PNG (*.png);;DXF (*.dxf)"));
+  if (filename.isEmpty()) return;
+  exportToPath(filename);
 }

@@ -376,7 +376,22 @@ public:
   DrawingViewDock(QWidget *parent = nullptr);
   ~DrawingViewDock() override;
 
+  // Render a drawing sheet to a file (format from extension: .svg / .pdf / .png /
+  // .dxf). Standalone (no dock state) so the GUI export and the CLI export share
+  // one WYSIWYG path. `selectedViews` are the six standard views to include;
+  // `separateFiles` writes one file per tile (name_slug.ext). Returns false if
+  // there is nothing to draw. (Fáze 16B)
+  static bool exportDrawingSheet(const QList<OrthoViewData>& views,
+                                 const QList<OrthoViewData>& sectionViews,
+                                 const QList<OrthoViewData>& detailViews,
+                                 const std::vector<bool>& selectedViews, double scale,
+                                 double gapMm, bool separateFiles, const QString& path);
+
   void setViews(const QList<OrthoViewData>& views, const QStringList& titles);
+  // Export the dock's current drawing (its views/sections/details + sheet settings)
+  // to `path` (format from extension), with no file dialog — for the CLI export
+  // (Fáze 16B). Returns false if there is nothing to draw.
+  bool exportToPath(const QString& path);
   // Forwarded to the sheet: bump when the mesh changed so the per-tile geometry
   // pixmap cache survives a dimension edit but drops on a real geometry change.
   void setGeometryVersion(int version);

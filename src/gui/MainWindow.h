@@ -178,6 +178,17 @@ private:
   void setupViewSwitcher();
   void refreshViewSwitcher();
   void onViewSwitcherChanged(int index);
+
+public:
+  // Headless CLI drawing export (Fáze 16B): resolve the selected views (from
+  // --model-view / --all-model-views), and for each set it active, run a
+  // (synchronous) preview compile so the Drawing dock rebuilds, and write the
+  // sheet to `prefix`[_view]`ext`. Reuses the exact GUI pipeline. Returns true if
+  // every requested view produced a file.
+  bool exportDrawingHeadless(const std::vector<std::string>& modelViews, bool allModelViews,
+                             const QString& prefix, const QString& ext);
+
+private:
   // Resolve the view() blocks of the current source (main file) to line ranges,
   // for scoping annotations to the active view (Fáze 15D/E).
   std::vector<ViewScope::Block> resolveViewBlocks(const QString& source) const;
