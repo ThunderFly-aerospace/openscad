@@ -552,8 +552,42 @@ int do_export(const CommandLine& cmd, const RenderVariables& render_variables, F
 // render_camera_preview engine — the same one the GUI "Cameras" dock uses — so
 // the snapshots keep color() colors. Kept as a separate path from the normal
 // export machinery so it cannot alter any existing output.
+// Fáze 15/16: one model view to process — an active view path plus a filename
+// tag. The default single spec (empty path, no tag) is the root and reproduces
+// the previous behaviour.
+struct ViewSpec {
+  std::vector<std::string> path;
+  std::string tag;
+};
+
+// Resolve which model views a command should process from --model-view /
+// --all-model-views. Always returns at least one spec (root when nothing asked).
+static std::vector<ViewSpec> resolveViewSpecs(SourceFile *root_file,
+                                              const std::vector<std::string>& modelViews,
+                                              bool allModelViews)
+{
+  std::vector<ViewSpec> specs;
+  if (allModelViews) {
+    for (const auto& info : collectViews(root_file)) {
+      specs.push_back({info.fullPath, boost::algorithm::join(info.fullPath, "_")});
+    }
+    if (specs.empty()) specs.push_back({{}, ""});
+  } else if (!modelViews.empty()) {
+    for (const auto& v : modelViews) {
+      std::vector<std::string> path;
+      boost::split(path, v, boost::is_any_of("/"));
+      path.erase(std::remove(path.begin(), path.end(), std::string()), path.end());
+      specs.push_back({path, boost::algorithm::join(path, "_")});
+    }
+  } else {
+    specs.push_back({{}, ""});
+  }
+  return specs;
+}
+
 int export_cameras(const std::string& rawInput, const ViewOptions& viewOptions,
-                   const std::string& prefix, const fs::path& original_path)
+                   const std::string& prefix, const fs::path& original_path,
+                   const std::vector<std::string>& modelViews, bool allModelViews)
 {
   const bool is_stdin = rawInput == "-";
   const std::string displayName = is_stdin ? "<stdin>" : rawInput;
@@ -586,51 +620,59 @@ int export_cameras(const std::string& rawInput, const ViewOptions& viewOptions,
 
   auto fpath = is_stdin ? fs::current_path() : fs::absolute(fs::path(rawInput));
   auto fparent = fpath.parent_path();
-  fs::current_path(fparent);
-
-  EvaluationSession session{fparent.string()};
-  ContextHandle<BuiltinContext> builtin_context{Context::create<BuiltinContext>(&session)};
-  RenderVariables render_variables{.preview = true, .time = 0.0, .camera = Camera()};
-  render_variables.applyToContext(builtin_context);
-
-  AbstractNode::resetIndexCounter();
-  std::shared_ptr<const FileContext> file_context;
-  std::shared_ptr<AbstractNode> absolute_root_node =
-    root_file->instantiate(*builtin_context, &file_context);
-
-  // restore CWD after module instantiation finished
-  fs::current_path(original_path);
-
-  std::shared_ptr<const AbstractNode> root_node;
-  const Location *nextLocation = nullptr;
-  if (!(root_node = find_root_tag(absolute_root_node, &nextLocation))) {
-    root_node = absolute_root_node;
-  }
-  Tree tree(root_node, fparent.string());
-
-  const auto cameras = collectCameras(root_node);
-  if (cameras.empty()) {
-    LOG("No camera() markers found in '%1$s'.", displayName);
-    return 0;
-  }
 
   set_render_color_scheme(arg_colorscheme, true);
 
+  // Render the cameras of each selected model view. Cameras that live inside a
+  // view() block only exist when that view is active, so this re-instantiates the
+  // tree per view (Fáze 16).
+  const auto specs = resolveViewSpecs(root_file, modelViews, allModelViews);
+  const bool tagViews = specs.size() > 1 || allModelViews;
+
   int failures = 0;
-  int index = 0;
-  for (const auto& info : cameras) {
-    const std::string name = (info.node && !info.node->camera_name.empty())
-                               ? info.node->camera_name
-                               : std::to_string(index);
-    const std::string outfile = prefix + "_" + name + ".png";
-    auto glview = render_camera_preview(tree, viewOptions, info);
-    if (!glview || !glview->save(outfile.c_str())) {
-      LOG("Failed to render camera '%1$s'.", name);
-      ++failures;
-    } else {
-      LOG("Exported camera '%1$s' to %2$s", name, outfile);
+  int camerasSeen = 0;
+  for (const auto& spec : specs) {
+    fs::current_path(fparent);
+    EvaluationSession session{fparent.string()};
+    ContextHandle<BuiltinContext> builtin_context{Context::create<BuiltinContext>(&session)};
+    RenderVariables render_variables{.preview = true, .time = 0.0, .camera = Camera()};
+    render_variables.viewPath = spec.path;
+    render_variables.applyToContext(builtin_context);
+
+    AbstractNode::resetIndexCounter();
+    std::shared_ptr<const FileContext> file_context;
+    std::shared_ptr<AbstractNode> absolute_root_node =
+      root_file->instantiate(*builtin_context, &file_context);
+    fs::current_path(original_path);  // restore CWD after module instantiation
+
+    std::shared_ptr<const AbstractNode> root_node;
+    const Location *nextLocation = nullptr;
+    if (!(root_node = find_root_tag(absolute_root_node, &nextLocation))) {
+      root_node = absolute_root_node;
     }
-    ++index;
+    Tree tree(root_node, fparent.string());
+
+    const auto cameras = collectCameras(root_node);
+    camerasSeen += static_cast<int>(cameras.size());
+    const std::string vtag = (tagViews && !spec.tag.empty()) ? ("_" + spec.tag) : "";
+    int index = 0;
+    for (const auto& info : cameras) {
+      const std::string name = (info.node && !info.node->camera_name.empty())
+                                 ? info.node->camera_name
+                                 : std::to_string(index);
+      const std::string outfile = prefix + vtag + "_" + name + ".png";
+      auto glview = render_camera_preview(tree, viewOptions, info);
+      if (!glview || !glview->save(outfile.c_str())) {
+        LOG("Failed to render camera '%1$s'.", name);
+        ++failures;
+      } else {
+        LOG("Exported camera '%1$s' to %2$s", name, outfile);
+      }
+      ++index;
+    }
+  }
+  if (camerasSeen == 0) {
+    LOG("No camera() markers found in '%1$s'.", displayName);
   }
   return failures ? 1 : 0;
 }
@@ -743,32 +785,8 @@ int cmdline(const CommandLine& cmd)
     .camera = cmd.camera,
   };
 
-  // Fáze 15: resolve which model views to export. Each spec is an active view
-  // path plus a filename tag; the default single spec (empty path, no tag) is the
-  // root and reproduces the previous behaviour exactly.
-  struct ViewSpec {
-    std::vector<std::string> path;
-    std::string tag;
-  };
-  std::vector<ViewSpec> specs;
-  if (cmd.allModelViews) {
-    for (const auto& info : collectViews(root_file)) {
-      specs.push_back({info.fullPath, boost::algorithm::join(info.fullPath, "_")});
-    }
-    if (specs.empty()) {
-      LOG("--all-model-views: no view() found in '%1$s', exporting the root.", cmd.filename);
-      specs.push_back({{}, ""});
-    }
-  } else if (!cmd.modelViews.empty()) {
-    for (const auto& v : cmd.modelViews) {
-      std::vector<std::string> path;
-      boost::split(path, v, boost::is_any_of("/"));
-      path.erase(std::remove(path.begin(), path.end(), std::string()), path.end());
-      specs.push_back({path, boost::algorithm::join(path, "_")});
-    }
-  } else {
-    specs.push_back({{}, ""});
-  }
+  // Fáze 15: resolve which model views to export (shared with --export-cameras).
+  const auto specs = resolveViewSpecs(root_file, cmd.modelViews, cmd.allModelViews);
   const bool multi = specs.size() > 1;
 
   int rc = 0;
@@ -1287,7 +1305,11 @@ int openscad_main(int argc, char **argv)
     parser_init();
     localization_init();
     try {
-      rc = export_cameras(inputFiles[0], viewOptions, prefix, original_path);
+      rc = export_cameras(
+        inputFiles[0], viewOptions, prefix, original_path,
+        vm.count("model-view") ? vm["model-view"].as<std::vector<std::string>>()
+                               : std::vector<std::string>{},
+        vm.count("all-model-views") > 0);
     } catch (const HardWarningException&) {
       rc = 1;
     }
