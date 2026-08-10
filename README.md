@@ -28,6 +28,9 @@ samy do zdrojáku): `// @dim` (kóta), `// @sheet` (nastavení listu), `// @deta
 **Barevný export:** `-o model.obj` zapíše i sesterský `.mtl` (barvy z `color()`),
 takže je přečte Blender; OFF/3MF barvy zachovají taky.
 
+
+<img width="1678" height="1048" alt="openscad_cam_and_drawings" src="https://github.com/user-attachments/assets/1e412a96-f9d1-4be7-9609-59a8a267944f" />
+
 ---
 
 ## Kamery v modelu — `camera()`
