@@ -230,6 +230,31 @@ do pevného bodu z `/ucrt64/bin`.
 
 ### Testy
 
-`ctest` obsahuje obrazové testy (`render-*`, `preview-*`), které potřebují
-funkční OpenGL. Ve virtuálu bez GPU padají a **není to vada buildu** — signál
-bez GL dají `ctest -R '^(dump|astdump|echo|export)'`.
+⚠️ **Před `ctest` je na Windows nutný `install`:**
+```sh
+cmake --install build --prefix build
+ctest --test-dir build -R '^(dump|astdump|echo|export)' -j2
+```
+`tests/CMakeLists.txt:63` hledá binárku jako `${CMAKE_BINARY_DIR}/openscad.com`
+a tam se dostane teprve install pravidlem z `winconsole/CMakeLists.txt`
+(`DESTINATION "."`). Bez install kroku selže **100 % testů** na „nelze nalézt
+openscad.com". Proto `windows.yml` volá `cmake --install . --prefix=.` před
+`ctest`.
+
+Obrazové testy (`render-*`, `preview-*`, `throwntogether-*`, `openscad-cam*`)
+potřebují funkční OpenGL; ve virtuálu bez GPU padají a **není to vada buildu**.
+Signál bez GL dají skupiny `dump` / `astdump` / `echo` / `export` (403 testů).
+
+**Známé pády na Windows (stav 2026-08-10, 400/403):**
+- `export-stl*_bend-export` (3 testy) — zlatý `.stl` byl vygenerován na Linuxu,
+  Windows dává v jednom vrcholu jinou hodnotu o **1 ULP**
+  (`7.03755181085572` vs `7.037551810855721`, relativně 1,3e-16). Rozdíl
+  glibc vs. mingw libm, ne chyba `bend()`. Textový diff je exaktní, takže to
+  nelze „povolit v toleranci" — buď žít se známým pádem, nebo mít zlaté soubory
+  per-platforma.
+- `LineDrawing_test.cc:184` (unit test „section view cuts, projects and
+  hatches") — natvrdo `registerApplicationPath("/home/user/openscad/build")`,
+  cesta na Windows neexistuje → `fs::canonical` vyhodí výjimku.
+- Post-test generátor HTML reportu `tests/test_pretty_print.py:374` spadne na
+  `Unknown test type 'json'` (upstream, `export-param_issue6597`). Ovlivňuje
+  jen report, ne výsledky testů.
