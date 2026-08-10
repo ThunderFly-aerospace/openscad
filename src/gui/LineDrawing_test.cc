@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -181,7 +182,9 @@ std::unique_ptr<PolySet> steppedBox()
 TEST_CASE("section view cuts, projects and hatches", "[linedrawing][section]")
 {
   // The Manifold backend resolves resource paths lazily; give it an app path.
-  PlatformUtils::registerApplicationPath("/home/user/openscad/build");
+  // Any existing directory does — lookupResourcesPath() canonicalises it and
+  // throws when it is missing, so a hardcoded one breaks on every other machine.
+  PlatformUtils::registerApplicationPath(std::filesystem::current_path().generic_string());
   auto ps = steppedBox();
   // Cutting plane at world z=3 (frame origin there, local +Z = world +Z).
   Transform3d frame = Transform3d::Identity();

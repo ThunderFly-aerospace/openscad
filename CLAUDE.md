@@ -245,16 +245,18 @@ Obrazové testy (`render-*`, `preview-*`, `throwntogether-*`, `openscad-cam*`)
 potřebují funkční OpenGL; ve virtuálu bez GPU padají a **není to vada buildu**.
 Signál bez GL dají skupiny `dump` / `astdump` / `echo` / `export` (403 testů).
 
-**Známé pády na Windows (stav 2026-08-10, 400/403):**
+**Známé pády na Windows (stav 2026-08-10, 400/403 + unit testy 28/28):**
 - `export-stl*_bend-export` (3 testy) — zlatý `.stl` byl vygenerován na Linuxu,
   Windows dává v jednom vrcholu jinou hodnotu o **1 ULP**
   (`7.03755181085572` vs `7.037551810855721`, relativně 1,3e-16). Rozdíl
   glibc vs. mingw libm, ne chyba `bend()`. Textový diff je exaktní, takže to
   nelze „povolit v toleranci" — buď žít se známým pádem, nebo mít zlaté soubory
   per-platforma.
-- `LineDrawing_test.cc:184` (unit test „section view cuts, projects and
-  hatches") — natvrdo `registerApplicationPath("/home/user/openscad/build")`,
-  cesta na Windows neexistuje → `fs::canonical` vyhodí výjimku.
 - Post-test generátor HTML reportu `tests/test_pretty_print.py:374` spadne na
   `Unknown test type 'json'` (upstream, `export-param_issue6597`). Ovlivňuje
   jen report, ne výsledky testů.
+
+⚠️ **Unit testy nesmí mít natvrdo zadané cesty.** `registerApplicationPath()`
+volá `lookupResourcesPath()` → `fs::canonical`, který na neexistující cestě
+vyhodí výjimku. Předávat `std::filesystem::current_path()`, ne absolutní cestu
+z vývojářského stroje (viz `LineDrawing_test.cc`).
