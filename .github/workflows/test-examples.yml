@@ -14,14 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     name: Test examples - ${{ matrix.experimental && 'experimental' || 'non-experimental' }}
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         submodules: 'recursive'
     - name: Install dependencies
       run: |
         which sudo || apt install -y sudo
         sudo ./scripts/uni-get-dependencies.sh qt6
-    - uses: actions/setup-python@v6
+    - uses: actions/setup-python@v7
       with:
         python-version: '3.11'
     - name: Build and test
