@@ -179,3 +179,57 @@ soubor → **ručně ověřit** → `ctest -R <test>` musí projít.
   `tests/CMakeLists.txt:1108-1118`.
 - obrazové: `openscad-cam*` nad `camera-tests.scad`,
   `tests/CMakeLists.txt:1120-1150`.
+
+## Build na Windows (MSYS2 UCRT64) + přenositelný .zip
+
+Referencí je `.github/workflows/windows.yml` — prostředí **MSYS2 UCRT64**
+(MinGW-w64 + `ucrtbase.dll`), generátor Ninja, Qt6. Cesta přes MSVC/vcpkg
+(`doc/win-build.md`) staví **jen headless CLI**, GUI tam hotové není → pro tuhle
+větev nepoužitelná.
+
+### Jednorázová příprava
+
+1. MSYS2 z https://www.msys2.org do **`C:\msys64`** (krátká cesta bez mezer).
+2. Ze Start menu **„MSYS2 UCRT64"**, pak `pacman -Syu` opakovaně, dokud nehlásí
+   „nothing to do" (první průchod aktualizuje `msys2-runtime` a zavře okno).
+3. `git submodule update --init --recursive` (manifold, Clipper2, mimalloc,
+   MCAD, sanitizers-cmake — bez nich build neprojde).
+4. `./scripts/msys2-install-dependencies.sh qt6` — skript mimo GitHub Actions
+   sám doinstaluje celou sadu přes `pacboy` (~240 balíčků, ~3 GB).
+   Volitelně `pacboy -S ccache:p` (`USE_CCACHE` je defaultně ON).
+
+### Build
+
+```sh
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DEXPERIMENTAL=ON -DSNAPSHOT=ON -DUSE_QT6=ON
+cmake --build build -j<N>
+```
+Vznikne `build/openscad.exe`, `build/OpenSCADUnitTests.exe` a
+`build/winconsole/openscad.com`.
+
+### Přenositelný .zip pro cizí Windows
+
+```sh
+scripts/win-make-portable.sh          # -> build/deploy/openscad-cam-<verze>-win64.zip
+```
+Skript dělá `cmake --install` (na WIN32 sype vše do `.`, viz `CMakeLists.txt:1693`),
+přidá Qt pluginy přes `windeployqt6` a zbytek DLL sesbírá rekurzivně `objdump`em
+do pevného bodu z `/ucrt64/bin`.
+
+**Dvě věci, které se snadno zapomenou a bez nichž je balík rozbitý:**
+- **`fonts/fonts.conf`.** `FontCache.cc:144` nastaví `FONTCONFIG_PATH` jen když
+  vedle binárky leží `fonts/fonts.conf`. V repu není → fontconfig by sáhl po
+  zakompilované cestě `/ucrt64/etc/fonts`, na cizím PC neexistující, a `text()`
+  by přestal fungovat. Řeší se překlopením `/ucrt64/etc/fonts/` do `fonts/`
+  (stejně jako oficiální mingw balíček, `scripts/release-common.sh:279`).
+- **`openscad.com`.** `openscad.exe` je GUI binárka (`WIN32_EXECUTABLE`,
+  `CMakeLists.txt:373`), odpojí se od konzole a CLI výstup zmizí. V cmd.exe /
+  PowerShellu se musí volat `openscad.com`, jinak `--export-drawing` /
+  `--export-cameras` vypadají, že nic nedělají.
+
+### Testy
+
+`ctest` obsahuje obrazové testy (`render-*`, `preview-*`), které potřebují
+funkční OpenGL. Ve virtuálu bez GPU padají a **není to vada buildu** — signál
+bez GL dají `ctest -R '^(dump|astdump|echo|export)'`.
