@@ -1330,6 +1330,7 @@ set(GUI_SOURCES
   src/gui/ColorLabel.cc
   src/gui/ColorLayout.cc
   src/gui/EditorColorMap.cc
+  src/gui/FlowLayout.cc
   src/gui/MouseSelector.cc
   src/gui/OctoPrint.cc
   src/gui/OpenCSGWarningDialog.cc
@@ -1403,6 +1404,7 @@ set(GUI_HEADERS
     src/gui/ColorList.h
     src/gui/ColorLabel.h
     src/gui/ColorLayout.h
+    src/gui/FlowLayout.h
     src/gui/FontListTableView.h
     src/gui/IgnoreWheelWhenNotFocused.h
     src/gui/ImportUtils.h

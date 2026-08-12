@@ -1,5 +1,7 @@
 #include "gui/DrawingViewDock.h"
 
+#include "gui/FlowLayout.h"
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -11,7 +13,6 @@
 #include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QGroupBox>
-#include <QHBoxLayout>
 #include <QMarginsF>
 #include <QPageSize>
 #include <QPdfWriter>
@@ -1267,9 +1268,11 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   const char *viewNames[kViewCount] = {QT_TR_NOOP("Front"), QT_TR_NOOP("Back"),
                                        QT_TR_NOOP("Left"),  QT_TR_NOOP("Right"),
                                        QT_TR_NOOP("Top"),   QT_TR_NOOP("Bottom")};
+  // FlowLayout, not QHBoxLayout: a horizontal row's minimum width is the sum of
+  // all its controls (~620px here), which set the dock's minimum width. Wrapping
+  // brings that down to the widest single control.
   auto *viewsRow = new QWidget(central);
-  auto *viewsLayout = new QHBoxLayout(viewsRow);
-  viewsLayout->setContentsMargins(0, 0, 0, 0);
+  auto *viewsLayout = new FlowLayout(viewsRow, 0, -1, 2);
   viewsLayout->addWidget(new QLabel(tr("Views:"), viewsRow));
   for (int i = 0; i < kViewCount; ++i) {
     auto *cb = new QCheckBox(tr(viewNames[i]), viewsRow);
@@ -1281,7 +1284,6 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
     viewsLayout->addWidget(cb);
     this->viewChecks.append(cb);
   }
-  viewsLayout->addStretch(1);
 
   // Inter-view spacing (mm) + an "auto" button that clears the dimensions. Both live
   // on the views row; the value is persisted in // @sheet as gap=.
@@ -1309,6 +1311,8 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
 
   this->placeholder = new QLabel(tr("Render (F5) to generate orthographic views."), central);
   this->placeholder->setAlignment(Qt::AlignCenter);
+  // Wraps rather than forcing the dock as wide as the sentence.
+  this->placeholder->setWordWrap(true);
 
   this->showRefsCheck = new QCheckBox(tr("Reference points"), central);
   this->showRefsCheck->setChecked(true);
@@ -1353,20 +1357,19 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   this->saveButton->setEnabled(false);
   this->saveButton->setToolTip(tr("Save the sheet as a PNG image (raster)."));
 
+  // Both control rows wrap too. They stay two separate rows (rather than one big
+  // flow) so the dock's *preferred* width is unchanged — only its minimum drops.
   auto *buttonRow = new QWidget(central);
-  auto *buttonLayout = new QHBoxLayout(buttonRow);
-  buttonLayout->setContentsMargins(0, 0, 0, 0);
+  auto *buttonLayout = new FlowLayout(buttonRow, 0, -1, 2);
   buttonLayout->addWidget(this->materializeButton);
   buttonLayout->addWidget(this->detailButton);
   buttonLayout->addWidget(this->saveButton);
 
   auto *checkRow = new QWidget(central);
-  auto *checkLayout = new QHBoxLayout(checkRow);
-  checkLayout->setContentsMargins(0, 0, 0, 0);
+  auto *checkLayout = new FlowLayout(checkRow, 0, -1, 2);
   checkLayout->addWidget(this->showRefsCheck);
   checkLayout->addWidget(this->fillColorsCheck);
   checkLayout->addWidget(this->separateFilesCheck);
-  checkLayout->addStretch(1);
   checkLayout->addWidget(this->scaleSpin);
   checkLayout->addWidget(this->exportButton);
 
