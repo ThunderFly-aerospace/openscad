@@ -122,11 +122,40 @@ Nad rámec standardního OpenSCADu (`-o out.stl`, `--camera`, `-D`, …):
 | `--export-cameras <prefix>` | dávkový render **všech `camera()`** → `<prefix>_<jméno>.png`. Respektuje výběr pohledů: `--model-view A` renderuje i kamery uvnitř `view("A")`; `--all-model-views` projede všechny pohledy (tag pohledu ve jméně) |
 | `--model-view <cesta>` | zvolí aktivní pohled; vnořený jako cesta `assembly/exploded`. **Opakovatelný** = dávka vybraných pohledů (soubor na pohled). Jediný `--model-view` nechává `-o` beze změny |
 | `--all-model-views` | vyexportuje **každý `view()`** v modelu, jeden soubor na pohled |
+| `--default-model-views` | vyexportuje jen pohledy, které si o daný export **řekly v modelu**: `camera_export=true` pro `--export-cameras`, `drawings_export=true` pro `--export-drawing`, `model_export=true` pro `-o`. Vždy tag pohledu ve jméně. Když není označen žádný pohled → varování a nic (ne chyba, aby CI matice nespadla) |
+| `--list-model-views[=text\|json]` | vypíše pohledy modelu a jejich vlajky a skončí (jen parsuje) — pro **matrix job v CI** |
 | `--export-drawing <prefix>` | **technický výkres** (ortho pohledy + kóty + řezy) zvolených pohledů → `<prefix>[_pohled].<fmt>`. `--drawing-format svg\|pdf\|png\|dxf` (default svg). Respektuje `--model-view`/`--all-model-views`. Potřebuje Qt + offscreen (běž pod `xvfb-run`) |
 | `-o model.obj` | OBJ **+ sesterský `.mtl`** s barvami z `color()` (pro Blender) |
 
 Tag pohledu se u dávky vkládá do jména výstupu: `out.stl` → `out_pcb.stl`,
-`out_assembly_exploded.stl`.
+`out_assembly_exploded.stl`. Totéž platí pro `--summary-file` (každý pohled má
+vlastní JSON) a `-d deps.d` uvádí skutečně zapsaná jména souborů.
+
+Přednost při výběru pohledů: `--all-model-views` > `--model-view` >
+`--default-model-views` (kombinace = varování, že se `--default-model-views`
+ignoruje).
+
+### Které pohledy exportovat (vlajky v modelu)
+
+Každý `view()` si může říct, do kterých dávkových exportů patří — tři nezávislé
+volitelné parametry, všechny default `false`:
+
+```scad
+view(name = "assembly", camera_export = true)                      { … }  // jen snímky kamer
+view(name = "celek",    drawings_export = true)                    { … }  // jen výkres
+view(name = "pcb",      drawings_export = true, model_export = true) { … } // výkres + STL
+view(name = "debug")                                               { … }  // nic
+```
+
+Vlajky se čtou z AST, takže musí být **literál** `true`/`false` — hodnota
+spočítaná z proměnné se pro výběr pohledů čte jako `false`.
+
+Jméno pohledu je **label, ne identita**: aktivní jsou *všechny* bloky s tím
+jménem naráz (modul volaný 2×, každá iterace `for`, dva bloky stejného jména).
+Enumerace pohledů to respektuje — projde i těla volaných uživatelských modulů
+(včetně modulů z `use <lib.scad>`) a obě větve `if`/`else`, a každou **cestu
+pohledu vypíše/vyexportuje jen jednou**. Modul volaný uvnitř `view("outer")` dá
+zanořenou cestu `outer/<jeho pohled>`.
 
 > **Pozor:** `--view` zůstává původní přepínač zobrazení viewportu (axes/edges/…);
 > výběr pohledů modelu je proto `--model-view`.
@@ -148,7 +177,20 @@ openscad model.scad -o model.obj
 # technický výkres (kóty!) do SVG/PNG — pod xvfb (potřebuje Qt + offscreen)
 xvfb-run -a openscad model.scad --export-drawing out --model-view pcb           # out_pcb.svg
 xvfb-run -a openscad model.scad --export-drawing out --all-model-views --drawing-format pdf
+
+# CI: jen to, co si model označil (viz vlajky výše)
+openscad model.scad -o out.stl                --default-model-views  # model_export
+xvfb-run -a openscad model.scad --export-cameras cam --default-model-views     # camera_export
+xvfb-run -a openscad model.scad --export-drawing dwg --default-model-views     # drawings_export
+
+# výčet pohledů pro matrix job
+openscad model.scad --list-model-views          # pcb<TAB>drawings_export,model_export
+openscad model.scad --list-model-views=json | jq -r '.[]|select(.camera_export)|.path'
 ```
+
+Hotová šablona workflow: [`doc/ci/render-views.yml`](doc/ci/render-views.yml)
+(schválně **není** v `.github/workflows/`, aby se nespouštěla v tomto repu —
+zkopíruj si ji do svého projektu s modelem).
 
 ### Headless build (pro CI / GitHub Actions)
 

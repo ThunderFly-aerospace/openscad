@@ -1,0 +1,7 @@
+cube(size = [10, 10, 10], center = false);
+view(name = "pcb", drawings_export = true, model_export = true);
+view(name = "case", camera_export = true, drawings_export = true);
+view(name = "plain");
+view(name = "explicit");
+view(name = "computed", camera_export = true);
+

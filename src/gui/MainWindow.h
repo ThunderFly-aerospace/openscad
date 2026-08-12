@@ -184,8 +184,10 @@ public:
   // (synchronous) preview compile so the Drawing dock rebuilds, and write the
   // sheet to `prefix`[_view]`ext`. Reuses the exact GUI pipeline. Returns true if
   // every requested view produced a file.
+  // With defaultModelViews, the set is the view()s marked drawings_export = true
+  // (Fáze 17); when none is marked, nothing is exported (a warning, not a failure).
   bool exportDrawingHeadless(const std::vector<std::string>& modelViews, bool allModelViews,
-                             const QString& prefix, const QString& ext);
+                             bool defaultModelViews, const QString& prefix, const QString& ext);
 
 private:
   // Resolve the view() blocks of the current source (main file) to line ranges,

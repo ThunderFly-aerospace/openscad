@@ -36,6 +36,7 @@
 struct CliDrawingExport {
   std::vector<std::string> modelViews;  // --model-view values (slash-nested); empty = root
   bool allModelViews{false};            // --all-model-views: every view() in the model
+  bool defaultModelViews{false};        // --default-model-views: views with drawings_export = true
   std::string prefix;                   // output path stem
   std::string ext;                      // ".svg" | ".pdf" | ".png" | ".dxf"
 };

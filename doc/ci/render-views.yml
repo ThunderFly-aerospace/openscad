@@ -1,0 +1,127 @@
+# Šablona GitHub Actions workflow: vyrenderuje z modelu jen to, co si model sám
+# označil vlajkami na view() (Fáze 17).
+#
+# ⚠ Tento soubor NENÍ v .github/workflows/ schválně — v repu OpenSCADu by se
+# spouštěl zbytečně. Zkopíruj si ho do svého projektu s modelem:
+#
+#     mkdir -p .github/workflows
+#     cp doc/ci/render-views.yml .github/workflows/
+#
+# Model označí, co se má generovat (tři nezávislé vlajky, default false):
+#
+#     view(name = "assembly", camera_export = true)                        { … }
+#     view(name = "celek",    drawings_export = true)                      { … }
+#     view(name = "pcb",      drawings_export = true, model_export = true) { … }
+#     view(name = "debug")                                                 { … }  // nic
+#
+# Pak stačí jeden běh na typ exportu s --default-model-views. Když model pro daný
+# typ nemá žádný označený pohled, vypíše se varování a nic se nevygeneruje (job
+# neselže) — takže tenhle workflow funguje i pro modely, které chtějí jen část.
+
+name: Render views
+
+on:
+  push:
+    paths: ["**.scad"]
+  pull_request:
+    paths: ["**.scad"]
+  workflow_dispatch:
+
+env:
+  MODEL: model.scad # cesta k hlavnímu .scad ve tvém repu
+  # AppImage tohoto forku. --export-cameras a -o zvládne i _headless varianta;
+  # --export-drawing potřebuje Qt, tedy PLNOU (GUI) variantu.
+  OPENSCAD_URL: https://github.com/<uzivatel>/<fork>/releases/download/<tag>/OpenSCAD-<verze>-x86_64.AppImage
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenSCAD (fork) + xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libfuse2 jq
+          curl -fsSL -o openscad.AppImage "$OPENSCAD_URL"
+          chmod +x openscad.AppImage
+          # --appimage-extract-and-run funguje i bez FUSE v kontejneru
+          echo "OPENSCAD=$PWD/openscad.AppImage --appimage-extract-and-run" >> "$GITHUB_ENV"
+
+      - name: Which views does the model declare?
+        run: |
+          $OPENSCAD "$MODEL" --list-model-views
+
+      - name: Models (model_export = true)
+        run: |
+          mkdir -p out
+          $OPENSCAD "$MODEL" -o out/part.stl --default-model-views
+
+      - name: Camera snapshots (camera_export = true)
+        run: |
+          mkdir -p out
+          # render kamer potřebuje GL kontext → xvfb
+          xvfb-run -a $OPENSCAD "$MODEL" --export-cameras out/cam --default-model-views
+
+      - name: Technical drawings (drawings_export = true)
+        run: |
+          mkdir -p out
+          # výkres potřebuje Qt (plná AppImage) + offscreen
+          xvfb-run -a $OPENSCAD "$MODEL" --export-drawing out/dwg --default-model-views \
+            --drawing-format pdf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: model-outputs
+          path: out/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Varianta: jeden job na pohled (matrix). Užitečné, když jsou pohledy drahé a
+  # chceš je renderovat paralelně, nebo chceš per-pohled artefakt.
+  # ---------------------------------------------------------------------------
+  matrix-cameras:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenSCAD (fork)
+        run: |
+          sudo apt-get update && sudo apt-get install -y xvfb libfuse2 jq
+          curl -fsSL -o openscad.AppImage "$OPENSCAD_URL"
+          chmod +x openscad.AppImage
+          echo "OPENSCAD=$PWD/openscad.AppImage --appimage-extract-and-run" >> "$GITHUB_ENV"
+      - id: views
+        name: Collect views marked for camera export
+        run: |
+          views=$($OPENSCAD "$MODEL" --list-model-views=json \
+                  | jq -c '[.[] | select(.camera_export) | .path]')
+          echo "list=$views" >> "$GITHUB_OUTPUT"
+          echo "Views: $views"
+    outputs:
+      list: ${{ steps.views.outputs.list }}
+
+  matrix-render:
+    needs: matrix-cameras
+    if: needs.matrix-cameras.outputs.list != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        view: ${{ fromJSON(needs.matrix-cameras.outputs.list) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenSCAD (fork)
+        run: |
+          sudo apt-get update && sudo apt-get install -y xvfb libfuse2
+          curl -fsSL -o openscad.AppImage "$OPENSCAD_URL"
+          chmod +x openscad.AppImage
+          echo "OPENSCAD=$PWD/openscad.AppImage --appimage-extract-and-run" >> "$GITHUB_ENV"
+      - name: Render cameras of view ${{ matrix.view }}
+        run: |
+          mkdir -p out
+          xvfb-run -a $OPENSCAD "$MODEL" --export-cameras out/cam \
+            --model-view "${{ matrix.view }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cameras-${{ strategy.job-index }}
+          path: out/

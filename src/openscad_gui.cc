@@ -391,7 +391,7 @@ int gui(std::vector<std::string>& inputFiles, const std::filesystem::path& origi
   if (drawingExport) {
     QTimer::singleShot(0, [&app, mainwin, drawingExport]() {
       const bool ok = mainwin->exportDrawingHeadless(
-        drawingExport->modelViews, drawingExport->allModelViews,
+        drawingExport->modelViews, drawingExport->allModelViews, drawingExport->defaultModelViews,
         QString::fromStdString(drawingExport->prefix),
         QString::fromStdString(drawingExport->ext));
       app.exit(ok ? 0 : 1);

@@ -391,7 +391,7 @@ endfunction()
 # EXPERIMENTAL: If set, tag all tests as experimental
 #
 function(add_cmdline_test TESTCMD_BASENAME)
-  cmake_parse_arguments(TESTCMD "OPENSCAD;STDIO;EXPERIMENTAL" "EXE;SCRIPT;SUFFIX;KERNEL;EXPECTEDDIR" "FILES;ARGS" ${ARGN})
+  cmake_parse_arguments(TESTCMD "OPENSCAD;STDIO;STDOUT;EXPERIMENTAL" "EXE;SCRIPT;SUFFIX;KERNEL;EXPECTEDDIR" "FILES;ARGS" ${ARGN})
 
   set(EXTRA_OPTIONS "")
 
@@ -406,6 +406,12 @@ function(add_cmdline_test TESTCMD_BASENAME)
 
   if (TESTCMD_STDIO)
     list(APPEND EXTRA_OPTIONS --stdin --stdout)
+  endif()
+
+  # Compare stdout, but keep the real input file (needed when the .scad resolves
+  # paths of its own, e.g. use <lib.scad>, which stdin input cannot do).
+  if (TESTCMD_STDOUT)
+    list(APPEND EXTRA_OPTIONS --stdout)
   endif()
 
   if ((TESTCMD_EXE OR TESTCMD_SCRIPT) AND TESTCMD_OPENSCAD)

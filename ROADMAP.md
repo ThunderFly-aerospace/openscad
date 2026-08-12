@@ -1630,3 +1630,47 @@ v CI (`xvfb`/`-platform offscreen`).
 **Rizika.** 16B-2 je hlavní objem — odvázání od GUI stavu. Ověřovat, že dok kreslí
 i exportuje **beze změny** (regrese vizuálně + porovnáním exportů před/po). SVG/PDF
 přes QPainter je bez displeje OK; PNG rasterizace taky (QImage), GL netřeba.
+
+## Fáze 17 — per-view vlajky exportu pro CI  ✅ HOTOVO (2026-08-12)
+
+### Zadání / motivace
+GitHub Action nad repem s modelem má vygenerovat **jen vybranou podmnožinu**
+výstupů: u některých pohledů snímky kamer („jak se zařízení skládá“), u jiných
+technický výkres (celek i komponenty), u dalších jen model (komponenty pro tisk).
+Volba patří do modelu, ne do CI skriptu, aby se workflow nemusel měnit s každým
+novým pohledem.
+
+### Řešení
+Tři nezávislé volitelné vlajky na `view()`, všechny default `false`:
+
+```scad
+view(name = "assembly", camera_export = true)                        { … }
+view(name = "celek",    drawings_export = true)                      { … }
+view(name = "pcb",      drawings_export = true, model_export = true) { … }
+view(name = "debug")                                                 { … }  // nic
+```
+
+CLI `--default-model-views` vybere pohledy označené pro **právě běžící** export
+(`--export-cameras`→`camera_export`, `--export-drawing`→`drawings_export`,
+`-o`→`model_export`), vždy s tagem pohledu ve jménech souborů. Nic označeno =
+varování + žádný výstup, ne chyba (CI matice běží nad všemi modely).
+`--list-model-views[=text|json]` vypíše pohledy s vlajkami pro matrix job.
+
+Vlajky se čtou dvěma cestami: při instanciaci (`Parameters`, vidí i spočítanou
+hodnotu, jde do `toString()`) a z AST v `collectViews()` — tam **jen literál**
+`true`/`false`, protože AST-walk nevyhodnocuje výrazy. Výběr pohledů pro export
+používá AST cestu (funguje i pro neaktivní pohledy).
+
+Detaily implementace, ověření a šablona workflow (`doc/ci/render-views.yml`) viz
+`state.md` „Fáze 17“.
+
+### 17B — enumerace pohledů napříč scope  ✅ HOTOVO (2026-08-12)
+
+`view()` je **label, ne identita**: každý blok s daným jménem je aktivní, když je
+jméno na aktivní cestě (modul volaný víckrát, iterace `for`, dva bloky stejného
+jména → union). Instanciace to tak dělala od Fáze 15; doplněna byla **enumerace**
+(`collectViews`), na které stojí `--list/all/default-model-views` i GUI přepínač:
+prochází se i těla volaných uživatelských modulů (včetně `use <>` přes
+`SourceFileCache`, s scope-chainem definice a guardem proti rekurzi) a obě větve
+`if/else`; konzumenti používají `uniqueViewPaths()`, takže jedna cesta = jeden
+výstupní soubor. Detaily v `state.md` „17B".

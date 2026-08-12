@@ -1,0 +1,8 @@
+[
+ {"path":"pcb","name":"pcb","depth":0,"line":23,"camera_export":false,"drawings_export":true,"model_export":true},
+ {"path":"case","name":"case","depth":0,"line":25,"camera_export":true,"drawings_export":true,"model_export":false},
+ {"path":"case/detail","name":"detail","depth":1,"line":27,"camera_export":true,"drawings_export":false,"model_export":false},
+ {"path":"plain","name":"plain","depth":0,"line":30,"camera_export":false,"drawings_export":false,"model_export":false},
+ {"path":"explicit","name":"explicit","depth":0,"line":31,"camera_export":false,"drawings_export":false,"model_export":false},
+ {"path":"computed","name":"computed","depth":0,"line":32,"camera_export":false,"drawings_export":false,"model_export":false}
+]

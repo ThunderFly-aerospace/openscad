@@ -3864,7 +3864,10 @@ void MainWindow::refreshViewSwitcher()
 {
   if (!this->viewSwitcher) return;
 
-  const auto views = this->rootFile ? collectViews(this->rootFile.get()) : std::vector<ViewInfo>{};
+  // One entry per distinct view path: several blocks may share a name (they are all
+  // active together), but the switcher selects a path, so listing it twice is noise.
+  const auto views =
+    this->rootFile ? uniqueViewPaths(collectViews(this->rootFile.get())) : std::vector<ViewInfo>{};
 
   if (views.empty()) {
     // Model has no view(): behave exactly like before (switcher hidden, root).
@@ -3919,7 +3922,8 @@ void MainWindow::onViewSwitcherChanged(int index)
 }
 
 bool MainWindow::exportDrawingHeadless(const std::vector<std::string>& modelViews,
-                                       bool allModelViews, const QString& prefix, const QString& ext)
+                                       bool allModelViews, bool defaultModelViews,
+                                       const QString& prefix, const QString& ext)
 {
   if (!this->drawingDock || !this->activeEditor) {
     LOG(message_group::Error, "Drawing export: no document loaded.");
@@ -3936,13 +3940,34 @@ bool MainWindow::exportDrawingHeadless(const std::vector<std::string>& modelView
 
   // Resolve the view specs (path + filename tag) to export.
   std::vector<std::pair<std::vector<std::string>, std::string>> specs;
+  if (defaultModelViews && (allModelViews || !modelViews.empty())) {
+    LOG(message_group::Warning,
+        "--default-model-views is ignored when --all-model-views or --model-view is given.");
+    defaultModelViews = false;
+  }
   if (allModelViews) {
     if (this->rootFile) {
-      for (const auto& info : collectViews(this->rootFile.get())) {
+      for (const auto& info : uniqueViewPaths(collectViews(this->rootFile.get()))) {
         specs.emplace_back(info.fullPath, boost::algorithm::join(info.fullPath, "_"));
       }
     }
     if (specs.empty()) specs.emplace_back(std::vector<std::string>{}, std::string());
+  } else if (defaultModelViews) {
+    // Fáze 17: only the views the model marks for drawing export. No fallback to the
+    // root — an unmarked model must not silently produce a sheet.
+    if (this->rootFile) {
+      for (const auto& info : uniqueViewPaths(collectViews(this->rootFile.get()))) {
+        if (!viewIsDefaultFor(info, ViewExportKind::Drawings)) continue;
+        specs.emplace_back(info.fullPath, boost::algorithm::join(info.fullPath, "_"));
+      }
+    }
+    if (specs.empty()) {
+      // Nothing marked is not a failure: a CI job may run the camera, drawing and
+      // model exports over every model, and each model marks only what it needs.
+      LOG(message_group::Warning,
+          "No view() in the model is marked drawings_export = true; nothing to export.");
+      return true;
+    }
   } else if (!modelViews.empty()) {
     for (const auto& v : modelViews) {
       std::vector<std::string> path;

@@ -1,0 +1,9 @@
+part	model_export
+loop	camera_export
+dup	model_export
+then	model_export
+else	model_export
+libview	model_export
+recursed	-
+outer	-
+outer/part	model_export

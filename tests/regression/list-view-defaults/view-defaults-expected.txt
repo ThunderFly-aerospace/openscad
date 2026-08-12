@@ -1,0 +1,6 @@
+pcb	drawings_export,model_export
+case	camera_export,drawings_export
+case/detail	camera_export
+plain	-
+explicit	-
+computed	-

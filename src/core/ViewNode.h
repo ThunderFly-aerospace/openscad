@@ -32,6 +32,15 @@
 
    `active` records whether this instance was on the active path when it was
    instantiated, purely for toString()/debugging and dump/echo tests.
+
+   Fáze 17: a view may additionally declare which batch exports it is a default
+   for, with three independent optional flags (all false by default):
+
+     view(name = "pcb", camera_export = false, drawings_export = true,
+          model_export = true) { ... }
+
+   The CLI --default-model-views then processes exactly the views marked for the
+   export that is running (see ViewExportKind / viewIsDefaultFor).
  */
 class ViewNode : public AbstractNode
 {
@@ -43,6 +52,9 @@ public:
 
   std::string view_name;
   bool active{false};
+  bool camera_export{false};
+  bool drawings_export{false};
+  bool model_export{false};
 };
 
 // A view marker together with its source location, produced by walking the AST
@@ -56,11 +68,38 @@ struct ViewInfo {
   int depth{0};                  // nesting depth (0 = top level)
   int parent{-1};                // index of the enclosing view in the returned vector, or -1
   std::vector<std::string> fullPath;  // names from the tree root down to and incl. this view
+  // Fáze 17: the export-default flags, as literal true/false in the source (a
+  // computed value reads as false — the AST walk does not evaluate expressions).
+  bool cameraExport{false};
+  bool drawingsExport{false};
+  bool modelExport{false};
 };
+
+// The batch export a --default-model-views run is performing, i.e. which of the
+// three view() flags selects the views to process.
+enum class ViewExportKind {
+  Cameras,   // --export-cameras  -> camera_export
+  Drawings,  // --export-drawing  -> drawings_export
+  Model,     // -o <file>         -> model_export
+};
+
+// Is this view marked as a default for the given export kind?
+bool viewIsDefaultFor(const ViewInfo& info, ViewExportKind kind);
 
 class SourceFile;
 
 // Walk the parsed AST of `file` (following include<> content) and return every
 // literal view("name") block with its source range and nesting, in source order.
 // Non-literal names (computed) are skipped (out of scope for v1).
+//
+// The walk also enters the bodies of called user modules (resolved like the runtime
+// does: enclosing scopes innermost-first, then the use<>d files) and both branches of
+// if/else, so a view() defined inside a module is found too. A view name can therefore
+// appear more than once — several blocks may carry the same name, and that is legal
+// (they are all active together). Consumers that map a name to *one* output file want
+// uniqueViewPaths(); consumers that map source lines to views (annotation scoping)
+// need every occurrence.
 std::vector<ViewInfo> collectViews(const SourceFile *file);
+
+// First occurrence of each distinct view path, in source order.
+std::vector<ViewInfo> uniqueViewPaths(const std::vector<ViewInfo>& views);

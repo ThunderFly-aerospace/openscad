@@ -179,13 +179,19 @@ struct CommandLine {
   const CmdLineExportOptions& exportOptions;
   const AnimateArgs animate;
   const std::vector<std::string> summaryOptions;
-  const std::string summaryFile;
+  std::string summaryFile;
   // Fáze 15: model views to export. Each entry is a slash-separated view path
   // (e.g. "assembly/exploded"); empty list = the root (current behaviour). When
   // allModelViews is set, the list is ignored and every view() in the source is
   // exported, one file each.
   const std::vector<std::string> modelViews;
   const bool allModelViews;
+  // Fáze 17: export the views marked model_export = true, one file each.
+  bool defaultModelViews{false};
+  // Optional sink for the names of the files actually written (the per-view /
+  // per-frame names, which differ from output_file when a batch is tagged), so the
+  // caller can write a truthful dependency file.
+  std::vector<std::string> *writtenFiles{nullptr};
 };
 
 namespace {
@@ -561,17 +567,45 @@ struct ViewSpec {
 };
 
 // Resolve which model views a command should process from --model-view /
-// --all-model-views. Always returns at least one spec (root when nothing asked).
+// --all-model-views / --default-model-views.
+//
+// Returns at least one spec (the root) for everything except --default-model-views:
+// there the selection is exactly the set of view()s marked for the export being run
+// (`kind`), so an empty result means "nothing marked, export nothing" — falling back
+// to the root would silently produce a file the model did not ask for.
 static std::vector<ViewSpec> resolveViewSpecs(SourceFile *root_file,
                                               const std::vector<std::string>& modelViews,
-                                              bool allModelViews)
+                                              bool allModelViews, bool defaultModelViews = false,
+                                              ViewExportKind kind = ViewExportKind::Model)
 {
   std::vector<ViewSpec> specs;
+  if (defaultModelViews && (allModelViews || !modelViews.empty())) {
+    LOG(message_group::Warning,
+        "--default-model-views is ignored when --all-model-views or --model-view is given.");
+    defaultModelViews = false;
+  }
+  // uniqueViewPaths: the same view name may appear in several blocks (all active
+  // together), but it maps to one output file — exporting it twice would just
+  // overwrite it.
   if (allModelViews) {
-    for (const auto& info : collectViews(root_file)) {
+    for (const auto& info : uniqueViewPaths(collectViews(root_file))) {
       specs.push_back({info.fullPath, boost::algorithm::join(info.fullPath, "_")});
     }
     if (specs.empty()) specs.push_back({{}, ""});
+  } else if (defaultModelViews) {
+    for (const auto& info : uniqueViewPaths(collectViews(root_file))) {
+      if (!viewIsDefaultFor(info, kind)) continue;
+      specs.push_back({info.fullPath, boost::algorithm::join(info.fullPath, "_")});
+    }
+    if (specs.empty()) {
+      // Not an error: a CI job may run the camera, drawing and model exports over
+      // every model, and each model marks only the ones it wants.
+      const char *flag = kind == ViewExportKind::Cameras  ? "camera_export"
+                         : kind == ViewExportKind::Drawings ? "drawings_export"
+                                                            : "model_export";
+      LOG(message_group::Warning, "No view() in the model is marked %1$s = true; nothing to export.",
+          flag);
+    }
   } else if (!modelViews.empty()) {
     for (const auto& v : modelViews) {
       std::vector<std::string> path;
@@ -585,9 +619,77 @@ static std::vector<ViewSpec> resolveViewSpecs(SourceFile *root_file,
   return specs;
 }
 
+// Fáze 17: print the view() blocks of a model with their export-default flags, so
+// a CI job can enumerate the views it should build (a matrix job per view) instead
+// of guessing. Parses only — no geometry is evaluated.
+int list_model_views(const std::string& rawInput, bool asJson)
+{
+  const bool is_stdin = rawInput == "-";
+  const std::string displayName = is_stdin ? "<stdin>" : rawInput;
+
+  std::string text;
+  if (is_stdin) {
+    text = std::string((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+  } else {
+    std::ifstream ifs(std::filesystem::u8path(rawInput));
+    if (!ifs.is_open()) {
+      LOG("Can't open input file '%1$s'!\n", rawInput);
+      return 1;
+    }
+    handle_dep(rawInput);
+    text = std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  }
+  text += "\n\x03\n" + commandline_commands;
+
+  SourceFile *root_file = nullptr;
+  if (!parse(root_file, text, displayName, displayName, false)) {
+    delete root_file;  // parse failed
+    root_file = nullptr;
+  }
+  if (!root_file) {
+    LOG("Can't parse file '%1$s'!\n", displayName);
+    return 1;
+  }
+  root_file->handleDependencies();
+
+  const auto views = uniqueViewPaths(collectViews(root_file));
+  if (asJson) {
+    const auto escape = [](const std::string& s) {
+      std::string out;
+      for (const char c : s) {
+        if (c == '"' || c == '\\') out += '\\';
+        out += c;
+      }
+      return out;
+    };
+    std::cout << "[";
+    for (size_t i = 0; i < views.size(); ++i) {
+      const auto& v = views[i];
+      std::cout << (i ? ",\n " : "\n ") << "{\"path\":\"" << escape(boost::algorithm::join(v.fullPath, "/"))
+                << "\",\"name\":\"" << escape(v.name) << "\",\"depth\":" << v.depth
+                << ",\"line\":" << v.firstLine << ",\"camera_export\":" << (v.cameraExport ? "true" : "false")
+                << ",\"drawings_export\":" << (v.drawingsExport ? "true" : "false")
+                << ",\"model_export\":" << (v.modelExport ? "true" : "false") << "}";
+    }
+    std::cout << (views.empty() ? "]\n" : "\n]\n");
+  } else {
+    for (const auto& v : views) {
+      std::vector<std::string> flags;
+      if (v.cameraExport) flags.emplace_back("camera_export");
+      if (v.drawingsExport) flags.emplace_back("drawings_export");
+      if (v.modelExport) flags.emplace_back("model_export");
+      std::cout << boost::algorithm::join(v.fullPath, "/") << "\t"
+                << (flags.empty() ? "-" : boost::algorithm::join(flags, ",")) << "\n";
+    }
+  }
+  std::cout.flush();
+  return 0;
+}
+
 int export_cameras(const std::string& rawInput, const ViewOptions& viewOptions,
                    const std::string& prefix, const fs::path& original_path,
-                   const std::vector<std::string>& modelViews, bool allModelViews)
+                   const std::vector<std::string>& modelViews, bool allModelViews,
+                   bool defaultModelViews)
 {
   const bool is_stdin = rawInput == "-";
   const std::string displayName = is_stdin ? "<stdin>" : rawInput;
@@ -626,8 +728,9 @@ int export_cameras(const std::string& rawInput, const ViewOptions& viewOptions,
   // Render the cameras of each selected model view. Cameras that live inside a
   // view() block only exist when that view is active, so this re-instantiates the
   // tree per view (Fáze 16).
-  const auto specs = resolveViewSpecs(root_file, modelViews, allModelViews);
-  const bool tagViews = specs.size() > 1 || allModelViews;
+  const auto specs = resolveViewSpecs(root_file, modelViews, allModelViews, defaultModelViews,
+                                      ViewExportKind::Cameras);
+  const bool tagViews = specs.size() > 1 || allModelViews || defaultModelViews;
 
   int failures = 0;
   int camerasSeen = 0;
@@ -671,7 +774,7 @@ int export_cameras(const std::string& rawInput, const ViewOptions& viewOptions,
       ++index;
     }
   }
-  if (camerasSeen == 0) {
+  if (camerasSeen == 0 && !specs.empty()) {
     LOG("No camera() markers found in '%1$s'.", displayName);
   }
   return failures ? 1 : 0;
@@ -785,8 +888,9 @@ int cmdline(const CommandLine& cmd)
     .camera = cmd.camera,
   };
 
-  // Fáze 15: resolve which model views to export (shared with --export-cameras).
-  const auto specs = resolveViewSpecs(root_file, cmd.modelViews, cmd.allModelViews);
+  // Fáze 15/17: resolve which model views to export (shared with --export-cameras).
+  const auto specs = resolveViewSpecs(root_file, cmd.modelViews, cmd.allModelViews,
+                                      cmd.defaultModelViews, ViewExportKind::Model);
   const bool multi = specs.size() > 1;
 
   int rc = 0;
@@ -796,22 +900,33 @@ int cmdline(const CommandLine& cmd)
     // Inject the view tag into the output filename so a batch does not overwrite
     // itself (out.svg -> out_assembly.svg). Skip for stdout.
     // A single explicit --model-view keeps the -o name as given; a batch
-    // (several views, or --all-model-views over a template) tags each file.
-    const bool tagFile = !spec.tag.empty() && (multi || cmd.allModelViews);
+    // (several views, --all-model-views over a template, or the marked
+    // --default-model-views set) tags each file.
+    const bool tagFile =
+      !spec.tag.empty() && (multi || cmd.allModelViews || cmd.defaultModelViews);
     CommandLine viewCmd = cmd;
     if (tagFile && !cmd.is_stdout) {
-      fs::path p(cmd.output_file);
-      auto ext = p.extension();
-      p.replace_extension();
-      p += "_" + spec.tag;
-      p.replace_extension(ext);
-      viewCmd.output_file = p.generic_string();
+      const auto tagged = [&spec](const std::string& file) {
+        fs::path p(file);
+        auto ext = p.extension();
+        p.replace_extension();
+        p += "_" + spec.tag;
+        p.replace_extension(ext);
+        return p.generic_string();
+      };
+      viewCmd.output_file = tagged(cmd.output_file);
+      // The summary is per render, so a batch needs one file per view too —
+      // otherwise every view overwrites it and only the last one survives.
+      if (!cmd.summaryFile.empty() && cmd.summaryFile != "-") {
+        viewCmd.summaryFile = tagged(cmd.summaryFile);
+      }
     } else if (tagFile && cmd.is_stdout) {
       LOG("Multiple model views to stdout; only the last output will remain.");
     }
 
     if (cmd.animate.frames == 0) {
       render_variables.time = 0;
+      if (cmd.writtenFiles && !cmd.is_stdout) cmd.writtenFiles->push_back(viewCmd.output_file);
       rc |= do_export(viewCmd, render_variables, export_format, root_file);
     } else {
       // export the requested number of animated frames
@@ -834,6 +949,7 @@ int cmdline(const CommandLine& cmd)
 
         CommandLine frame_cmd = viewCmd;
         frame_cmd.output_file = frame_file.generic_string();
+        if (cmd.writtenFiles && !cmd.is_stdout) cmd.writtenFiles->push_back(frame_cmd.output_file);
 
         rc |= do_export(frame_cmd, render_variables, export_format, root_file);
       }
@@ -1061,6 +1177,13 @@ int openscad_main(int argc, char **argv)
       "=view path (e.g. assembly or assembly/exploded) selecting which view()s are active; "
       "repeat to export several views, one file each (Fáze 15)")
     ("all-model-views", "export every view() in the source, one file each (Fáze 15)")
+    ("default-model-views",
+      "export only the view()s marked as a default for the export being run: camera_export = true "
+      "for --export-cameras, drawings_export = true for --export-drawing, model_export = true for "
+      "-o. One file each, always tagged with the view name (Fáze 17)")
+    ("list-model-views", po::value<std::string>()->implicit_value("text"),
+      "[=text|json] list the view()s in the model with their export-default flags and exit; "
+      "for CI matrix jobs (Fáze 17)")
     ("export-drawing", po::value<std::string>(),
       "=prefix : export the technical drawing (ortho views + dimensions) of the selected model "
       "view(s) to <prefix>[_view].<fmt>. Honours --model-view / --all-model-views. Needs Qt "
@@ -1298,6 +1421,28 @@ int openscad_main(int argc, char **argv)
   AnimateArgs const animate = get_animate(vm);
   const Camera camera = get_camera(vm);
 
+  // --list-model-views: parse-only enumeration of the model's view() blocks.
+  if (vm.count("list-model-views")) {
+    std::string fmt = vm["list-model-views"].as<std::string>();
+    boost::algorithm::to_lower(fmt);
+    if (fmt != "text" && fmt != "json") {
+      LOG("--list-model-views must be text or json (got '%1$s').", fmt);
+      return 1;
+    }
+    if (inputFiles.size() != 1) {
+      LOG("--list-model-views requires exactly one input file.");
+      return 1;
+    }
+    parser_init();
+    localization_init();
+    try {
+      rc = list_model_views(inputFiles[0], fmt == "json");
+    } catch (const HardWarningException&) {
+      rc = 1;
+    }
+    return rc;
+  }
+
   // --export-cameras: standalone headless batch render of camera() markers.
   // Handled here (before the normal cmd-line/GUI split) because it produces one
   // PNG per camera under its own prefix and needs no -o output file.
@@ -1314,7 +1459,7 @@ int openscad_main(int argc, char **argv)
         inputFiles[0], viewOptions, prefix, original_path,
         vm.count("model-view") ? vm["model-view"].as<std::vector<std::string>>()
                                : std::vector<std::string>{},
-        vm.count("all-model-views") > 0);
+        vm.count("all-model-views") > 0, vm.count("default-model-views") > 0);
     } catch (const HardWarningException&) {
       rc = 1;
     }
@@ -1337,6 +1482,7 @@ int openscad_main(int argc, char **argv)
     CliDrawingExport req;
     req.prefix = vm["export-drawing"].as<std::string>();
     req.allModelViews = vm.count("all-model-views") > 0;
+    req.defaultModelViews = vm.count("default-model-views") > 0;
     if (vm.count("model-view")) req.modelViews = vm["model-view"].as<std::vector<std::string>>();
     std::string fmt = vm.count("drawing-format") ? vm["drawing-format"].as<std::string>() : "svg";
     boost::algorithm::to_lower(fmt);
@@ -1370,6 +1516,10 @@ int openscad_main(int argc, char **argv)
     if (!inputFiles.size()) help(argv[0], desc, true);
   }
 
+  // Fáze 17: the files actually written (per view / per frame), for a truthful -d
+  // dependency file — a tagged batch writes out_pcb.stl, not the given out.stl.
+  std::vector<std::string> writtenFiles;
+
   if (arg_info || cmdlinemode) {
     if (inputFiles.size() > 1) help(argv[0], desc, true);
     try {
@@ -1402,7 +1552,9 @@ int openscad_main(int argc, char **argv)
                                 vm.count("model-view")
                                   ? vm["model-view"].as<std::vector<std::string>>()
                                   : std::vector<std::string>{},
-                                vm.count("all-model-views") > 0};
+                                vm.count("all-model-views") > 0,
+                                vm.count("default-model-views") > 0,
+                                &writtenFiles};
           rc |= cmdline(cmd);
         }
       }
@@ -1412,7 +1564,9 @@ int openscad_main(int argc, char **argv)
 
     if (deps_output_file) {
       std::string const deps_out(deps_output_file);
-      const std::vector<std::string>& geom_out(output_files);
+      // Prefer the names actually written (view tags, animation frames) over the
+      // -o templates; fall back to the templates if nothing was recorded.
+      const std::vector<std::string>& geom_out(writtenFiles.empty() ? output_files : writtenFiles);
       if (!write_deps(deps_out, geom_out)) {
         LOG("Error writing deps");
         return 1;

@@ -1141,6 +1141,12 @@ add_cmdline_test(echo-section-node         OPENSCAD SUFFIX echo FILES ${TEST_SCA
 add_cmdline_test(dump-view-node            OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/view-node.scad)
 add_cmdline_test(echo-view-node            OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/view-node.scad)
 add_cmdline_test(dump-view-active          OPENSCAD SUFFIX csg  ARGS --model-view assembly/exploded FILES ${TEST_SCAD_DIR}/misc/view-active.scad)
+add_cmdline_test(dump-view-defaults        OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/view-defaults.scad)
+# The AST walk behind --default-model-views, as a CI job sees it (STDIO = stdin/stdout).
+add_cmdline_test(list-view-defaults        OPENSCAD STDIO SUFFIX txt  ARGS --list-model-views FILES ${TEST_SCAD_DIR}/misc/view-defaults.scad)
+add_cmdline_test(list-view-defaults-json   OPENSCAD STDIO SUFFIX json ARGS --list-model-views=json FILES ${TEST_SCAD_DIR}/misc/view-defaults.scad)
+# Where views are found: user modules (incl. use<>d files), if/else, for, duplicates.
+add_cmdline_test(list-view-scopes          OPENSCAD STDOUT SUFFIX txt  ARGS --list-model-views FILES ${TEST_SCAD_DIR}/misc/view-scopes.scad)
 add_cmdline_test(dump-label-node           OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/label-node.scad)
 add_cmdline_test(echo-label-node           OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/label-node.scad)
 add_cmdline_test(dump-bend-node            OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/bend-node.scad)
