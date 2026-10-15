@@ -171,3 +171,6 @@ ale **`collectViews` (AST-walk)** měl tři děravá místa, která přímo tref
   HOTOVÁ.** Živý round-trip kót/přepínače ověří uživatel. NECOMMITOVÁNO.
   - Nezautomatizované (GUI-only, ověří uživatel): vizuál per-view kót/`// @sheet`
     v doku Drawing a že klikaná kóta fyzicky skončí ve správném bloku.
+- 2026-08-18: Fáze 14C HOTOVÁ — `bend(..., glue = <vůle>)` drží pohromadě
+  nespojité importované STL (proximita vrchol×trojúhelník jako druhá relace
+  soudržnosti; `glue = 0` = beze změny). Popis a rozhodnutí v `ROADMAP.md` 14C.

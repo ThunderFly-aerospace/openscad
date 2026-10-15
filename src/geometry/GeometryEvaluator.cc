@@ -692,6 +692,7 @@ Response GeometryEvaluator::visit(State& state, const BendNode& node)
         params.ymax = node.ymax;
         params.zmin = node.zmin;
         params.zmax = node.zmax;
+        params.glue = node.glue;
         params.segments =
           node.discretizer.getCircularSegmentCount(node.r, node.angle).value_or(1);
 
@@ -724,8 +725,10 @@ Response GeometryEvaluator::visit(State& state, const BendNode& node)
         if (stats.groups > 0) {
           LOG(message_group::NONE, node.modinst->location(), this->tree.getDocumentPath(),
               "bend(): %1$d part(s) outside the bend region: %2$d fixed, %3$d carried along "
-              "(%4$d of them connected to nothing, placed by position)",
-              stats.groups, stats.groups_fixed, stats.groups_carried, stats.groups_isolated);
+              "(%4$d of them connected to nothing, placed by position; %5$d attached through "
+              "glue rather than a shared edge)",
+              stats.groups, stats.groups_fixed, stats.groups_carried, stats.groups_isolated,
+              stats.groups_glued);
         }
         geom = std::move(bent);
       }

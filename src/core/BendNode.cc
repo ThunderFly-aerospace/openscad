@@ -86,13 +86,20 @@ static std::shared_ptr<AbstractNode> builtin_bend(const ModuleInstantiation *ins
                                                   Arguments arguments, const Children& children)
 {
   Parameters parameters = Parameters::parse(std::move(arguments), inst->location(),
-                                            {"at", "r", "angle"}, {"xlim", "ylim", "zlim"});
+                                            {"at", "r", "angle"},
+                                            {"xlim", "ylim", "zlim", "glue"});
 
   auto node = std::make_shared<BendNode>(inst, CurveDiscretizer(parameters, inst->location()));
 
   parameters.validate_number("at", node->at);
   parameters.validate_number("r", node->r);
   parameters.validate_number("angle", node->angle);
+  parameters.validate_number("glue", node->glue);
+  if (node->glue < 0.0) {
+    LOG(message_group::Warning, inst->location(), parameters.documentRoot(),
+        "bend() expects glue >= 0, ignoring");
+    node->glue = 0.0;
+  }
 
   read_limit(parameters, inst, "xlim", node->xmin, node->xmax);
   read_limit(parameters, inst, "ylim", node->ymin, node->ymax);
@@ -109,6 +116,8 @@ std::string BendNode::toString() const
   write_limit(stream, "xlim", this->xmin, this->xmax);
   write_limit(stream, "ylim", this->ymin, this->ymax);
   write_limit(stream, "zlim", this->zmin, this->zmax);
+  // Only when in use, so that models which never asked for it keep their dump.
+  if (this->glue > 0.0) stream << ", glue = " << this->glue;
   stream << ")";
   return stream.str();
 }
@@ -120,5 +129,6 @@ void register_builtin_bend()
                    "bend(at = 0, r = 1, angle = 90)",
                    "bend(at = 0, r = 1, angle = 90, xlim = [lo, hi], ylim = [lo, hi], zlim = [lo, "
                    "hi])",
+                   "bend(at = 0, r = 1, angle = 90, glue = 0)",
                  });
 }

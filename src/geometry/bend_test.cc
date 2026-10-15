@@ -377,6 +377,144 @@ TEST_CASE("bend() places a disconnected part by its own position", "[bend]")
   }
 }
 
+namespace {
+
+//! A plain board, entirely inside the bend region, for the glue tests. The
+//! region is bounded in z only, which is how components get excluded in
+//! practice: the board takes part in the bend, anything standing on it does not.
+std::unique_ptr<PolySet> makeGlueBoard()
+{
+  return makePlate(40, 6, {0, -3, 0}, 1.0, 0.4, [](int, int) { return true; });
+}
+
+BendParams glueBend()
+{
+  BendParams params;
+  params.at = 15;
+  params.r = 2;
+  params.angle = 90;  // arc ends at x = 15 + 2*pi/2 = 18.14
+  params.zmax = 0.45;
+  params.segments = 8;
+  return params;
+}
+
+//! A component resting on the board with a 0.1 gap, straddling the end of the
+//! arc. Judged on its own position it is a conflict and freezes - while the
+//! board underneath drives away, which is the case an imported STL full of
+//! separate shells runs into.
+std::unique_ptr<PolySet> makeComponent(double x0, double x1)
+{
+  return makeBox({x0, -2, 0.5}, {x1, 2, 3.5});
+}
+
+}  // namespace
+
+TEST_CASE("glue attaches a part that merely rests on the bent material", "[bend]")
+{
+  auto board = makeGlueBoard();
+  appendShell(*board, *makeComponent(16, 24));
+  BendParams params = glueBend();
+
+  SECTION("without glue it is judged on its own and left behind")
+  {
+    BendStats stats;
+    auto bent = bendPolySet(*board, params, stats);
+    CHECK(stats.groups == 1);
+    CHECK(stats.groups_isolated == 1);
+    CHECK(stats.groups_conflict == 1);
+    CHECK(stats.groups_glued == 0);
+    CHECK(stats.groups_carried == 0);
+  }
+
+  SECTION("with glue it inherits from the material it stands on")
+  {
+    params.glue = 0.2;  // wider than the 0.1 gap
+    BendStats stats;
+    auto bent = bendPolySet(*board, params, stats);
+    CHECK(stats.groups == 1);
+    CHECK(stats.groups_isolated == 0);
+    CHECK(stats.groups_conflict == 0);
+    CHECK(stats.groups_glued == 1);
+    CHECK(stats.groups_carried == 1);
+    // Standing on material that is being deformed cannot stay rigid; say so.
+    CHECK(stats.groups_on_arc == 1);
+  }
+}
+
+TEST_CASE("glue measures vertex against face, not vertex against vertex", "[bend]")
+{
+  // One box for the board, so its top is two huge triangles and the nearest
+  // board vertex to the component is a corner tens of millimetres away. Only a
+  // point-to-face distance can tell that the component is resting on it.
+  auto board = makeBox({0, -10, 0}, {40, 10, 0.4});
+  appendShell(*board, *makeComponent(16, 24));
+  BendParams params = glueBend();
+
+  BendStats loose;
+  auto bent = bendPolySet(*board, params, loose);
+  CHECK(loose.groups_glued == 0);
+  CHECK(loose.groups_carried == 0);
+
+  params.glue = 0.2;
+  BendStats stats;
+  auto bent2 = bendPolySet(*board, params, stats);
+  CHECK(stats.groups_glued == 1);
+  CHECK(stats.groups_carried == 1);
+}
+
+TEST_CASE("glue unites shells of a solid that arrived split", "[bend]")
+{
+  // Two halves of one component sharing a face but not a single vertex, the way
+  // a converted STL often comes out. Together they must act as one piece.
+  auto board = makeGlueBoard();
+  appendShell(*board, *makeComponent(16, 20));
+  appendShell(*board, *makeComponent(20.05, 24));  // a hairline gap, not a shared face
+  BendParams params = glueBend();
+
+  BendStats loose;
+  auto bent = bendPolySet(*board, params, loose);
+  CHECK(loose.groups == 2);  // each half on its own, and they disagree
+  CHECK(loose.groups_fixed == 1);
+  CHECK(loose.groups_carried == 1);
+
+  params.glue = 0.2;
+  BendStats stats;
+  auto bent2 = bendPolySet(*board, params, stats);
+  CHECK(stats.groups == 1);  // the halves became one group
+  CHECK(stats.groups_carried == 1);
+}
+
+TEST_CASE("glue still reports a part that spans the bend", "[bend]")
+{
+  // A bar resting on the board from well before the bend line to past the arc.
+  // Gluing gives it two anchors that move differently, which is the same
+  // predicament as a bridge built out of connected material: freeze and report.
+  auto board = makeGlueBoard();
+  appendShell(*board, *makeComponent(5, 24));
+  BendParams params = glueBend();
+  params.glue = 0.2;
+
+  BendStats stats;
+  auto bent = bendPolySet(*board, params, stats);
+  CHECK(stats.groups == 1);
+  CHECK(stats.groups_conflict == 1);
+  CHECK(stats.groups_carried == 0);
+}
+
+TEST_CASE("glue does not reach further than it is told", "[bend]")
+{
+  // The same component, but floating 0.5 above the board instead of 0.1.
+  auto board = makeGlueBoard();
+  appendShell(*board, *makeBox({16, -2, 0.9}, {24, 2, 3.9}));
+  BendParams params = glueBend();
+  params.glue = 0.2;
+
+  BendStats stats;
+  auto bent = bendPolySet(*board, params, stats);
+  CHECK(stats.groups_glued == 0);
+  CHECK(stats.groups_isolated == 1);
+}
+
 TEST_CASE("bend() with a negative angle curves the other way", "[bend]")
 {
   auto plate = makeBox({0, 0, 0}, {30, 10, 0.4});

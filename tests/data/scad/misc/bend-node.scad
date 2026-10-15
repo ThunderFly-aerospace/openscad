@@ -17,6 +17,12 @@ bend(at = 1, r = 1, angle = 45, zlim = 5) cube([5, 5, 1]);
 // An empty range warns; nothing gets bent.
 bend(at = 1, r = 1, angle = 45, ylim = [5, -5]) cube([5, 5, 1]);
 
+// glue only shows up in the dump when it is in use.
+bend(at = 10, r = 2, angle = 90, zlim = [undef, 5], glue = 0.25) cube([20, 5, 1]);
+
+// A negative glue is refused with a warning and treated as off.
+bend(at = 10, r = 2, angle = 90, glue = -1) cube([20, 5, 1]);
+
 // angle = 0 is the identity.
 bend(at = 1, r = 1, angle = 0) cube([5, 5, 1]);
 

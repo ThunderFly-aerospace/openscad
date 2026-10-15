@@ -10,6 +10,12 @@ bend($fn = 0, $fa = 12, $fs = 2, at = 1, r = 1, angle = 45) {
 bend($fn = 0, $fa = 12, $fs = 2, at = 1, r = 1, angle = 45, ylim = [5, -5]) {
 	cube(size = [5, 5, 1], center = false);
 }
+bend($fn = 0, $fa = 12, $fs = 2, at = 10, r = 2, angle = 90, zlim = [undef, 5], glue = 0.25) {
+	cube(size = [20, 5, 1], center = false);
+}
+bend($fn = 0, $fa = 12, $fs = 2, at = 10, r = 2, angle = 90) {
+	cube(size = [20, 5, 1], center = false);
+}
 bend($fn = 0, $fa = 12, $fs = 2, at = 1, r = 1, angle = 0) {
 	cube(size = [5, 5, 1], center = false);
 }

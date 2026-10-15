@@ -31,6 +31,11 @@ struct BendParams
 
   int segments{8};  // arc segments used to subdivide the band, >= 1
 
+  // Slack used when deciding what hangs off what. Imported meshes are routinely
+  // not edge-connected, so plain connectivity would judge such a piece on its
+  // own and leave it behind. 0 disables the proximity pass entirely.
+  double glue{0.0};
+
   bool hasMask() const
   {
     return std::isfinite(xmin) || std::isfinite(xmax) || std::isfinite(ymin) ||
@@ -63,6 +68,7 @@ struct BendStats
   int groups_isolated{0};
   int groups_conflict{0};  // hangs off both the fixed and the moving side
   int groups_on_arc{0};    // hangs off material that is being deformed
+  int groups_glued{0};     // found its anchor only through glue, not a shared edge
 };
 
 /*!

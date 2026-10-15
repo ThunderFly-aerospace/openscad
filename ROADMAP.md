@@ -1373,6 +1373,119 @@ nesmysl.
 **Regrese.** Celá sada `-j6`: 1 selhání (`render-dxf_text-metrics`), sériově
 projde — opět jen llvmpipe flakyness, a jiný test než minule.
 
+---
+
+### 14C — `glue`: soudržnost přes mezeru (nespojité importované STL)  ✅ HOTOVO (2026-08-18)
+
+**Problém.** 14B rozhoduje o osudu materiálu mimo masku podle **souvislosti
+meshe** — flood-fill přes sdílené hrany, svařené `Grid3d(GRID_FINE)`, tj.
+tolerance ~1e-6 mm. Reálné importované STL ale často spojité **není**: součástky
+jsou samostatné shelly, které na desce jen stojí, a konverze z jiného formátu
+umí těleso rozpadnout na kusy, které se dotýkají, ale nesdílí jediný vrchol.
+Takový kus dnes vyjde jako `groups_isolated`, rozhodne se podle **vlastní
+x-polohy**, a když leží napříč pásmem, zamrzne — zatímco deska pod ním odjede.
+Model se rozjede.
+
+**Zamítnuto: zespojitit mesh (svařit / doplnit mostíky / union).** Neřešilo by
+to nic navíc — po spojení by flood-fill kusy stejně jen sloučil do jedné skupiny,
+což je přesně výsledek, který dá proximita. Zato by to stálo mnohem víc:
+u překrývajících se shellů je „zespojitit" booleovský union (nad ~150k facy
+s koplanárními plochami z cizího STL řádově minuty a časté selhání na
+self-intersections), u shellů s mezerou by šlo o **generování nové geometrie**
+(kudy mostík vede? jaký průřez?), která by se do exportu dostala jako materiál,
+co tam fyzicky není, a při ohybu by se sama deformovala. Hlavně by to porušilo
+vlastnost, na které 14B stojí: **svařování slouží jen ke klasifikaci, výstupní
+mesh se nemění o jediný vrchol.** Kdo union opravdu chce, ať ho udělá mimo
+`bend()` — je to ortogonální operace.
+
+**Zvolené řešení — proximita jako druhá relace soudržnosti.** Nový nepovinný
+parametr:
+
+```scad
+bend(at = 10, r = 2, angle = 90, ylim = [-6, 6], glue = 0.1) import("pcb.stl");
+```
+
+- `glue` = vůle v jednotkách modelu; **default 0 = přesně dnešní chování**
+  (nulová regrese, stávající zlaté soubory drží).
+- Metrika **vrchol vs. trojúhelník**: kusy patří k sobě, když některý vrchol
+  jednoho leží blíž než `glue` k trojúhelníku druhého. Vrchol-vrchol by
+  nestačilo — typický případ je součástka stojící uprostřed velkého trojúhelníku
+  desky, kde nejbližší vrchol desky je v rohu, metry daleko.
+- Proximita plní **tytéž** `TOUCH_FIXED/ARC/CARRIED` bity a `unite()` skupin jako
+  dnešní hranová relace, takže veškerá logika 14B (dědění osudu, konflikty,
+  izolované kusy) platí beze změny.
+- **Konflikt řeší stejně jako dnes**: kus blízko stojící i cestující strany =
+  most přes ohyb, žádný tuhý pohyb nesedí → zamrazit + Warning. Nedělá se
+  „bližší strana vyhraje", protože by to tiše zakrylo reálný problém.
+- Trhliny se dál počítají **jen na hranách** (`findTears`). Kusy spojené
+  proximitou nejsou sdílenou hranou spojené, takže se „neroztrhnou" — jen se
+  rozjedou, a tomu právě `glue` předchází.
+
+**Klasifikace poběží vždy**, i bez masky (dnes ji `if (params.hasMask())`
+přeskočí). Ověřeno, že je to bezpečné: bez masky vyjde `inRegion[i] = true` pro
+všechno, takže nevznikne žádná skupina a klasifikace nemá co změnit — přibude
+jen `findTears`, tj. diagnostika navíc, ne jiná geometrie.
+
+**Prostorový index.** Vrcholy do uniform gridu s buňkou `h = max(glue, medián
+délky hrany)`; pro každý trojúhelník se projdou buňky protínající jeho o `glue`
+nafouklý bbox a spočítá se přesná vzdálenost bod–trojúhelník. Buňka odvozená od
+velikosti trojúhelníků, ne od `glue`, je podstatná: s buňkou `glue` by deska
+100×100 mm a `glue = 0.01` znamenala 10^8 buněk. Při `glue = 0` se celý krok
+přeskočí, takže dnešní modely neplatí nic.
+
+**Pozn. k pořadí.** Proximita běží na stejném místě jako hranový flood-fill —
+tedy **po** řezech maskou a **před** řezy pásma (viz 14B, jinak T-junctions).
+
+### Co odhalila implementace
+
+**Kontaktní bod, ne centroid.** Unit test „vertex against face" (deska jako
+jediný `cube`, tj. horní stěna ze dvou obřích trojúhelníků) odhalil, že
+`touchOf` rozhoduje z **centroidu** region-trojúhelníku — a protože klasifikace
+běží *před* řezy pásma, jeden facet může přesahovat celý oblouk. Součástka
+stojící uprostřed takového facetu pak zdědila `TOUCH_FIXED` z jedné poloviny a
+`TOUCH_CARRIED` z druhé → falešný konflikt a zamrznutí. Proximita proto zónu
+bere z **x kontaktního bodu** (`touchAt(x)`), ne z celého trojúhelníku. Hranová
+cesta centroid dál používá; u sdílené hrany je nepřesnost menší (soused je vždy
+přímo vedle), ale je to tentýž latentní problém — viz „Známé zbytky" níže.
+
+**Prostorový index musí vynechat region×region.** První verze indexovala všechny
+vrcholy a testovala každý trojúhelník proti všem — jenže drtivá většina dvojic
+je „deska proti desce", tedy oba v regionu, a ty se stejně zahodí. Index se
+proto staví dvakrát (všechno / jen mimo region) a trojúhelník **uvnitř** regionu
+se dotazuje jen na ten druhý. Měřeno na 83 084 trojúhelnících: `glue = 0`
+0,72 s, `glue = 0.2` **1,71 s před** touto úpravou a **1,18 s po ní**. Cena
+proximity je tedy ~0,45 s/83 k trojúhelníků a platí se jen se zapnutým `glue`;
+`glue = 0` přeskočí celý krok a je bit po bitu jako dřív.
+
+### Testy  ✅
+
+- `src/geometry/bend_test.cc`: +5 testů (16 celkem, 76 assertions) — součástka
+  ležící na desce napříč koncem oblouku (bez glue zamrzne, s glue jede a hlásí
+  `on_arc`), měření vrchol×plocha na desce ze dvou obřích trojúhelníků, dva
+  shelly jednoho dílu s vlásečnicovou mezerou, most přes ohyb (konflikt zůstává),
+  a že `glue` nedosáhne dál, než smí (mezera 0,5 vs. `glue = 0.2`).
+- `tests/data/scad/misc/bend-node.scad`: `glue` v dumpu jen když je v použití
+  + varování pro záporné `glue`.
+- `tests/data/scad/3D/features/bend-glue-tests.scad` (**nový soubor**, aby se
+  nemusela přegenerovat zlatá PNG stávajícího `bend-tests`) — 4 případy,
+  auto-globnuto do `dump`/`render-*`/`preview-*`/`throwntogether-*`/
+  `render-csg-cgal`.
+- Ověřeno naživo: bez `glue` bbox končí na x = 24 (součástka leží na místě),
+  s `glue = 0.2` na x = 17 (odjela s deskou).
+- Plná `xvfb-run ctest -j6`: 7 selhání, všechna sériově projdou = známá llvmpipe
+  flakyness, žádné se netýká `bend`. Unit testy 292 assertions / 33 testů.
+
+### Známé zbytky (neřešeno v 14C)
+
+- **Hranová cesta pořád rozhoduje z centroidu.** `touchOf` u sdílené hrany může
+  u velmi hrubého meshe ukázat na materiál mimo místo dotyku. Oprava by byla
+  vzít x sdílené hrany; nechalo se být, protože by změnila zlaté soubory 14B
+  a u hranově spojeného meshe je odchylka malá.
+- **Trhliny se počítají jen na hranách.** Kusy držené `glue` nejsou hranově
+  spojené, takže se do `torn_edges` nezapočítají — rozjet se ale nemohou,
+  protože sdílejí zónu.
+- `EPS = 1e-9` je pořád absolutní, ne relativní k velikosti modelu.
+
 ## Fáze 15 — `view()`: přepínatelné pohledy (stavy modelu) + per-view výkresy/kamery  🔶 naplánováno
 
 ### Zadání / motivace

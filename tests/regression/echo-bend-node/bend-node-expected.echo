@@ -1,3 +1,4 @@
 WARNING: bend() expects zlim = [lo, hi], ignoring in file bend-node.scad, line 15
 WARNING: bend() got an empty ylim range, nothing will be bent in file bend-node.scad, line 18
+WARNING: bend() expects glue >= 0, ignoring in file bend-node.scad, line 24
 ECHO: bend_node = "ok"

@@ -47,5 +47,11 @@ public:
   double ymin{-INF}, ymax{INF};
   double zmin{-INF}, zmax{INF};
 
+  // Slack for deciding what hangs off what. Imported meshes are routinely not
+  // edge-connected - a part merely rests on the board, or a conversion split a
+  // solid into shells that touch without sharing a vertex - and such a piece
+  // would otherwise be judged on its own and stay behind. 0 = off.
+  double glue{0.0};
+
   CurveDiscretizer discretizer;
 };
