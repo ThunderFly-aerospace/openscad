@@ -47,7 +47,7 @@ Q_IMPORT_PLUGIN(QSvgPlugin)
 #endif
 
 class BuiltinContext;
-class CGALWorker;
+class GeometryWorker;
 class CSGNode;
 class CSGProducts;
 class FontListDialog;
@@ -135,8 +135,8 @@ public:
 
   Measurement::Measurement meas;
 
-  int compileErrors;
-  int compileWarnings;
+  int compileErrors = 0;
+  int compileWarnings = 0;
 
   MainWindow(const QStringList& filenames);
   ~MainWindow() override;
@@ -170,6 +170,7 @@ private:
   void setupDocks();
   void setupMenusAndActions();
   void restoreWindowState();
+  void restoreToolBarVisibility();
   void openRemainingFiles(const QStringList& filenames);
   void setupAIDock();
   void setupCameraDock();
@@ -384,6 +385,8 @@ private slots:
   void instantiateRoot();
   void compileDone(bool didchange);
   void compileEnded();
+  void resetCompileMessageCounts();
+  void selectPreviewViewMode();
 
 private slots:
   void on_editActionCopyVPT_triggered();
@@ -563,14 +566,14 @@ private:
   bool procevents{false};
   QTemporaryFile *tempFile{nullptr};
   ProgressWidget *progresswidget{nullptr};
-  CGALWorker *cgalworker;
+  GeometryWorker *geometryWorker;
   QMutex consolemutex;
   EditorInterface *renderedEditor;  // stores pointer to editor which has been most recently rendered
   time_t includesMTime{0};          // latest include mod time
   time_t depsMTime{0};              // latest dependency mod time
   std::unordered_map<QString, QString> exportPaths;  // for each file type, where it was exported to last
-  QString exportPath(
-    const QString& suffix);    // look up the last export path and generate one if not found
+  // look up the last export path and generate one if not found
+  QString exportPath(const QString& suffix, const QString& basename = "");
   int lastParserErrorPos{-1};  // last highlighted error position
   int tabCount = 0;
   ExportPdfPaperSize sizeString2Enum(const QString& current);

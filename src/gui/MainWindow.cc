@@ -47,6 +47,8 @@
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QImage>
+#include <QImageWriter>
 #include <QKeySequence>
 #include <QLabel>
 #include <QList>
@@ -128,7 +130,7 @@
 #include "glview/preview/CSGTreeNormalizer.h"
 #include "glview/preview/ThrownTogetherRenderer.h"
 #include "gui/AboutDialog.h"
-#include "gui/CGALWorker.h"
+#include "gui/GeometryWorker.h"
 #include "gui/ColorList.h"
 #include "gui/Dock.h"
 #include "gui/ai/AIDock.h"
@@ -640,7 +642,18 @@ void MainWindow::updateReorderMode(bool reorderMode)
 
 MainWindow::~MainWindow()
 {
-  delete this->cgalworker;
+  // The QWidget destructor deletes our child docks, and deleting a QDockWidget
+  // reparents and hides it, which emits Dock::visibilityChanged and sends hide
+  // events through our event filter. Qt only severs connections in ~QObject,
+  // which runs last, so those slots would re-enter this MainWindow after its
+  // own members (exportMap, activeEditor, rubberBandManager, ...) have already
+  // been destroyed. Sever the links here, while the object is still whole.
+  for (auto& [dock, title] : docks) {
+    dock->disconnect(this);
+    dock->removeEventFilter(this);
+  }
+
+  delete this->geometryWorker;
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -767,8 +780,7 @@ void MainWindow::compile(bool reload, bool forcedone)
     bool shouldcompiletoplevel = false;
     bool didcompile = false;
 
-    compileErrors = 0;
-    compileWarnings = 0;
+    resetCompileMessageCounts();
 
     this->renderStatistic.start();
 
@@ -957,6 +969,27 @@ void MainWindow::compileDone(bool didchange)
       }
     }
   }
+}
+
+void MainWindow::resetCompileMessageCounts()
+{
+  this->compileErrors = 0;
+  this->compileWarnings = 0;
+}
+
+// Preview and thrown-together are the two non-rendered view modes; which one a preview lands in
+// is the user's choice, and OpenCSG has to be compiled in for preview to be one of the options.
+void MainWindow::selectPreviewViewMode()
+{
+#ifdef ENABLE_OPENCSG
+  if (viewActionThrownTogether->isChecked()) {
+    viewModeThrownTogether();
+  } else {
+    viewModePreview();
+  }
+#else
+  viewModeThrownTogether();
+#endif
 }
 
 void MainWindow::compileEnded()
@@ -1864,16 +1897,7 @@ void MainWindow::csgReloadRender()
 {
   if (this->rootNode) compileCSG();
 
-  // Go to non-CGAL view mode
-  if (viewActionThrownTogether->isChecked()) {
-    viewModeThrownTogether();
-  } else {
-#ifdef ENABLE_OPENCSG
-    viewModePreview();
-#else
-    viewModeThrownTogether();
-#endif
-  }
+  selectPreviewViewMode();
   compileEnded();
 }
 
@@ -1922,22 +1946,18 @@ void MainWindow::csgRender()
 {
   if (this->rootNode) compileCSG();
 
-  // Go to non-CGAL view mode
-  if (viewActionThrownTogether->isChecked()) {
-    viewModeThrownTogether();
-  } else {
-#ifdef ENABLE_OPENCSG
-    viewModePreview();
-#else
-    viewModeThrownTogether();
-#endif
-  }
+  selectPreviewViewMode();
 
   if (animateWidget->dumpPictures()) {
     const int steps = animateWidget->nextFrame();
     const QImage img = this->qglview->grabFrame();
-    const QString filename = QString("frame%1.png").arg(steps, 5, 10, QChar('0'));
-    img.save(filename, "PNG");
+    const QString filename = exportPath("png", QString("frame%1").arg(steps, 5, 10, QChar('0')));
+    QImageWriter writer(filename, "PNG");
+    if (!writer.write(img)) {
+      LOG(message_group::Error, "%1$s: %2$s", filename.toStdString(),
+          writer.errorString().toStdString());
+      animateWidget->pauseAnimation();
+    }
   }
 
   refreshCameras();
@@ -2039,7 +2059,7 @@ void MainWindow::cgalRender()
   if (!isClosing) progress_report_prep(this->rootNode, report_func, this);
   else return;
 
-  this->cgalworker->start(this->tree);
+  this->geometryWorker->start(this->tree);
 }
 
 void MainWindow::actionRenderDone(const std::shared_ptr<const Geometry>& root_geom)
@@ -2512,7 +2532,7 @@ void MainWindow::on_designCheckValidity_triggered()
 }
 
 // Returns if we can export (true) or not(false) (bool)
-// Separated into it's own function for re-use.
+// Separated into its own function for re-use.
 bool MainWindow::canExport(unsigned int dim)
 {
   auto guard = scopedSetCurrentOutput();
@@ -3468,20 +3488,27 @@ void MainWindow::processEvents()
   if (this->procevents) QApplication::processEvents();
 }
 
-QString MainWindow::exportPath(const QString& suffix)
+QString MainWindow::exportPath(const QString& suffix, const QString& basename)
 {
+  // Derive the directory.
   const auto path_it = this->exportPaths.find(suffix);
-  const auto basename =
-    activeEditor->filepath.isEmpty() ? "Untitled" : QFileInfo(activeEditor->filepath).completeBaseName();
   QString dir;
   if (path_it != exportPaths.end()) {
     dir = QFileInfo(path_it->second).absolutePath();
-  } else if (activeEditor->filepath.isEmpty()) {
-    dir = QString::fromStdString(PlatformUtils::userDocumentsPath());
-  } else {
+  } else if (!activeEditor->filepath.isEmpty()) {
     dir = QFileInfo(activeEditor->filepath).absolutePath();
+  } else {
+    dir = QString::fromStdString(PlatformUtils::userDocumentsPath());
   }
-  return QString("%1/%2.%3").arg(dir, basename, suffix);
+
+  // Derive the base name.
+  const auto derivedBasename = !basename.isEmpty() ? basename
+                               : !activeEditor->filepath.isEmpty()
+                                 ? QFileInfo(activeEditor->filepath).completeBaseName()
+                                 : "Untitled";
+
+  // Construct the full path.
+  return QString("%1/%2.%3").arg(dir, derivedBasename, suffix);
 }
 
 void MainWindow::jumpToLine(int line, int col)
@@ -3531,8 +3558,8 @@ void MainWindow::setupCoreSubsystems()
   renderCompleteSoundEffect = new QSoundEffect(this);
   renderCompleteSoundEffect->setSource(QUrl("qrc:/sounds/complete.wav"));
 
-  this->cgalworker = new CGALWorker();
-  connect(this->cgalworker, &CGALWorker::done, this, &MainWindow::actionRenderDone);
+  this->geometryWorker = new GeometryWorker();
+  connect(this->geometryWorker, &GeometryWorker::done, this, &MainWindow::actionRenderDone);
 
   autoReloadTimer = new QTimer(this);
   autoReloadTimer->setSingleShot(false);
@@ -3601,6 +3628,13 @@ void MainWindow::setupPreferences()
  */
 void MainWindow::setupStatusBar()
 {
+  // Remove ugly frames in the QStatusBar when using additional widgets.
+  const auto stylesheet = QString(R"(
+    QStatusBar::item {
+        border: 0px solid black;
+    }
+  )");
+  this->statusBar()->setStyleSheet(stylesheet);
   this->versionLabel = nullptr;  // must be initialized before calling updateStatusBar()
   updateStatusBar(nullptr);
 }
@@ -3668,6 +3702,8 @@ void MainWindow::setupEditor(const QStringList& filenames)
   connect(this->editActionUnindent, &QAction::triggered, tabManager, &TabManager::unindentSelection);
   connect(this->editActionComment, &QAction::triggered, tabManager, &TabManager::commentSelection);
   connect(this->editActionUncomment, &QAction::triggered, tabManager, &TabManager::uncommentSelection);
+  connect(this->editActionMoveLineUp, &QAction::triggered, tabManager, &TabManager::moveLineUp);
+  connect(this->editActionMoveLineDown, &QAction::triggered, tabManager, &TabManager::moveLineDown);
 
   connect(this->editActionToggleBookmark, &QAction::triggered, tabManager, &TabManager::toggleBookmark);
   connect(this->editActionNextBookmark, &QAction::triggered, tabManager, &TabManager::nextBookmark);
@@ -6184,7 +6220,6 @@ void MainWindow::setupMenusAndActions()
   exportMap[FileFormat::OFF] = this->fileActionExportOFF;
   exportMap[FileFormat::WRL] = this->fileActionExportWRL;
   exportMap[FileFormat::POV] = this->fileActionExportPOV;
-  exportMap[FileFormat::AMF] = this->fileActionExportAMF;
   exportMap[FileFormat::DXF] = this->fileActionExportDXF;
   exportMap[FileFormat::SVG] = this->fileActionExportSVG;
   exportMap[FileFormat::PDF] = this->fileActionExportPDF;
@@ -6357,6 +6392,29 @@ void MainWindow::restoreWindowState()
 #endif  // ifdef Q_OS_WIN
   }
 
+  restoreToolBarVisibility();
+}
+
+/**
+  Restore the visibility of the editor and 3D view tool bars.
+
+  Both tool bars are plain child widgets of the editor dock and of the central
+  widget, so they are not covered by the state saved by QMainWindow::saveState().
+  Their visibility is stored separately by the corresponding view actions and
+  has to be applied explicitly.
+ */
+void MainWindow::restoreToolBarVisibility()
+{
+  const QSettingsCached settings;
+  const auto hideEditorToolBar = settings.value("view/hideEditorToolbar").toBool();
+  const auto hide3DViewToolBar = settings.value("view/hide3DViewToolbar").toBool();
+
+  // QAction::setChecked() only emits toggled() when the state actually changes,
+  // therefore the visibility is applied explicitly instead of relying on the slots.
+  viewActionHideEditorToolBar->setChecked(hideEditorToolBar);
+  viewActionHide3DViewToolBar->setChecked(hide3DViewToolBar);
+  editortoolbar->setVisible(!hideEditorToolBar);
+  viewerToolBar->setVisible(!hide3DViewToolBar);
 }
 
 void MainWindow::openRemainingFiles(const QStringList& filenames)
