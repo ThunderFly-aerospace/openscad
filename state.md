@@ -174,3 +174,23 @@ ale **`collectViews` (AST-walk)** měl tři děravá místa, která přímo tref
 - 2026-08-18: Fáze 14C HOTOVÁ — `bend(..., glue = <vůle>)` drží pohromadě
   nespojité importované STL (proximita vrchol×trojúhelník jako druhá relace
   soudržnosti; `glue = 0` = beze změny). Popis a rozhodnutí v `ROADMAP.md` 14C.
+- 2026-10-15: merge upstream `openscad/master` (126 commitů; jediný konflikt
+  `GLView::setupCamera` — naše near/far teď přes upstream `local_gluPerspective`).
+- 2026-10-15: Fáze 18 HOTOVÁ — `slicer_modifier()` (PrusaSlicer modifikátory,
+  negative volume, support blocker/enforcer) v exportu 3MF: `src/core/
+  SlicerModifierNode.{h,cc}` (builtin + typovaná tabulka klíčů PrusaSliceru
+  2.9.2), `src/io/slicer_volumes.{h,cc}` (sběr, jeden objekt s rozsahy
+  trojúhelníků, `Metadata/Slic3r_PE_model.config`), větve v
+  `export_3mf_v1/v2.cc`; plnění v CLI, GUI exportu 3MF a „poslat do sliceru“.
+  Testy `dump/echo-slicer-modifier`, `export-3mf_3mf-slicer-modifier`,
+  unit `[slicer]`. Ověřeno round-tripem v PrusaSliceru 2.9.2. Popis a
+  rozhodnutí v `ROADMAP.md` „Fáze 18“.
+- 2026-10-15: snímky `camera()` a ortho pohledy výkresů modifikátory nekreslí
+  (`CsgInfo::compile_products(tree, false)`); 3MF testy ověřeny i proti
+  lib3mf 2.4.1 (`build-lib3mf2/`, 65/65). Navazuje 18D (barevný průnik,
+  default vidět, jde schovat) — `ROADMAP.md`.
+- 2026-10-15: 18D HOTOVÁ — průnik model ∩ `slicer_modifier` v barvě
+  (`color=`, jinak fialová) v F5, snímcích kamer i výkresech; default vidět,
+  schovat: *View → Show Slicer Modifiers*, `camera(show_modifiers=false)`,
+  `// @sheet … modifiers=off` + checkbox „Slicer modifiers“ v doku. Celý tvar
+  přes `#`. Detaily `ROADMAP.md` 18D.

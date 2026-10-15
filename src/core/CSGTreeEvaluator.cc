@@ -7,6 +7,8 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "core/BaseVisitable.h"
 #include "core/CSGNode.h"
@@ -15,6 +17,7 @@
 #include "core/CsgOpNode.h"
 #include "core/ModuleInstantiation.h"
 #include "core/BendNode.h"
+#include "core/SlicerModifierNode.h"
 #include "core/RenderNode.h"
 #include "core/State.h"
 #include "core/TransformNode.h"
@@ -34,6 +37,46 @@
    with OpenCSG.
  */
 
+namespace {
+
+// Copy of a CSG tree with every leaf recolored and all flags dropped. Iterative,
+// since CSG trees of long unions are chains deep enough to overflow the stack
+// (see CSGOperationDeleter).
+std::shared_ptr<CSGNode> recolorCSGTree(const std::shared_ptr<CSGNode>& root, const Color4f& color)
+{
+  struct Frame {
+    std::shared_ptr<CSGNode> node;
+    bool expanded;
+  };
+  std::vector<Frame> stack{{root, false}};
+  std::vector<std::shared_ptr<CSGNode>> results;
+  while (!stack.empty()) {
+    Frame frame = stack.back();
+    stack.pop_back();
+    if (const auto op = std::dynamic_pointer_cast<CSGOperation>(frame.node)) {
+      if (!frame.expanded) {
+        stack.push_back({frame.node, true});
+        stack.push_back({op->right(), false});
+        stack.push_back({op->left(), false});
+      } else {
+        auto right = std::move(results.back());
+        results.pop_back();
+        auto left = std::move(results.back());
+        results.pop_back();
+        results.push_back(CSGOperation::createCSGNode(op->getType(), left, right));
+      }
+    } else if (const auto leaf = std::dynamic_pointer_cast<CSGLeaf>(frame.node)) {
+      results.push_back(
+        std::make_shared<CSGLeaf>(leaf->polyset, leaf->matrix, color, leaf->label, leaf->index));
+    } else {
+      results.push_back(frame.node);  // empty set
+    }
+  }
+  return results.back();
+}
+
+}  // namespace
+
 std::shared_ptr<CSGNode> CSGTreeEvaluator::buildCSGTree(const AbstractNode& node)
 {
   this->traverse(node);
@@ -44,6 +87,19 @@ std::shared_ptr<CSGNode> CSGTreeEvaluator::buildCSGTree(const AbstractNode& node
     if (t->isBackground()) {
       this->backgroundNodes.push_back(t);
       t.reset();
+    }
+  }
+
+  // Each slicer_modifier() region becomes its own term (model * M), recolored
+  // with the region color. The model term itself stays untouched: renderers
+  // draw these terms on top of it (OpenCSGRenderer::setSlicerRegionProducts).
+  this->slicerRegionNodes.clear();
+  if (t && !t->isEmptySet()) {
+    for (const auto& region : this->slicerRegions) {
+      auto inside = CSGOperation::createCSGNode(OpenSCADOperator::INTERSECTION,
+                                                recolorCSGTree(t, region.color),
+                                                recolorCSGTree(region.term, region.color));
+      if (inside && !inside->isEmptySet()) this->slicerRegionNodes.push_back(inside);
     }
   }
 
@@ -320,12 +376,38 @@ Response CSGTreeEvaluator::visit(State& state, const RenderNode& node)
   return Response::ContinueTraversal;
 }
 
+// slicer_modifier() children are a slicer region, not model geometry: they never
+// join the CSG operations. The region term is kept aside and buildCSGTree()
+// colors the model inside it; with showSlicerModifiers off it is skipped.
+// #slicer_modifier additionally highlights the whole region, %slicer_modifier
+// shows it as background only.
+Response CSGTreeEvaluator::visit(State& state, const SlicerModifierNode& node)
+{
+  if (state.isPrefix()) {
+    return this->showSlicerModifiers ? Response::ContinueTraversal : Response::PruneTraversal;
+  }
+  applyToChildren(state, node, OpenSCADOperator::UNION);
+  std::shared_ptr<CSGNode> region = this->stored_term[node.index()];
+  this->stored_term[node.index()] = CSGNode::createEmptySet();
+  if (region && !region->isEmptySet()) {
+    if (region->isBackground()) {
+      this->backgroundNodes.push_back(region);
+    } else {
+      if (region->isHighlight()) this->highlightNodes.push_back(region);
+      this->slicerRegions.push_back({region, node.regionColor()});
+    }
+  }
+  addToParent(state, node);
+  return Response::ContinueTraversal;
+}
+
 /*!
    A non-affine deformation cannot live in the CSG tree (a CSGLeaf only carries
    a 4x4 matrix), so the subtree is materialized into a single leaf, exactly
    like render() does. In practice bend() wraps an import(), which is already a
    plain PolySet, so nothing extra is paid for it.
  */
+
 Response CSGTreeEvaluator::visit(State& state, const BendNode& node)
 {
   if (state.isPostfix()) {

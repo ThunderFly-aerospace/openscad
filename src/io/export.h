@@ -19,6 +19,7 @@
 #include "glview/Camera.h"
 #include "glview/ColorMap.h"
 #include "io/export_enums.h"
+#include "io/slicer_volumes.h"
 
 using SPDF = Settings::SettingsExportPdf;
 using S3MF = Settings::SettingsExport3mf;
@@ -296,6 +297,10 @@ struct ExportInfo {
   std::shared_ptr<const ExportPdfOptions> optionsPdf;
   std::shared_ptr<const Export3mfOptions> options3mf;
   std::shared_ptr<const ExportSvgOptions> optionsSvg;
+
+  // slicer_modifier() regions; only the 3MF exporter uses them (see
+  // io/slicer_volumes.h). Null or empty = plain export.
+  std::shared_ptr<const SlicerVolumes> slicerVolumes;
 };
 
 ExportInfo createExportInfo(const FileFormat& format, const FileFormatInfo& info,

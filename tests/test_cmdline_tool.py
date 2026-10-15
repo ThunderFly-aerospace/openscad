@@ -294,6 +294,11 @@ def post_process_3mf(filename):
     xml_content = re.sub(r'\s*xmlns:[a-z]+\s*=\s*"[^"]+"\s*', '', xml_content)
     # Normalize end whitespaces of all self closing tags that have attributes
     xml_content = re.sub(r'"\s*/>', r'" />', xml_content)
+    # PrusaSlicer part description written for slicer_modifier(), compared too
+    archive = ZipFile(filename)
+    if "Metadata/Slic3r_PE_model.config" in archive.namelist():
+        xml_content += "\n<!-- Metadata/Slic3r_PE_model.config -->\n"
+        xml_content += archive.read("Metadata/Slic3r_PE_model.config").decode('utf-8')
     with open(filename, 'wb') as xml_file:
         xml_file.write(xml_content.encode('utf-8'))
 

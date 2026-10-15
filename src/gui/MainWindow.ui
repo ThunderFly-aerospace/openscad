@@ -345,6 +345,7 @@
     <addaction name="viewActionShowAxes"/>
     <addaction name="viewActionShowScaleProportional"/>
     <addaction name="viewActionShowCrosshairs"/>
+    <addaction name="viewActionShowSlicerModifiers"/>
     <addaction name="separator"/>
     <addaction name="viewActionTop"/>
     <addaction name="viewActionBottom"/>
@@ -1144,6 +1145,20 @@
    </property>
    <property name="shortcut">
     <string>F12</string>
+   </property>
+  </action>
+  <action name="viewActionShowSlicerModifiers">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Show Slicer &amp;Modifiers</string>
+   </property>
+   <property name="toolTip">
+    <string>Color the parts of the model inside slicer_modifier() regions in the preview</string>
    </property>
   </action>
   <action name="viewActionShowEdges">

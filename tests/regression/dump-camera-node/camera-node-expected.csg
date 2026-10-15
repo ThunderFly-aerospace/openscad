@@ -8,4 +8,5 @@ camera(fov = 60, width = 1920, height = 1080, projection = "perspective");
 multmatrix([[1, 0, 0, 0], [0, 1, 0, 30], [0, 0, 1, 0], [0, 0, 0, 1]]) {
 	camera(focal = 35, sensor = 24, width = 1920, height = 1080, projection = "orthogonal", name = "top");
 }
+camera(focal = 35, sensor = 24, width = 1920, height = 1080, projection = "perspective", name = "plain", show_modifiers = false);
 

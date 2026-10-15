@@ -1,0 +1,14 @@
+WARNING: slicer_modifier() setting 'layer_height' is a per-object setting and has no effect on a modifier, ignoring it in file slicer-modifier.scad, line 21
+WARNING: slicer_modifier() unknown PrusaSlicer setting 'bogus_key', ignoring it in file slicer-modifier.scad, line 21
+WARNING: slicer_modifier() setting 'perimeters' expects an integer, ignoring [1, 2] in file slicer-modifier.scad, line 21
+WARNING: slicer_modifier() ignoring positional argument, settings must be named in file slicer-modifier.scad, line 21
+WARNING: slicer_modifier() setting 'perimeters' expects an integer, ignoring 2.5 in file slicer-modifier.scad, line 22
+WARNING: slicer_modifier() setting 'top_solid_layers' expects an integer, ignoring "abc" in file slicer-modifier.scad, line 22
+WARNING: slicer_modifier() setting 'thin_walls' expects a boolean, ignoring 5 in file slicer-modifier.scad, line 22
+WARNING: slicer_modifier() setting 'fill_angle' expects a number, ignoring "x" in file slicer-modifier.scad, line 22
+WARNING: slicer_modifier() setting 'fill_pattern' expects a string, ignoring 3 in file slicer-modifier.scad, line 22
+WARNING: slicer_modifier() unknown type "wrong", expected "modifier", "negative", "support_blocker" or "support_enforcer"; using "modifier" in file slicer-modifier.scad, line 24
+WARNING: slicer_modifier() settings have no effect on type "support_blocker", ignoring them in file slicer-modifier.scad, line 25
+WARNING: slicer_modifier() name must be a string, ignoring 5 in file slicer-modifier.scad, line 26
+WARNING: slicer_modifier() unable to parse color "notacolor", using the default in file slicer-modifier.scad, line 27
+WARNING: slicer_modifier() unable to parse color [2, 0, 0], using the default in file slicer-modifier.scad, line 28

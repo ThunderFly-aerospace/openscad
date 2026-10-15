@@ -64,7 +64,8 @@ QString getArgValue(const Settings::LocalAppParameter& arg, const std::string& e
 
 bool ExternalToolInterface::exportTemporaryFile(const std::shared_ptr<const Geometry>& rootGeometry,
                                                 const QString& sourceFileName,
-                                                const Camera *const camera)
+                                                const Camera *const camera,
+                                                std::shared_ptr<const SlicerVolumes> slicerVolumes)
 {
   // FIXME: Remove original suffix first
   QTemporaryFile exportFile{
@@ -86,6 +87,7 @@ bool ExternalToolInterface::exportTemporaryFile(const std::shared_ptr<const Geom
   exportedFilename_ = exportFileName.toStdString();
   ExportInfo exportInfo = createExportInfo(exportFormat_, fileformat::info(exportFormat_),
                                            sourceFileName.toStdString(), camera, {});
+  if (exportFormat_ == FileFormat::_3MF) exportInfo.slicerVolumes = std::move(slicerVolumes);
   const bool ok = exportFileByName(rootGeometry, exportedFilename_, exportInfo);
   LOG("Exported temporary file %1$s", exportedFilename_);
   return ok;

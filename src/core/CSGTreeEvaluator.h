@@ -26,6 +26,11 @@ public:
   {
   }
 
+  // slicer_modifier() regions: by default buildCSGTree() also builds a colored
+  // model * region term per region (getSlicerRegionNodes); with false the
+  // regions are left out entirely.
+  void setShowSlicerModifiers(bool show) { this->showSlicerModifiers = show; }
+
   Response visit(State& state, const AbstractNode& node) override;
   Response visit(State& state, const AbstractIntersectionNode& node) override;
   Response visit(State& state, const AbstractPolyNode& node) override;
@@ -35,6 +40,7 @@ public:
   Response visit(State& state, const ColorNode& node) override;
   Response visit(State& state, const RenderNode& node) override;
   Response visit(State& state, const BendNode& node) override;
+  Response visit(State& state, const SlicerModifierNode& node) override;
   Response visit(State& state, const CgalAdvNode& node) override;
 
   std::shared_ptr<CSGNode> buildCSGTree(const AbstractNode& node);
@@ -47,6 +53,12 @@ public:
   [[nodiscard]] const std::vector<std::shared_ptr<CSGNode>>& getBackgroundNodes() const
   {
     return this->backgroundNodes;
+  }
+  // model * region term per slicer_modifier(), recolored with the region color,
+  // in source order (later regions are drawn on top).
+  [[nodiscard]] const std::vector<std::shared_ptr<CSGNode>>& getSlicerRegionNodes() const
+  {
+    return this->slicerRegionNodes;
   }
 
 private:
@@ -64,6 +76,15 @@ private:
 protected:
   const Tree& tree;
   GeometryEvaluator *geomevaluator;
+  bool showSlicerModifiers{true};
+  // slicer_modifier() region terms (union of the node's children) with their
+  // display color, applied to the root term at the end of buildCSGTree().
+  struct SlicerRegion {
+    std::shared_ptr<CSGNode> term;
+    Color4f color;
+  };
+  std::vector<SlicerRegion> slicerRegions;
+  std::vector<std::shared_ptr<CSGNode>> slicerRegionNodes;
   std::shared_ptr<CSGNode> rootNode;
   std::vector<std::shared_ptr<CSGNode>> highlightNodes;
   std::vector<std::shared_ptr<CSGNode>> backgroundNodes;

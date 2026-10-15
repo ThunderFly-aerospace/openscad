@@ -19,6 +19,7 @@
 #include "core/OffsetNode.h"
 #include "core/ProjectionNode.h"
 #include "core/BendNode.h"
+#include "core/SlicerModifierNode.h"
 #include "core/RenderNode.h"
 #include "core/RoofNode.h"
 #include "core/RotateExtrudeNode.h"
@@ -655,6 +656,17 @@ Response GeometryEvaluator::visit(State& state, const RenderNode& node)
     node.progress_report();
     addToParent(state, node, geom);
   }
+  return Response::ContinueTraversal;
+}
+
+/*!
+   slicer_modifier() children describe a slicer region, not model geometry:
+   skip them so they never reach render or export (see SlicerModifierNode.h).
+ */
+Response GeometryEvaluator::visit(State& state, const SlicerModifierNode& node)
+{
+  if (state.isPrefix()) return Response::PruneTraversal;
+  addToParent(state, node, nullptr);
   return Response::ContinueTraversal;
 }
 

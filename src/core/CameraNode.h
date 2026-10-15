@@ -47,6 +47,9 @@ public:
   // Length (mm, world units) of the wireframe frustum marker in the 3D view.
   // Negative means "auto" (scaled to the current zoom).
   double marker{-1.0};
+
+  // Color the slicer_modifier() regions in the snapshot (like the preview).
+  bool show_modifiers{true};
 };
 
 // A camera marker together with its accumulated world transform, produced by

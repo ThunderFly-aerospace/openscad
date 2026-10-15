@@ -105,6 +105,19 @@ void OpenCSGRenderer::prepare(const ShaderUtils::ShaderInfo *shaderinfo)
     if (root_products_) {
       createCSGVBOProducts(*root_products_, false, false, shaderinfo);
     }
+    // A region term repeats the model's own surfaces, and the color pass below
+    // draws with GL_EQUAL: drawn at the model's depth it would paint the whole
+    // model. Pulled slightly towards the viewer (one more step per region, so
+    // later regions win), its depth only matches where the region really is.
+    int level = 0;
+    for (const auto& region : slicer_region_products_) {
+      ++level;
+      const size_t first = vertex_state_containers_.size();
+      createCSGVBOProducts(*region, false, false, shaderinfo);
+      for (size_t i = first; i < vertex_state_containers_.size(); ++i) {
+        vertex_state_containers_[i]->polygonOffsetLevel = level;
+      }
+    }
     if (background_products_) {
       createCSGVBOProducts(*background_products_, false, true, shaderinfo);
     }
@@ -123,6 +136,11 @@ void OpenCSGRenderer::draw(bool showedges, const ShaderUtils::ShaderInfo *shader
                    shaderinfo->type == ShaderUtils::ShaderType::SELECT_RENDERING);
 
   for (const auto& product : vertex_state_containers_) {
+    if (product->polygonOffsetLevel > 0) {
+      GL_CHECKD(glEnable(GL_POLYGON_OFFSET_FILL));
+      GL_CHECKD(glPolygonOffset(-1.0f * product->polygonOffsetLevel,
+                                -4.0f * product->polygonOffsetLevel));
+    }
     if (product->primitives().size() > 1) {
 #if OPENCSG_VERSION >= 0x0180
       if (enable_shader) OpenCSG::setVertexShader(opencsg_vertex_shader_code_);
@@ -167,6 +185,7 @@ void OpenCSGRenderer::draw(bool showedges, const ShaderUtils::ShaderInfo *shader
     }
     GL_TRACE0("glDepthFunc(GL_LEQUAL)");
     GL_CHECKD(glDepthFunc(GL_LEQUAL));
+    if (product->polygonOffsetLevel > 0) GL_CHECKD(glDisable(GL_POLYGON_OFFSET_FILL));
   }
 #endif  // ENABLE_OPENCSG
 }

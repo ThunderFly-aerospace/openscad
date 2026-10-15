@@ -170,6 +170,16 @@ výstupy `build/tests/output/*`, zlaté (expected) `tests/regression/*`.
    `-DENABLE_GUI_TESTS=ON`. Nový: přidat `TestXxx.{h,cc}`, zaregistrovat v
    `CMakeLists.txt:1540-1552` a v `runAllTest()`.
 
+**lib3mf v1 vs. v2.** Debian má jen lib3mf 1.8 → `build/` překládá
+`export_3mf_v1.cc`/`import_3mf_v1.cc`. AppImage používá lib3mf 2.4.1 (v2
+exportér). Pro lokální test v2 je lib3mf 2.4.1 postavená v
+`~/.local/opt/lib3mf-2.4.1` (ze zdroje; GCC 14 potřebuje
+`-DCMAKE_CXX_FLAGS="-include algorithm"`) a druhý build adresář
+`build-lib3mf2/` (konfigurace: `PKG_CONFIG_PATH=$P/lib/pkgconfig cmake -B
+build-lib3mf2 -GNinja … -DCMAKE_PREFIX_PATH=$P -DCMAKE_BUILD_RPATH=$P/lib`).
+Testy 3MF proti v2: `cd build-lib3mf2 && ctest -R '3mf|slicer'`. Zlaté
+soubory jsou společné (`post_process_3mf` normalizuje rozdíly v1/v2).
+
 **Přidání testu** (`doc/testing.md:95`): `.scad` do `tests/data/`, registrace
 v `tests/CMakeLists.txt`, `TEST_GENERATE=1 ctest -R <test>` vygeneruje zlatý
 soubor → **ručně ověřit** → `ctest -R <test>` musí projít.

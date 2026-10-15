@@ -1,0 +1,71 @@
+cube(size = [40, 40, 10], center = false);
+multmatrix([[1, 0, 0, 10], [0, 1, 0, 10], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	slicer_modifier(type = "modifier", name = "hole", fill_density = "80%", perimeters = "5", infill_overlap = "2.5", thin_walls = "1", infill_anchor = "50%", fill_pattern = "gyroid") {
+		group() {
+			cylinder($fn = 0, $fa = 12, $fs = 2, h = 10, r1 = 6, r2 = 6, center = false);
+			cube(size = [2, 2, 2], center = false);
+		}
+	}
+}
+slicer_modifier(type = "modifier", fill_density = "50%", ironing_flowrate = "15%", thin_walls = "0") {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+slicer_modifier(type = "negative", color = [1, 0, 0, 1]) {
+	group() {
+		multmatrix([[1, 0, 0, 30], [0, 1, 0, 30], [0, 0, 1, 5], [0, 0, 0, 1]]) {
+			cube(size = [5, 5, 5], center = false);
+		}
+	}
+}
+slicer_modifier(type = "modifier", color = [0, 0.5, 1, 1]) {
+	group() {
+		multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 5], [0, 0, 0, 1]]) {
+			cube(size = [2, 2, 2], center = false);
+		}
+	}
+}
+slicer_modifier(type = "support_enforcer") {
+	group() {
+		multmatrix([[1, 0, 0, 0], [0, 1, 0, 30], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			cube(size = [5, 5, 5], center = false);
+		}
+	}
+}
+slicer_modifier(type = "modifier") {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+slicer_modifier(type = "modifier") {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+slicer_modifier(type = "modifier") {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+slicer_modifier(type = "support_blocker") {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+slicer_modifier(type = "modifier") {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+slicer_modifier(type = "modifier") {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+slicer_modifier(type = "modifier") {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+

@@ -16,6 +16,15 @@ public:
   std::shared_ptr<class CSGProducts> root_products;
   std::shared_ptr<CSGProducts> highlights_products;
   std::shared_ptr<CSGProducts> background_products;
+  // One product set per slicer_modifier() region (model * region, recolored),
+  // drawn on top of the model, see OpenCSGRenderer::setSlicerRegionProducts.
+  std::vector<std::shared_ptr<CSGProducts>> slicer_region_products;
 
-  bool compile_products(const Tree& tree);
+  // showSlicerModifiers: color the slicer_modifier() regions (default) or leave
+  // them out.
+  bool compile_products(const Tree& tree, bool showSlicerModifiers = true);
+
+  // Normalize the region terms of CSGTreeEvaluator::getSlicerRegionNodes().
+  static std::vector<std::shared_ptr<CSGProducts>> compileSlicerRegions(
+    const std::vector<std::shared_ptr<CSGNode>>& regionNodes, class CSGTreeNormalizer& normalizer);
 };

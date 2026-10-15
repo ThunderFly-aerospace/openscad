@@ -70,6 +70,10 @@ public:
 
   [[nodiscard]] const std::vector<OpenCSG::Primitive *>& primitives() const { return primitives_; }
 
+  // > 0 for slicer_modifier() region products: drawn with a polygon offset of
+  // this many steps towards the viewer (see OpenCSGRenderer::draw).
+  int polygonOffsetLevel{0};
+
 private:
   // primitives_ is used to create the OpenCSG depth buffer (unlit rendering).
   // states_ is used for color rendering (using GL_EQUAL).
@@ -90,6 +94,13 @@ public:
 
   BoundingBox getBoundingBox() const override;
 
+  // slicer_modifier() regions (model * region, recolored), one product set per
+  // region in source order; set before prepare().
+  void setSlicerRegionProducts(std::vector<std::shared_ptr<CSGProducts>> regions)
+  {
+    slicer_region_products_ = std::move(regions);
+  }
+
 private:
   void createCSGVBOProducts(const CSGProducts& products, bool highlight_mode, bool background_mode,
                             const ShaderUtils::ShaderInfo *shaderinfo);
@@ -98,5 +109,6 @@ private:
   std::shared_ptr<CSGProducts> root_products_;
   std::shared_ptr<CSGProducts> highlights_products_;
   std::shared_ptr<CSGProducts> background_products_;
+  std::vector<std::shared_ptr<CSGProducts>> slicer_region_products_;
   std::string opencsg_vertex_shader_code_;
 };

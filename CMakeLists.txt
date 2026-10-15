@@ -1051,6 +1051,7 @@ set(CORE_SOURCES
   src/core/CSGTreeEvaluator.cc
   src/core/BendNode.cc
   src/core/CameraNode.cc
+  src/core/SlicerModifierNode.cc
   src/core/DimrefNode.cc
   src/core/SectionNode.cc
   src/core/LabelNode.cc
@@ -1147,6 +1148,7 @@ set(CORE_SOURCES
   src/io/export.cc
   src/io/export_dxf.cc
   src/io/export_line_drawing.cc
+  src/io/slicer_volumes.cc
   src/io/export_obj.cc
   src/io/export_off.cc
   src/io/export_param.cc

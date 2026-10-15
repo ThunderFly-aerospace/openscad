@@ -240,6 +240,8 @@ private:
   // geometry can never be handed back a stale entry by reusing its address.
   struct DrawingProjCache {
     std::shared_ptr<const Geometry> geom;               // cache key + keep-alive
+    bool modifiers{true};                               // cache key: slicer regions marked
+    std::shared_ptr<const PolySet> mesh;                // drawn mesh (regions baked in)
     std::map<int, std::vector<LineDrawingSeg2D>> edges;  // standard view index -> edges
     std::map<int, std::vector<LineDrawingFace2D>> faces; // standard view index -> fills
     // Sections are keyed on their own parameters too: moving a section() marker
@@ -513,6 +515,7 @@ public slots:
   void on_viewActionThrownTogether_triggered();
   void updateViewModeAfterGLInit();
   void on_viewActionShowEdges_toggled(bool checked);
+  void on_viewActionShowSlicerModifiers_toggled(bool checked);
   void on_viewActionShowAxes_toggled(bool checked);
   void on_viewActionShowScaleProportional_toggled(bool checked);
   void on_viewActionShowCrosshairs_toggled(bool checked);
@@ -560,6 +563,7 @@ private:
   std::shared_ptr<CSGProducts> rootProduct;
   std::shared_ptr<CSGProducts> highlightsProducts;
   std::shared_ptr<CSGProducts> backgroundProducts;
+  std::vector<std::shared_ptr<CSGProducts>> slicerRegionProducts;
   int currentlySelectedObject{-1};
 
   char const *afterCompileSlot;

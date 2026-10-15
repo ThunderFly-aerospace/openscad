@@ -27,6 +27,7 @@ class NodeVisitor : public BaseVisitor,
                     public Visitor<class TransformNode>,
                     public Visitor<class ColorNode>,
                     public Visitor<class CameraNode>,
+                    public Visitor<class SlicerModifierNode>,
                     public Visitor<class DimrefNode>,
                     public Visitor<class SectionNode>,
                     public Visitor<class LabelNode>,
@@ -116,6 +117,13 @@ public:
   // camera() is a pose marker without geometry: treat it like an empty group
   // so it stays invisible in preview/render/export and does not break measurement.
   Response visit(State& state, const CameraNode& node) override
+  {
+    return visit(state, (const AbstractNode&)node);
+  }
+  // slicer_modifier() marks a slicer region; its children are not model geometry.
+  // GeometryEvaluator skips them and CSGTreeEvaluator draws them as background;
+  // other visitors (dumper, cache, ...) can treat it like a plain group.
+  Response visit(State& state, const SlicerModifierNode& node) override
   {
     return visit(state, (const AbstractNode&)node);
   }

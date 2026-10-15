@@ -52,6 +52,7 @@ extern void register_builtin_csgops();
 extern void register_builtin_transform();
 extern void register_builtin_color();
 extern void register_builtin_camera();
+extern void register_builtin_slicer_modifier();
 extern void register_builtin_dimref();
 extern void register_builtin_section();
 extern void register_builtin_label();
@@ -89,6 +90,7 @@ void Builtins::initialize()
   register_builtin_transform();
   register_builtin_color();
   register_builtin_camera();
+  register_builtin_slicer_modifier();
   register_builtin_dimref();
   register_builtin_section();
   register_builtin_label();

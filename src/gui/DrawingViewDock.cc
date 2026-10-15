@@ -1331,6 +1331,12 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
     tr("Fill the views with the model's color() colors (edges stay black). "
        "Shown live and carried into the SVG/PDF export."));
 
+  this->modifiersCheck = new QCheckBox(tr("Slicer modifiers"), central);
+  this->modifiersCheck->setChecked(true);
+  this->modifiersCheck->setToolTip(
+    tr("Fill the part of the model inside slicer_modifier() regions with the region "
+       "color (visible with Fill colors on)."));
+
   this->materializeButton = new QPushButton(tr("Materialize kvóty"), central);
   this->materializeButton->setToolTip(
     tr("Write a // @dim line for each kvota= pair, making them editable."));
@@ -1369,6 +1375,7 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   auto *checkLayout = new FlowLayout(checkRow, 0, -1, 2);
   checkLayout->addWidget(this->showRefsCheck);
   checkLayout->addWidget(this->fillColorsCheck);
+  checkLayout->addWidget(this->modifiersCheck);
   checkLayout->addWidget(this->separateFilesCheck);
   checkLayout->addWidget(this->scaleSpin);
   checkLayout->addWidget(this->exportButton);
@@ -1394,6 +1401,8 @@ DrawingViewDock::DrawingViewDock(QWidget *parent) : Dock(parent)
   // // @sheet and reprojects (fill needs faces; the projection cache keeps it cheap).
   connect(this->fillColorsCheck, &QCheckBox::toggled, this,
           [this](bool) { emit sheetSettingsChanged(); });
+  connect(this->modifiersCheck, &QCheckBox::toggled, this,
+          [this](bool) { emit sheetSettingsChanged(); });
   connect(this->scaleSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
           [this](double) { emit sheetSettingsChanged(); });
 }
@@ -1414,13 +1423,18 @@ bool DrawingViewDock::fillColors() const
   return this->fillColorsCheck && this->fillColorsCheck->isChecked();
 }
 
+bool DrawingViewDock::showSlicerModifiers() const
+{
+  return !this->modifiersCheck || this->modifiersCheck->isChecked();
+}
+
 double DrawingViewDock::sheetGap() const
 {
   return this->gapSpin ? this->gapSpin->value() : 16.0;
 }
 
 void DrawingViewDock::applySheetSettings(double gapMm, double scaleDenominator, bool fill,
-                                         const std::vector<bool>& viewsShown)
+                                         bool modifiers, const std::vector<bool>& viewsShown)
 {
   // Set the controls from the parsed // @sheet without emitting sheetSettingsChanged
   // (blocked), so reading source never writes it straight back.
@@ -1435,6 +1449,10 @@ void DrawingViewDock::applySheetSettings(double gapMm, double scaleDenominator, 
   if (this->fillColorsCheck) {
     QSignalBlocker b(this->fillColorsCheck);
     this->fillColorsCheck->setChecked(fill);
+  }
+  if (this->modifiersCheck) {
+    QSignalBlocker b(this->modifiersCheck);
+    this->modifiersCheck->setChecked(modifiers);
   }
   for (int i = 0; i < this->viewChecks.size() && i < static_cast<int>(viewsShown.size()); ++i) {
     QSignalBlocker b(this->viewChecks.at(i));

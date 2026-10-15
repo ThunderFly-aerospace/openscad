@@ -1787,3 +1787,169 @@ prochází se i těla volaných uživatelských modulů (včetně `use <>` přes
 `SourceFileCache`, s scope-chainem definice a guardem proti rekurzi) a obě větve
 `if/else`; konzumenti používají `uniqueViewPaths()`, takže jedna cesta = jeden
 výstupní soubor. Detaily v `state.md` „17B".
+
+---
+
+## Fáze 18 — `slicer_modifier()`: modifikátory PrusaSliceru v exportu 3MF  ✅ HOTOVO (2026-10-15)
+
+### Zadání / motivace
+
+Modifikátory sliceru (oblast s jinou výplní, víc perimetrů kolem díry, blokátor
+podpor…) dnes autor naklikává v PrusaSliceru ručně po každém exportu. Mají žít
+v `.scad` a cestovat s modelem v `.3mf`.
+
+```scad
+cube([40, 40, 10]);
+slicer_modifier(fill_density = "80%", perimeters = 5)
+    translate([15, 15, -1]) cylinder(d = 12, h = 12);
+slicer_modifier(type = "support_blocker") translate([0, 0, 10]) cube(5);
+```
+
+### Formát (ověřeno ve zdrojácích PrusaSliceru 2.9.2, `src/libslic3r/Format/3mf.cpp`)
+
+- Části objektu = rozsahy trojúhelníků `firstid`/`lastid` (včetně) v **jedné
+  spojené `<mesh>`**; `<components>` se na části nepřevádí. Vrcholy každé části
+  musí tvořit souvislý blok (importér bere vrcholy min..max rozsahu).
+- Popis částí v příloze `Metadata/Slic3r_PE_model.config`:
+  `<object id><volume firstid lastid><metadata type="volume" key value/>…`;
+  atribut `type` (`object`/`volume`) je povinný.
+- Typ části `volume_type`: `ModelPart`, `ParameterModifier`, `NegativeVolume`,
+  `SupportEnforcer`, `SupportBlocker` (od Slic3r PE 1.42); zapisuje se i
+  legacy `modifier="1"`, jako to dělá PrusaSlicer.
+- Nastavení = vlastní klíče PrusaSliceru jako text (`set_deserialize`).
+  **Neznámý klíč shodí načtení celého souboru** (`UnknownOptionException`).
+- `Metadata/Slic3r_PE.config` (profil) se **nezapisuje** — soubor pak není
+  „projekt“, nepřepíše uživateli presety, jen se vycentruje na podložku.
+- Souřadnice: vrcholy v souřadnicích objektu, transformace buildu identita →
+  stačí světové souřadnice z OpenSCADu.
+- Barvy (`basematerials`/`colorgroup`) PrusaSlicer ignoruje; filament jen
+  klíčem `extruder`.
+- Orca/Bambu Prusa formát čtou jen s hlavičkou `Application=PrusaSlicer…` a
+  i pak zahodí vše kromě typu části a `extruder` → **mimo cíl**. Nová (nevydaná)
+  větev PrusaSliceru čte config možná jen ze souborů označených jako
+  PrusaSlicer ≤ 2.99.1 — **rozhodnuto: neimitovat** hlavičku, řešit až nastane.
+
+### Rozhodnutí
+
+- Název **`slicer_modifier`** (slovo „modifier“ v OpenSCADu už znamená `# % ! *`).
+- `type = "modifier"` (default) | `"negative"` | `"support_blocker"` |
+  `"support_enforcer"`; `name = "…"` (jinak `slicer_modifier N`).
+- Nastavení = **pojmenované argumenty 1:1 na klíče PrusaSliceru**. Hodnoty:
+  číslo → text (celé bez desetinné části), string doslova (`"80%"`), bool →
+  `1`/`0`; jiné typy = varování + vynechat.
+- **Vestavěný seznam platných klíčů** = `PrintRegionConfig` z PrusaSliceru
+  2.9.2 + `extruder`, i s typem volby (`PrintObjectConfig` jen pro lepší
+  varování — na modifikátoru nemá účinek). Neznámý klíč nebo hodnota špatného
+  typu = varování a klíč se **nezapíše** (soubor se vždy načte). Nastavení na
+  `negative`/`support_*` = varování + vynechat.
+- Uzel je **marker** jako `camera()`: do geometrie (F6, STL, …) nepřispívá;
+  v náhledu F5 se děti kreslí jako pozadí (`%`), aby bylo vidět kde modifikátor je.
+- Exportuje se **jen 3MF** (v1 i v2 lib3mf — obě API umí přílohy). Bez
+  `slicer_modifier` v modelu je výstup bit po bitu jako dosud.
+- **Jeden objekt:** s modifikátory jde celý model do jednoho mesh objektu
+  (každý top-level kus z lazy-union = vlastní `ModelPart`) + modifikátory jako
+  další části. Přiřazení modifikátorů k více objektům = mimo v1.
+- `view()`: nic extra — modifikátor uvnitř pohledu se exportuje s pohledem.
+- **Mimo rozsah** (možné navázání): barvy `color()` → části s `extruder = N`
+  v jednom exportu; `type = "part"`; per-object nastavení; Orca/Bambu.
+
+### Kroky
+
+1. **18A jádro jazyka:** `src/core/SlicerModifierNode.{h,cc}` (builtin, parsování
+   libovolných pojmenovaných argumentů, validace klíčů, `toString` do dumpu),
+   seznam klíčů `src/core/prusaslicer_keys.h`, registrace v `Builtins.cc`,
+   `NodeVisitor` forward. `GeometryEvaluator`: prune → prázdno.
+   `CSGTreeEvaluator`: děti jako pozadí. Sběr `collectSlicerModifiers(root)`
+   (světová matice jako u kamer).
+2. **18B export:** `ExportInfo::slicerVolumes` (vyhodnocená geometrie ve
+   světových souřadnicích + typ + nastavení), plnění v CLI (`openscad.cc`),
+   GUI exportu 3MF a „poslat do sliceru“ (`ExternalToolInterface`);
+   `export_3mf_v1/v2`: jeden objekt, souvislé bloky vrcholů, rozsahy
+   trojúhelníků, příloha `Slic3r_PE_model.config` (generátor XML sdílený,
+   v `src/io/`).
+3. **18C testy:** dump/echo `slicer-modifier` (+ varování neznámého klíče),
+   unit test generátoru XML, regresní `export-3mf` s modifikátorem
+   (`post_process_3mf` přidá obsah přílohy, je-li), stávající 3MF testy beze
+   změny. Ověření v PrusaSliceru (pokud je k dispozici) / ručně uživatelem.
+
+### Co odhalila implementace
+
+- **Hodnoty ověřené proti skutečnému PrusaSliceru 2.9.2** (`apt install
+  prusa-slicer`, CLI `--export-3mf` round-trip a `--export-gcode`):
+  - špatný **bool / int** (`thin_walls="5"`, `perimeters="abc"`) shodí načtení
+    celého souboru („Invalid value provided for parameter …“) → nestačí
+    whitelist klíčů, validuje se i **typ** hodnoty podle typu volby
+    (Bool/Int/Float/Percent/FloatOrPercent/Enum, tabulka v
+    `SlicerModifierNode.cc`);
+  - špatný **enum** PrusaSlicer jen nahradí výchozí hodnotou s varováním →
+    stringy pro enumy se předávají beze změny;
+  - **holé číslo u procentní volby je poměr**: `fill_density = 50` → 5000 %.
+    U `Percent` voleb (`fill_density`, `ironing_flowrate`,
+    `scarf_seam_start_height`) se k číslu i číselnému stringu doplní `%`.
+- **Locale:** `snprintf` psal pod českým locale `2,5`; čísla se teď formátují
+  v `std::locale::classic()`.
+- Modifikátor se do slicování skutečně promítne (krychle 40×40×10 se středem
+  `fill_density=100`: 3929 mm filamentu proti 2853 mm bez něj).
+
+### Otevřené / mimo rozsah
+
+- Regresní testy běží jen s lib3mf v1 (lokální Debian 1.8.1). Cesta pro v2
+  (AppImage, lib3mf 2.4.1) je napsaná zrcadlově a prošla `-fsyntax-only`
+  proti hlavičkám lib3mf 2.4.1; funkčně ji ověří první build AppImage.
+
+### 18D — zobrazení: průnik s modelem v barvě  ✅ HOTOVO (2026-10-15)
+
+**Rozhodnutí uživatele (2026-10-15).** OpenSCAD neví, *co* je v oblasti
+modifikátoru jinak (infill, perimetry, extruder…), jen *kde*. Vyznačí proto
+**část modelu uvnitř modifikátoru** (model ∩ M) jinou barvou; samotný
+přečnívající tvar modifikátoru se běžně nekreslí. Celý tvar si uživatel ukáže
+standardně přes **`#`** (highlight), jako negativní objem v `difference()`.
+
+- Nový parametr **`color`** na `slicer_modifier` (stejné formy jako `color()`:
+  jméno, `"#rrggbb"`, vektor). **Bez `color` se použije výchozí barva**, takže
+  oblast je v náhledu vidět vždy.
+- **Výchozí: vidět všude** (F5, snímky kamer, výkresy), **jde schovat**
+  (upřesnění uživatele 2026-10-15, nahrazuje původní „kamery/výkresy jen
+  s přepínačem“):
+  - F5: přepínač v menu *View* („Show Slicer Modifiers“), default zapnuto;
+  - `camera(..., show_modifiers = false)` schová ve snímku;
+  - výkres: `// @sheet … modifiers=off` + checkbox v doku Drawing.
+- **Náhled / snímky kamer (OpenCSG):** model zůstává beze změny; každá
+  oblast je **vlastní sada CSG produktů** `model ∩ M` s přebarvenými listy
+  (`CSGTreeEvaluator::getSlicerRegionNodes` → `CsgInfo::compileSlicerRegions`
+  → `OpenCSGRenderer::setSlicerRegionProducts`), kreslená **po modelu
+  s `glPolygonOffset`** (o krok blíž za každou další oblast → pozdější vyhrává
+  v překryvu). Žádný booleovský výpočet. ThrownTogether oblasti nekreslí
+  (bez CSG by přebarvil celý model). Dnešní kreslení celého tvaru jako pozadí
+  (`%`) odpadlo; `%slicer_modifier` dál ukáže jen tvar jako pozadí.
+- **Vektorový výkres** pracuje s meshem → **skutečný boolean** (Manifold,
+  `colorSlicerRegions` v `io/slicer_volumes.cc`): `(model − M) ∪ (model ∩ M)`
+  s druhou částí obarvenou (`setColor`), vnitřní stěny union odstraní.
+  Výsledný mesh je v `DrawingProjCache::mesh` (klíč geometrie + přepínač).
+  Vidět je ve stávající cestě „Fill colors“.
+- F6 / export geometrie: beze změny (modifikátory do geometrie nepatří).
+- Testy: dump `color`, obrazové `preview-*` s modifikátorem (barevný průnik,
+  bez přečnívání) a s `#slicer_modifier` (celý tvar), snímek kamery s/bez
+  `show_modifiers`, výkres s/bez `modifiers=off` (unit nad výplní).
+
+#### Co odhalila implementace 18D
+
+- **Přepis stromu na `(R − M) ∪ (R′ ∩ M′)` v OpenCSG nefunguje.** OpenCSG
+  kreslí barvu produktu s `glDepthFunc(GL_EQUAL)` proti hloubce, kterou
+  nechaly předchozí produkty. `R′` má plochy přesně v místě `R`, takže
+  přebarvil celý model. Proto zvláštní produkty s polygon offsetem.
+- Na hranách oblasti může být pár pixelů artefaktů polygon offsetu (vidět
+  na hraně válce v testu `preview-*_slicer-modifier-preview`).
+- **Výkres bez „Fill colors“ oblast nevyznačí:** hranice oblasti leží
+  v rovině plochy (bez lomu), takže z ní projekce hran neudělá čáru. Případné
+  „obrysy barevných hranic“ by změnily výkresy i pro `color()` — neřešeno.
+- `ManifoldGeometry::toPolySet()` čte barevné schéma → unit test musí volat
+  `PlatformUtils::registerApplicationPath(current_path)`.
+- Testy: `dump/echo-slicer-modifier` (+ `color`), `dump/echo-camera-node`
+  (+ `show_modifiers`), nový `3D/features/slicer-modifier-preview.scad`
+  (auto-glob: dump/render/preview/throwntogether/render-csg), unit
+  `colorSlicerRegions`. Ověřeno i v `build-lib3mf2`. Ručně ověřeno: snímek
+  kamery s/bez `show_modifiers`, `--export-drawing` s/bez `modifiers=off`,
+  GUI smoke (Xvfb). Přepínač *View → Show Slicer Modifiers* a checkbox
+  v doku jsou bez automatického testu.
+

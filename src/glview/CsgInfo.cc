@@ -11,14 +11,16 @@
 #include "glview/preview/CSGTreeNormalizer.h"
 #include "utils/printutils.h"
 
-bool CsgInfo::compile_products(const Tree& tree)
+bool CsgInfo::compile_products(const Tree& tree, bool showSlicerModifiers)
 {
   auto& root_node = tree.root();
   GeometryEvaluator geomevaluator(tree);
   CSGTreeEvaluator evaluator(tree, &geomevaluator);
+  evaluator.setShowSlicerModifiers(showSlicerModifiers);
   const std::shared_ptr<CSGNode> csgRoot = evaluator.buildCSGTree(*root_node);
   std::vector<std::shared_ptr<CSGNode>> highlightNodes = evaluator.getHighlightNodes();
   std::vector<std::shared_ptr<CSGNode>> backgroundNodes = evaluator.getBackgroundNodes();
+  const std::vector<std::shared_ptr<CSGNode>>& regionNodes = evaluator.getSlicerRegionNodes();
 
   LOG("Compiling design (CSG Products normalization)...");
   CSGTreeNormalizer normalizer(RenderSettings::inst()->openCSGTermLimit);
@@ -51,5 +53,21 @@ bool CsgInfo::compile_products(const Tree& tree)
       this->background_products->import(backgroundNode);
     }
   }
+
+  this->slicer_region_products = compileSlicerRegions(regionNodes, normalizer);
   return true;
+}
+
+std::vector<std::shared_ptr<CSGProducts>> CsgInfo::compileSlicerRegions(
+  const std::vector<std::shared_ptr<CSGNode>>& regionNodes, CSGTreeNormalizer& normalizer)
+{
+  std::vector<std::shared_ptr<CSGProducts>> regions;
+  for (const auto& node : regionNodes) {
+    if (auto normalized = normalizer.normalize(node)) {
+      auto products = std::make_shared<CSGProducts>();
+      products->import(normalized);
+      regions.push_back(std::move(products));
+    }
+  }
+  return regions;
 }

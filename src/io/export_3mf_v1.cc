@@ -42,6 +42,7 @@
 #include "geometry/PolySetUtils.h"
 #include "geometry/linalg.h"
 #include "io/export.h"
+#include "io/slicer_volumes.h"
 #include "utils/printutils.h"
 
 #ifdef ENABLE_MANIFOLD
@@ -69,6 +70,8 @@ struct ExportContext {
   Color4f defaultColor;
   DWORD defaultColorId = 0;
   std::map<Color4f, DWORD> materialColors;
+  // Slicer-volume export: triangle order defines the part ranges, never re-sort.
+  bool keepTriangleOrder = false;
   const ExportInfo& info;
   const std::shared_ptr<const Export3mfOptions> options;
 };
@@ -176,11 +179,16 @@ bool handle_triangle_color(PLib3MFPropertyHandler *propertyhandler, const std::u
 /*
  * PolySet must be triangulated.
  */
-bool append_polyset(const std::shared_ptr<const PolySet>& ps, ExportContext& ctx)
+bool append_polyset(const std::shared_ptr<const PolySet>& ps, ExportContext& ctx,
+                    DWORD *resourceId = nullptr)
 {
   PLib3MFModelMeshObject *mesh = nullptr;
   if (lib3mf_model_addmeshobject(ctx.model, &mesh) != LIB3MF_OK) {
     export_3mf_error("Can't add mesh to 3MF model.", ctx.model);
+    return false;
+  }
+  if (resourceId && lib3mf_resource_getresourceid(mesh, resourceId) != LIB3MF_OK) {
+    export_3mf_error("Can't get mesh resource id.", ctx.model);
     return false;
   }
 
@@ -227,7 +235,7 @@ bool append_polyset(const std::shared_ptr<const PolySet>& ps, ExportContext& ctx
     }
   };
 
-  auto sorted_ps = createSortedPolySet(*ps);
+  auto sorted_ps = ctx.keepTriangleOrder ? std::make_unique<PolySet>(*ps) : createSortedPolySet(*ps);
 
   for (const auto& v : sorted_ps->vertices) {
     if (!vertexFunc(v)) {
@@ -354,6 +362,41 @@ static bool append_3mf(const std::shared_ptr<const Geometry>& geom, ExportContex
   return true;
 }
 
+/*
+ * Model and slicer_modifier() volumes as ONE object with PrusaSlicer's
+ * Metadata/Slic3r_PE_model.config describing the parts (see io/slicer_volumes.h).
+ */
+bool append_slicer_object(const std::shared_ptr<const Geometry>& geom, ExportContext& ctx)
+{
+  const auto object = buildSlicerObject(geom, *ctx.info.slicerVolumes, true);
+  if (object.parts.empty()) {
+    export_3mf_error("Export failed, empty geometry.", ctx.model);
+    return false;
+  }
+  ctx.modelcount = 1;
+  ctx.keepTriangleOrder = true;
+  DWORD objectId = 0;
+  if (!append_polyset(object.mesh, ctx, &objectId)) return false;
+
+  std::string config = prusaSlicerModelConfig(objectId, "OpenSCAD Model", object.parts);
+  std::string path = PRUSASLICER_MODEL_CONFIG_PATH;
+  std::string relationship = PRUSASLICER_MODEL_CONFIG_RELATIONSHIP;
+  PLib3MFModelAttachment *attachment = nullptr;
+  if (lib3mf_model_addattachmentutf8(ctx.model, path.data(), relationship.data(), &attachment) !=
+      LIB3MF_OK) {
+    export_3mf_error("Can't add slicer config attachment to 3MF model.", ctx.model);
+    return false;
+  }
+  const bool ok = lib3mf_attachment_readfrombuffer(attachment, reinterpret_cast<BYTE *>(config.data()),
+                                                   config.size()) == LIB3MF_OK;
+  lib3mf_release(attachment);
+  if (!ok) {
+    export_3mf_error("Can't write slicer config attachment to 3MF model.", ctx.model);
+    return false;
+  }
+  return true;
+}
+
 void add_meta_data(PLib3MFModelMeshObject *& model, const std::string& name, const std::string& value,
                    const std::string& value2 = "")
 {
@@ -456,7 +499,8 @@ void export_3mf(const std::shared_ptr<const Geometry>& geom, std::ostream& outpu
                     .info = exportInfo,
                     .options = options3mf};
 
-  if (!append_3mf(geom, ctx)) {
+  const bool slicerExport = exportInfo.slicerVolumes && !exportInfo.slicerVolumes->empty();
+  if (!(slicerExport ? append_slicer_object(geom, ctx) : append_3mf(geom, ctx))) {
     if (ctx.model) lib3mf_release(model);
     return;
   }

@@ -102,8 +102,10 @@ std::unique_ptr<OffscreenView> prepare_preview(Tree& tree, const ViewOptions& op
   if (options.previewer == Previewer::OPENCSG) {
 #ifdef ENABLE_OPENCSG
     PRINTD("Initializing OpenCSGRenderer");
-    renderer = std::make_shared<OpenCSGRenderer>(csgInfo.root_products, csgInfo.highlights_products,
-                                                 csgInfo.background_products);
+    auto opencsgRenderer = std::make_shared<OpenCSGRenderer>(
+      csgInfo.root_products, csgInfo.highlights_products, csgInfo.background_products);
+    opencsgRenderer->setSlicerRegionProducts(csgInfo.slicer_region_products);
+    renderer = opencsgRenderer;
 #else
     fprintf(stderr, "This openscad was built without OpenCSG support\n");
     return 0;
@@ -176,13 +178,15 @@ void configure_camera_snapshot(GLView& glview, Tree& tree, const ViewOptions& op
   Camera camera = cameraFromNode(*info.node);
 
   CsgInfo csgInfo = CsgInfo();
-  csgInfo.compile_products(tree);
+  csgInfo.compile_products(tree, info.node->show_modifiers);
 
   std::shared_ptr<Renderer> renderer;
   if (options.previewer == Previewer::OPENCSG) {
 #ifdef ENABLE_OPENCSG
-    renderer = std::make_shared<OpenCSGRenderer>(csgInfo.root_products, csgInfo.highlights_products,
-                                                 csgInfo.background_products);
+    auto opencsgRenderer = std::make_shared<OpenCSGRenderer>(
+      csgInfo.root_products, csgInfo.highlights_products, csgInfo.background_products);
+    opencsgRenderer->setSlicerRegionProducts(csgInfo.slicer_region_products);
+    renderer = opencsgRenderer;
 #else
     renderer = std::make_shared<ThrownTogetherRenderer>(
       csgInfo.root_products, csgInfo.highlights_products, csgInfo.background_products);
@@ -300,8 +304,10 @@ std::unique_ptr<OffscreenView> render_ortho_view(Tree& tree, const ViewOptions& 
 
   std::shared_ptr<Renderer> renderer;
 #ifdef ENABLE_OPENCSG
-  renderer = std::make_shared<OpenCSGRenderer>(csgInfo.root_products, csgInfo.highlights_products,
-                                               csgInfo.background_products);
+  auto opencsgRenderer = std::make_shared<OpenCSGRenderer>(
+    csgInfo.root_products, csgInfo.highlights_products, csgInfo.background_products);
+  opencsgRenderer->setSlicerRegionProducts(csgInfo.slicer_region_products);
+  renderer = opencsgRenderer;
 #else
   renderer = std::make_shared<ThrownTogetherRenderer>(
     csgInfo.root_products, csgInfo.highlights_products, csgInfo.background_products);

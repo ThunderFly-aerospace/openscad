@@ -911,6 +911,7 @@ list(APPEND EXPORT_OBJ_TEST_FILES ${TEST_SCAD_DIR}/misc/color-export.scad)
 
 list(APPEND EXPORT_3MF_TEST_FILES ${TEST_SCAD_DIR}/3mf/3mf-export.scad)
 list(APPEND EXPORT_3MF_LAZY_UNION_TEST_FILES ${TEST_SCAD_DIR}/experimental/lazyunion-color-cubes.scad)
+list(APPEND EXPORT_3MF_SLICER_TEST_FILES ${TEST_SCAD_DIR}/3mf/3mf-slicer-modifier.scad)
 
 list(APPEND EXPORT_POV_TEST_FILES ${TEST_SCAD_DIR}/pov/pov-export.scad)
 
@@ -989,6 +990,7 @@ add_line_exclusion_for_test(export-obj color-export [[^mtllib .*$]])
 if (ENABLE_LIB3MF_TESTS)
 add_cmdline_test(export-3mf              EXPERIMENTAL OPENSCAD SUFFIX 3mf FILES ${EXPORT_3MF_TEST_FILES} ARGS --enable=predictible-output)
 add_cmdline_test(export-3mf              EXPERIMENTAL OPENSCAD SUFFIX 3mf FILES ${EXPORT_3MF_LAZY_UNION_TEST_FILES} ARGS --enable=predictible-output --enable=lazy-union)
+add_cmdline_test(export-3mf              EXPERIMENTAL OPENSCAD SUFFIX 3mf FILES ${EXPORT_3MF_SLICER_TEST_FILES} ARGS --enable=predictible-output)
 add_cmdline_test(export-3mf-stdio        EXPERIMENTAL OPENSCAD SUFFIX 3mf FILES ${EXPORT_3MF_TEST_FILES} STDIO ARGS --enable=predictible-output --export-format 3mf)
 endif()
 add_cmdline_test(export-pov-as-is        EXPERIMENTAL OPENSCAD SUFFIX pov FILES ${EXPORT_POV_TEST_FILES} ARGS --enable=predictible-output --backend=manifold)
@@ -1158,6 +1160,8 @@ add_cmdline_test(dump-label-node           OPENSCAD SUFFIX csg  FILES ${TEST_SCA
 add_cmdline_test(echo-label-node           OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/label-node.scad)
 add_cmdline_test(dump-bend-node            OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/bend-node.scad)
 add_cmdline_test(echo-bend-node            OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/bend-node.scad)
+add_cmdline_test(dump-slicer-modifier      OPENSCAD SUFFIX csg  FILES ${TEST_SCAD_DIR}/misc/slicer-modifier.scad)
+add_cmdline_test(echo-slicer-modifier      OPENSCAD SUFFIX echo FILES ${TEST_SCAD_DIR}/misc/slicer-modifier.scad)
 
 set(CAMERA_TEST           "${TEST_SCAD_DIR}/3D/misc/camera-tests.scad")
 set(CAMERA_TEST_OFFCENTER "${TEST_SCAD_DIR}/3D/misc/camera-tests-offcenter.scad")

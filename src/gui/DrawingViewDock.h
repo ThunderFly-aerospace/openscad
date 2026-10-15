@@ -411,12 +411,14 @@ public:
   bool isViewSelected(int viewIndex) const;
   // Whether the "Fill colors" mode is on (fill views with model color() colours).
   bool fillColors() const;
+  // Whether slicer_modifier() regions are marked (modifiers= in // @sheet).
+  bool showSlicerModifiers() const;
   // The inter-view spacing in drawing-mm (gap= in // @sheet).
   double sheetGap() const;
   // Push the whole sheet state parsed from // @sheet onto the controls WITHOUT
   // emitting sheetSettingsChanged (signals are blocked), so applying the source does
   // not write it straight back. `viewsShown` is per standard view (0..5).
-  void applySheetSettings(double gapMm, double scaleDenominator, bool fill,
+  void applySheetSettings(double gapMm, double scaleDenominator, bool fill, bool modifiers,
                           const std::vector<bool>& viewsShown);
 
 signals:
@@ -484,6 +486,7 @@ private:
   QPushButton *exportButton;
   QCheckBox *showRefsCheck;
   QCheckBox *fillColorsCheck;
+  QCheckBox *modifiersCheck;
   QCheckBox *separateFilesCheck;
   QDoubleSpinBox *scaleSpin;
   QDoubleSpinBox *gapSpin{nullptr};       // inter-view spacing (mm), persisted as gap=

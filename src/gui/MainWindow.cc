@@ -193,6 +193,7 @@
 #include <opencsg.h>
 
 #include "core/CSGTreeEvaluator.h"
+#include "glview/CsgInfo.h"
 #include "glview/preview/OpenCSGRenderer.h"
 #endif
 #ifdef OPENSCAD_UPDATER
@@ -539,6 +540,7 @@ void MainWindow::loadViewSettings()
   if (settings.value("view/showEdges").toBool()) {
     viewActionShowEdges->setChecked(true);
   }
+  viewActionShowSlicerModifiers->setChecked(settings.value("view/showSlicerModifiers", true).toBool());
   if (settings.value("view/showAxes", true).toBool()) {
     viewActionShowAxes->setChecked(true);
   }
@@ -1111,6 +1113,7 @@ void MainWindow::compileCSG()
     GeometryEvaluator geomevaluator(this->tree);
 #ifdef ENABLE_OPENCSG
     CSGTreeEvaluator csgrenderer(this->tree, &geomevaluator);
+    csgrenderer.setShowSlicerModifiers(viewActionShowSlicerModifiers->isChecked());
 #endif
 
     if (!isClosing) progress_report_prep(this->rootNode, report_func, this);
@@ -1181,6 +1184,11 @@ void MainWindow::compileCSG()
       this->backgroundProducts.reset();
     }
 
+#ifdef ENABLE_OPENCSG
+    this->slicerRegionProducts =
+      CsgInfo::compileSlicerRegions(csgrenderer.getSlicerRegionNodes(), normalizer);
+#endif
+
     if (this->rootProduct && (this->rootProduct->size() >
                               GlobalPreferences::inst()->getValue("advanced/openCSGLimit").toUInt())) {
       LOG(message_group::UI_Warning, "Normalized tree has %1$d elements!", this->rootProduct->size());
@@ -1189,8 +1197,10 @@ void MainWindow::compileCSG()
 #ifdef ENABLE_OPENCSG
     else {
       LOG("Normalized tree has %1$d elements!", (this->rootProduct ? this->rootProduct->size() : 0));
-      this->previewRenderer = std::make_shared<OpenCSGRenderer>(
+      auto opencsgRenderer = std::make_shared<OpenCSGRenderer>(
         this->rootProduct, this->highlightsProducts, this->backgroundProducts);
+      opencsgRenderer->setSlicerRegionProducts(this->slicerRegionProducts);
+      this->previewRenderer = opencsgRenderer;
     }
 #endif  // ifdef ENABLE_OPENCSG
     this->thrownTogetherRenderer = std::make_shared<ThrownTogetherRenderer>(
@@ -1978,7 +1988,8 @@ void MainWindow::sendToExternalTool(ExternalToolInterface& externalToolService)
                    QString::fromStdString("." + fileformat::toSuffix(externalToolService.fileFormat()));
 
   const bool export_status =
-    externalToolService.exportTemporaryFile(rootGeom, activeFileName, &qglview->cam);
+    externalToolService.exportTemporaryFile(rootGeom, activeFileName, &qglview->cam,
+                                            collectSlicerVolumes(this->tree, this->tree.root()));
   if (!export_status) {
     return;
   }
@@ -2648,6 +2659,7 @@ void MainWindow::actionExportFileFormat(int fmt)
     }
 
     exportInfo.options3mf = export3mfDialog.getOptions();
+    exportInfo.slicerVolumes = collectSlicerVolumes(this->tree, this->tree.root());
     actionExport(3, exportInfo);
   } break;
   case FileFormat::CSG: {
@@ -2812,6 +2824,14 @@ void MainWindow::on_viewActionShowEdges_toggled(bool checked)
   settings.setValue("view/showEdges", checked);
   this->qglview->setShowEdges(checked);
   this->qglview->update();
+}
+
+void MainWindow::on_viewActionShowSlicerModifiers_toggled(bool checked)
+{
+  QSettingsCached settings;
+  settings.setValue("view/showSlicerModifiers", checked);
+  // The regions are baked into the CSG products: recompute the preview.
+  if (this->isPreview && this->rootNode) actionRenderPreview();
 }
 
 void MainWindow::on_viewActionShowAxes_toggled(bool checked)
@@ -4366,11 +4386,13 @@ void MainWindow::onDrawingSheetSettingsChanged()
     if (this->drawingDock->isViewSelected(i)) shown << slug[i];
 
   const QString line =
-    QString("// @sheet gap=%1 scale=%2 views=%3 fill=%4")
+    QString("// @sheet gap=%1 scale=%2 views=%3 fill=%4%5")
       .arg(this->drawingDock->sheetGap(), 0, 'g', 5)
       .arg(this->drawingDock->scaleDenom(), 0, 'g', 5)
       .arg(shown.isEmpty() ? QStringLiteral("none") : shown.join(','),
-           this->drawingDock->fillColors() ? QStringLiteral("on") : QStringLiteral("off"));
+           this->drawingDock->fillColors() ? QStringLiteral("on") : QStringLiteral("off"),
+           // default on: written only when switched off, so existing sheets stay as they were
+           this->drawingDock->showSlicerModifiers() ? QString() : QStringLiteral(" modifiers=off"));
 
   // Fáze 15: the // @sheet belongs to the active view. Replace the one owned
   // exactly by the active view (not an inherited common one); if none exists yet,
@@ -5451,7 +5473,7 @@ void MainWindow::refreshDrawingViews()
   };
 
   // Sheet-level settings live in // @sheet comments (gap / scale / shown views /
-  // fill). Each view can carry its own; pick the one whose owner is the deepest
+  // fill / modifiers). Each view can carry its own; pick the one whose owner is the deepest
   // prefix of the active path (so a view's sheet overrides the common one). Parse
   // it onto the dock's controls BEFORE the layout below reads them, so the source
   // is authoritative; applySheetSettings blocks the controls' signals so this does
@@ -5461,6 +5483,7 @@ void MainWindow::refreshDrawingViews()
     double gap = this->drawingDock->sheetGap();
     double scaleDen = this->drawingDock->scaleDenom();
     bool fill = this->drawingDock->fillColors();
+    bool modifiers = this->drawingDock->showSlicerModifiers();
     std::vector<bool> shown(6);
     for (int i = 0; i < 6; ++i) shown[i] = this->drawingDock->isViewSelected(i);
     static const QRegularExpression sheetRe(R"(^\s*//\s*@sheet\b(.*)$)");
@@ -5478,6 +5501,7 @@ void MainWindow::refreshDrawingViews()
       }
     }
     if (bestOwnerLen >= 0) {
+      modifiers = true;  // written only as modifiers=off, so a sheet without it means on
       for (const QString& tok :
            bestTokens.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts)) {
         const int eq = tok.indexOf('=');
@@ -5486,6 +5510,7 @@ void MainWindow::refreshDrawingViews()
         if (k == "gap") gap = v.toDouble();
         else if (k == "scale") { const double d = v.toDouble(); if (d > 1e-6) scaleDen = d; }
         else if (k == "fill") fill = (v == "on" || v == "1" || v == "true");
+        else if (k == "modifiers") modifiers = !(v == "off" || v == "0" || v == "false");
         else if (k == "views") {
           for (int i = 0; i < 6; ++i) shown[i] = false;
           for (const QString& s : v.split(',', Qt::SkipEmptyParts))
@@ -5494,7 +5519,7 @@ void MainWindow::refreshDrawingViews()
         }
       }
     }
-    this->drawingDock->applySheetSettings(gap, scaleDen, fill, shown);
+    this->drawingDock->applySheetSettings(gap, scaleDen, fill, modifiers, shown);
   }
 
   // Section frames, so that h/v/planar dimensions inside a section are measured
@@ -5571,8 +5596,8 @@ void MainWindow::refreshDrawingViews()
     LOG(message_group::Warning, "Drawing: geometry evaluation failed: %1$s", e.what());
     geom = nullptr;
   }
-  const auto ps = geom ? PolySetUtils::getGeometryAsPolySet(geom) : nullptr;
-  if (!ps || ps->isEmpty()) {
+  const auto modelPs = geom ? PolySetUtils::getGeometryAsPolySet(geom) : nullptr;
+  if (!modelPs || modelPs->isEmpty()) {
     this->drawingDock->clearViews();
     return;
   }
@@ -5582,11 +5607,23 @@ void MainWindow::refreshDrawingViews()
   // the comment changed, the mesh did not (see DrawingProjCache in MainWindow.h).
   // The same event bumps the dock's geometry version, so its per-tile pixmap cache
   // survives dimension edits but drops when the mesh really changes.
-  if (this->drawingProjCache.geom != geom) {
+  // slicer_modifier() regions are baked into the drawn mesh (outlined, and filled
+  // with the region color in fill mode), so toggling them is a mesh change too.
+  const bool showModifiers = this->drawingDock->showSlicerModifiers();
+  if (this->drawingProjCache.geom != geom || this->drawingProjCache.modifiers != showModifiers) {
     this->drawingProjCache.clear();
     this->drawingProjCache.geom = geom;
+    this->drawingProjCache.modifiers = showModifiers;
+    this->drawingProjCache.mesh = modelPs;
+    if (showModifiers) {
+      const auto volumes = collectSlicerVolumes(this->tree, this->rootNode);
+      if (volumes && !volumes->empty()) {
+        this->drawingProjCache.mesh = colorSlicerRegions(modelPs, *volumes);
+      }
+    }
     ++this->drawingGeomVersion;
   }
+  const auto ps = this->drawingProjCache.mesh;
   // The colour fills are baked into the tile geometry pixmaps, so toggling fill mode
   // (mesh and scale unchanged) must invalidate them too — otherwise the cached pixmap
   // keeps its old fill state. Treat it like a geometry change and bump the version.

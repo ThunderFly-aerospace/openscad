@@ -17,4 +17,7 @@ camera(fov = 60);
 translate([0, 30, 0])
   camera(projection = "orthogonal", name = "top");
 
+// slicer_modifier() regions left out of this snapshot
+camera(name = "plain", show_modifiers = false);
+
 echo(camera_node = "ok");
