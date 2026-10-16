@@ -39,6 +39,7 @@ struct CliDrawingExport {
   bool defaultModelViews{false};        // --default-model-views: views with drawings_export = true
   std::string prefix;                   // output path stem
   std::string ext;                      // ".svg" | ".pdf" | ".png" | ".dxf"
+  double dpi{96.0};                     // --drawing-dpi: raster resolution for .png
 };
 
 int gui(std::vector<std::string>& inputFiles, const std::filesystem::path& original_path, int argc,

@@ -67,6 +67,7 @@
 #include <map>
 #include <memory>
 #include <ostream>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -114,6 +115,7 @@
 #include "platform/PlatformUtils.h"
 #include "utils/StackCheck.h"
 #include "utils/exceptions.h"
+#include "utils/filename_utils.h"
 #include "utils/printutils.h"
 
 #ifdef ENABLE_PYTHON
@@ -593,13 +595,13 @@ static std::vector<ViewSpec> resolveViewSpecs(SourceFile *root_file,
   // overwrite it.
   if (allModelViews) {
     for (const auto& info : uniqueViewPaths(collectViews(root_file))) {
-      specs.push_back({info.fullPath, boost::algorithm::join(info.fullPath, "_")});
+      specs.push_back({info.fullPath, sanitizedViewTag(info.fullPath)});
     }
     if (specs.empty()) specs.push_back({{}, ""});
   } else if (defaultModelViews) {
     for (const auto& info : uniqueViewPaths(collectViews(root_file))) {
       if (!viewIsDefaultFor(info, kind)) continue;
-      specs.push_back({info.fullPath, boost::algorithm::join(info.fullPath, "_")});
+      specs.push_back({info.fullPath, sanitizedViewTag(info.fullPath)});
     }
     if (specs.empty()) {
       // Not an error: a CI job may run the camera, drawing and model exports over
@@ -615,10 +617,16 @@ static std::vector<ViewSpec> resolveViewSpecs(SourceFile *root_file,
       std::vector<std::string> path;
       boost::split(path, v, boost::is_any_of("/"));
       path.erase(std::remove(path.begin(), path.end(), std::string()), path.end());
-      specs.push_back({path, boost::algorithm::join(path, "_")});
+      specs.push_back({path, sanitizedViewTag(path)});
     }
   } else {
     specs.push_back({{}, ""});
+  }
+  // Tags are filename fragments: different view names may sanitize to the same
+  // tag ("Díl A" / "Díl_A"), which must not overwrite each other's output.
+  std::set<std::string> usedTags;
+  for (auto& spec : specs) {
+    if (!spec.tag.empty()) spec.tag = uniqueFilename(spec.tag, usedTags);
   }
   return specs;
 }
@@ -738,6 +746,7 @@ int export_cameras(const std::string& rawInput, const ViewOptions& viewOptions,
 
   int failures = 0;
   int camerasSeen = 0;
+  std::set<std::string> usedOutfiles;
   for (const auto& spec : specs) {
     fs::current_path(fparent);
     EvaluationSession session{fparent.string()};
@@ -767,7 +776,12 @@ int export_cameras(const std::string& rawInput, const ViewOptions& viewOptions,
       const std::string name = (info.node && !info.node->camera_name.empty())
                                  ? info.node->camera_name
                                  : std::to_string(index);
-      const std::string outfile = prefix + vtag + "_" + name + ".png";
+      // The camera name is user text: sanitize it for the filename (the prefix is
+      // the user's own path and stays as given) and keep same-named cameras apart.
+      std::string fileTag = sanitizeFilenamePart(name);
+      if (fileTag.empty()) fileTag = std::to_string(index);
+      const std::string outfile =
+        uniqueFilename(prefix + vtag + "_" + fileTag, usedOutfiles) + ".png";
       auto glview = render_camera_preview(tree, viewOptions, info);
       if (!glview || !glview->save(outfile.c_str())) {
         LOG("Failed to render camera '%1$s'.", name);
@@ -1196,6 +1210,7 @@ int openscad_main(int argc, char **argv)
       "view(s) to <prefix>[_view].<fmt>. Honours --model-view / --all-model-views. Needs Qt "
       "(run under xvfb or -platform offscreen). (Fáze 16B)")
     ("drawing-format", po::value<std::string>(), "=svg|pdf|png|dxf output format for --export-drawing (default svg)")
+    ("drawing-dpi", po::value<double>(), "=dpi raster resolution of --drawing-format png (default 96)")
     ("projection", po::value<std::string>(), "=(o)rtho or (p)erspective when exporting png")
     ("csglimit", po::value<unsigned int>(), "=n -stop rendering at n CSG elements when exporting png")
     ("summary", po::value<std::vector<std::string>>(),
@@ -1498,6 +1513,13 @@ int openscad_main(int argc, char **argv)
       return 1;
     }
     req.ext = "." + fmt;
+    if (vm.count("drawing-dpi")) {
+      req.dpi = vm["drawing-dpi"].as<double>();
+      if (!(req.dpi >= 10.0 && req.dpi <= 2400.0)) {
+        LOG("--drawing-dpi must be between 10 and 2400 (got %1$g).", req.dpi);
+        return 1;
+      }
+    }
     std::vector<std::string> guiInputs = inputFiles;
     return gui(guiInputs, original_path, argc, argv, "none", false, &req);
 #endif

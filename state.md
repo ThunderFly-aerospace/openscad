@@ -85,8 +85,15 @@ stav implementace** (co je hotové/ověřené, co zbývá, kde jsem skončil).
       - 16B-3: `MainWindow::exportDrawingHeadless(modelViews, all, prefix, ext)`
         (synchronní `actionRenderPreview` per pohled → `dock->exportToPath`).
         `gui()` + `CliDrawingExport` (openscad_gui.{h,cc}) → `QTimer::singleShot`.
-        `openscad.cc`: `--export-drawing`/`--drawing-format` routuje do `gui()`
-        (guard `#ifndef OPENSCAD_NOGUI`).
+        `openscad.cc`: `--export-drawing`/`--drawing-format`/`--drawing-dpi` routuje do
+        `gui()` (guard `#ifndef OPENSCAD_NOGUI`).
+      - `renderSheetToFile` roztáhne list na bbox všech kreslených primitiv (kóty,
+        popisky, `at=` dlaždice i v záporných souřadnicích, +5 mm) — layout počítá
+        jen s geometrií pohledů, takže dřív kóty mimo okraj ořízl. PNG má strop
+        32000 px/stranu a 2^28 px (sníží dpi s varováním).
+      - Jména souborů z `view()`/`camera(name=)` jdou přes `sanitizedViewTag` /
+        `sanitizeFilenamePart` (`src/utils/filename_utils.*`, `g_str_to_ascii`),
+        kolize → `uniqueFilename` (`_2`, `_3`). Prefix se nesanitizuje.
       - Ověřeno pod xvfb: `--model-view a` → out_a.svg (25 polyline+text); PNG 325×280;
         `--all-model-views` → oba pohledy. Plná ctest zelená (9 flaky image, sériově OK).
 

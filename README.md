@@ -127,12 +127,18 @@ Nad rámec standardního OpenSCADu (`-o out.stl`, `--camera`, `-D`, …):
 | `--all-model-views` | vyexportuje **každý `view()`** v modelu, jeden soubor na pohled |
 | `--default-model-views` | vyexportuje jen pohledy, které si o daný export **řekly v modelu**: `camera_export=true` pro `--export-cameras`, `drawings_export=true` pro `--export-drawing`, `model_export=true` pro `-o`. Vždy tag pohledu ve jméně. Když není označen žádný pohled → varování a nic (ne chyba, aby CI matice nespadla) |
 | `--list-model-views[=text\|json]` | vypíše pohledy modelu a jejich vlajky a skončí (jen parsuje) — pro **matrix job v CI** |
-| `--export-drawing <prefix>` | **technický výkres** (ortho pohledy + kóty + řezy) zvolených pohledů → `<prefix>[_pohled].<fmt>`. `--drawing-format svg\|pdf\|png\|dxf` (default svg). Respektuje `--model-view`/`--all-model-views`. Potřebuje Qt + offscreen (běž pod `xvfb-run`) |
+| `--export-drawing <prefix>` | **technický výkres** (ortho pohledy + kóty + řezy) zvolených pohledů → `<prefix>[_pohled].<fmt>`. `--drawing-format svg\|pdf\|png\|dxf` (default svg), `--drawing-dpi N` = rozlišení PNG (default 96; u obřího listu se sníží, aby PNG nepřesáhlo 32000 px na stranu / 2^28 px). List se vždy roztáhne na **všechno nakreslené** (kóty, popisky, volně umístěné detaily/řezy), nic se neořízne. Respektuje `--model-view`/`--all-model-views`. Potřebuje Qt + offscreen (běž pod `xvfb-run`) |
 | `-o model.obj` | OBJ **+ sesterský `.mtl`** s barvami z `color()` (pro Blender) |
 
 Tag pohledu se u dávky vkládá do jména výstupu: `out.stl` → `out_pcb.stl`,
 `out_assembly_exploded.stl`. Totéž platí pro `--summary-file` (každý pohled má
 vlastní JSON) a `-d deps.d` uvádí skutečně zapsaná jména souborů.
+
+Jména pohledů a kamer se ve jménech souborů **sanitizují**: diakritika se
+přepíše na ASCII, mezery a jiné znaky mimo `[A-Za-z0-9._-]` na `_`
+(`view("Přední díl")` → `out_Predni_dil.svg`, `camera(name="Pohled zepředu")` →
+`cam_Pohled_zepredu.png`). Když se dvě jména sanitizují na stejný tag, druhý
+dostane příponu `_2`. `<prefix>` zadaný uživatelem zůstává beze změny.
 
 Přednost při výběru pohledů: `--all-model-views` > `--model-view` >
 `--default-model-views` (kombinace = varování, že se `--default-model-views`

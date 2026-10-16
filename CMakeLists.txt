@@ -1173,6 +1173,7 @@ set(CORE_SOURCES
   src/utils/svg.cc
   src/utils/vector_math.cc
   src/utils/camera_math.cc
+  src/utils/filename_utils.cc
   src/utils/version_check.h
   ${LIB3MF_SOURCES}
   ${PLATFORM_SOURCES}

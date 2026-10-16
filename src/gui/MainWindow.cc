@@ -148,6 +148,7 @@
 #include "glview/GLView.h"
 #include "glview/OffscreenView.h"
 #include "utils/camera_math.h"
+#include "utils/filename_utils.h"
 #include "gui/Editor.h"
 #include "gui/Export3mfDialog.h"
 #include "gui/ExportPdfDialog.h"
@@ -3979,7 +3980,7 @@ void MainWindow::onViewSwitcherChanged(int index)
 
 bool MainWindow::exportDrawingHeadless(const std::vector<std::string>& modelViews,
                                        bool allModelViews, bool defaultModelViews,
-                                       const QString& prefix, const QString& ext)
+                                       const QString& prefix, const QString& ext, double dpi)
 {
   if (!this->drawingDock || !this->activeEditor) {
     LOG(message_group::Error, "Drawing export: no document loaded.");
@@ -4004,7 +4005,7 @@ bool MainWindow::exportDrawingHeadless(const std::vector<std::string>& modelView
   if (allModelViews) {
     if (this->rootFile) {
       for (const auto& info : uniqueViewPaths(collectViews(this->rootFile.get()))) {
-        specs.emplace_back(info.fullPath, boost::algorithm::join(info.fullPath, "_"));
+        specs.emplace_back(info.fullPath, sanitizedViewTag(info.fullPath));
       }
     }
     if (specs.empty()) specs.emplace_back(std::vector<std::string>{}, std::string());
@@ -4014,7 +4015,7 @@ bool MainWindow::exportDrawingHeadless(const std::vector<std::string>& modelView
     if (this->rootFile) {
       for (const auto& info : uniqueViewPaths(collectViews(this->rootFile.get()))) {
         if (!viewIsDefaultFor(info, ViewExportKind::Drawings)) continue;
-        specs.emplace_back(info.fullPath, boost::algorithm::join(info.fullPath, "_"));
+        specs.emplace_back(info.fullPath, sanitizedViewTag(info.fullPath));
       }
     }
     if (specs.empty()) {
@@ -4029,10 +4030,16 @@ bool MainWindow::exportDrawingHeadless(const std::vector<std::string>& modelView
       std::vector<std::string> path;
       for (const QString& s : QString::fromStdString(v).split('/', Qt::SkipEmptyParts))
         path.push_back(s.toStdString());
-      specs.emplace_back(path, boost::algorithm::join(path, "_"));
+      specs.emplace_back(path, sanitizedViewTag(path));
     }
   } else {
     specs.emplace_back(std::vector<std::string>{}, std::string());
+  }
+
+  // Distinct view names can sanitize to the same tag; keep their files apart.
+  std::set<std::string> usedTags;
+  for (auto& spec : specs) {
+    if (!spec.second.empty()) spec.second = uniqueFilename(spec.second, usedTags);
   }
 
   bool ok = true;
@@ -4040,17 +4047,18 @@ bool MainWindow::exportDrawingHeadless(const std::vector<std::string>& modelView
     this->activeViewPath = viewPath;
     actionRenderPreview();  // synchronous rebuild of the dock's sheet for this view
 
+    const std::string viewName =
+      viewPath.empty() ? std::string("(root)") : boost::algorithm::join(viewPath, "/");
     QString path = prefix;
     if (!tag.empty()) path += "_" + QString::fromStdString(tag);
     path += ext;
-    if (this->drawingDock->exportToPath(path)) {
-      LOG("Exported drawing (view '%1$s') to %2$s", tag.empty() ? std::string("(root)") : tag,
-          path.toStdString());
+    if (this->drawingDock->exportToPath(path, dpi)) {
+      LOG("Exported drawing (view '%1$s') to %2$s", viewName, path.toStdString());
     } else {
       LOG(message_group::Warning,
           "Drawing export: nothing to draw for view '%1$s' "
           "(needs at least one selected view with geometry).",
-          tag.empty() ? std::string("(root)") : tag);
+          viewName);
       ok = false;
     }
   }

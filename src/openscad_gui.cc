@@ -393,7 +393,7 @@ int gui(std::vector<std::string>& inputFiles, const std::filesystem::path& origi
       const bool ok = mainwin->exportDrawingHeadless(
         drawingExport->modelViews, drawingExport->allModelViews, drawingExport->defaultModelViews,
         QString::fromStdString(drawingExport->prefix),
-        QString::fromStdString(drawingExport->ext));
+        QString::fromStdString(drawingExport->ext), drawingExport->dpi);
       app.exit(ok ? 0 : 1);
     });
   }

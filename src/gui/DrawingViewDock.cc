@@ -1,6 +1,7 @@
 #include "gui/DrawingViewDock.h"
 
 #include "gui/FlowLayout.h"
+#include "utils/printutils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,6 +12,8 @@
 #include <QFileDialog>
 #include <QCheckBox>
 #include <QDoubleSpinBox>
+#include <QFont>
+#include <QFontMetricsF>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QMarginsF>
@@ -1613,10 +1616,11 @@ struct Placement { const OrthoViewData *v; double ox, oy; QString slug; double d
 // consumes the same primitives, so all of them are truly WYSIWYG. File-scope (no
 // dock state) so the GUI and the CLI share one export path.
 static void renderSheetToFile(const QVector<Placement>& places, double sheetWmm,
-                              double sheetHmm, const QString& path)
+                              double sheetHmm, const QString& path, double rasterDpi)
 {
-  const double dpi = 96.0;
-  const double mmToPx = dpi / 25.4;
+  const bool isPng = path.endsWith(".png", Qt::CaseInsensitive);
+  // Vector formats keep their physical size whatever the dpi; only PNG uses it.
+  double dpi = isPng && rasterDpi > 0 ? rasterDpi : 96.0;
   const double fontMm = 3.0, edgeMm = 0.3, dimMm = 0.25, witMm = 0.15, arrowMm = 2.5;
   {
     std::vector<QLineF> edgeSegs, hatchSegs, dimSegs, witSegs;
@@ -1743,6 +1747,74 @@ static void renderSheetToFile(const QVector<Placement>& places, double sheetWmm,
     }
   }
 
+  // Fit the sheet to what is actually drawn. The layout sizes the sheet from the
+  // views' geometry boxes only, so dimensions, labels and free at= tiles can reach
+  // past it (even to negative coordinates) and would be clipped in every format.
+  {
+    double x0 = 0, y0 = 0, x1 = sheetWmm, y1 = sheetHmm;
+    bool any = false;
+    double cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;  // drawn content extents
+    auto addPt = [&](const QPointF& p) {
+      if (!std::isfinite(p.x()) || !std::isfinite(p.y())) return;
+      if (!any) { cx0 = cx1 = p.x(); cy0 = cy1 = p.y(); any = true; return; }
+      cx0 = std::min(cx0, p.x()); cx1 = std::max(cx1, p.x());
+      cy0 = std::min(cy0, p.y()); cy1 = std::max(cy1, p.y());
+    };
+    for (const auto *segs : {&edgeSegs, &hatchSegs, &dimSegs, &witSegs})
+      for (const auto& l : *segs) { addPt(l.p1()); addPt(l.p2()); }
+    for (const auto& h : arrows) for (const auto& p : h) addPt(p);
+    for (const auto& [poly, color] : fillPolys) for (const auto& p : poly) addPt(p);
+    // Text extents in mm, measured with the same font the painter uses.
+    QFont f;
+    f.setPixelSize(100);
+    const QFontMetricsF fm(f);
+    auto textW = [&](const QString& t) { return fm.horizontalAdvance(t) / 100.0 * fontMm; };
+    for (const auto *ls : {&labels, &textLabels})
+      for (const auto& [pos, txt] : *ls) {  // centred boxes
+        const double hw = textW(txt) / 2 + 1.0, hh = fontMm;
+        addPt(pos - QPointF(hw, hh));
+        addPt(pos + QPointF(hw, hh));
+      }
+    for (const auto& [pos, txt] : titles) {  // baseline-left text
+      addPt(pos - QPointF(0, fontMm));
+      addPt(pos + QPointF(textW(txt), fontMm * 0.4));
+    }
+    if (any) {
+      constexpr double kFitMarginMm = 5.0;
+      x0 = std::min(x0, cx0 - kFitMarginMm); y0 = std::min(y0, cy0 - kFitMarginMm);
+      x1 = std::max(x1, cx1 + kFitMarginMm); y1 = std::max(y1, cy1 + kFitMarginMm);
+    }
+    const QPointF shift(-x0, -y0);
+    if (!shift.isNull()) {
+      for (auto *segs : {&edgeSegs, &hatchSegs, &dimSegs, &witSegs})
+        for (auto& l : *segs) l.translate(shift);
+      for (auto& h : arrows) h.translate(shift);
+      for (auto& fp : fillPolys) fp.first.translate(shift);
+      for (auto *ls : {&labels, &textLabels, &titles})
+        for (auto& lp : *ls) lp.first += shift;
+    }
+    sheetWmm = x1 - x0;
+    sheetHmm = y1 - y0;
+  }
+
+  // Keep the raster within what QImage/QPainter handle (and a sane amount of
+  // memory); a large 1:1 sheet at a high dpi would otherwise fail or be clipped.
+  if (isPng) {
+    constexpr double kMaxSidePx = 32000.0, kMaxPixels = 268435456.0;  // 2^28 px = 1 GiB ARGB
+    const double wpx = sheetWmm * dpi / 25.4, hpx = sheetHmm * dpi / 25.4;
+    double k = std::min({1.0, kMaxSidePx / std::max(wpx, 1.0), kMaxSidePx / std::max(hpx, 1.0),
+                         std::sqrt(kMaxPixels / std::max(wpx * hpx, 1.0))});
+    if (k < 1.0) {
+      const double reduced = std::floor(dpi * k);
+      LOG(message_group::Warning,
+          "Drawing export: a %1$.0f x %2$.0f mm sheet at %3$g dpi is too large for PNG; "
+          "using %4$g dpi.",
+          sheetWmm, sheetHmm, dpi, reduced);
+      dpi = reduced;
+    }
+  }
+  const double mmToPx = dpi / 25.4;
+
   if (path.endsWith(".dxf", Qt::CaseInsensitive)) {
     std::ofstream out(path.toStdString());
     if (!out.is_open()) return;
@@ -1842,8 +1914,15 @@ static void renderSheetToFile(const QVector<Placement>& places, double sheetWmm,
     }
   };
 
-  if (path.endsWith(".png", Qt::CaseInsensitive)) {
+  if (isPng) {
     QImage img(std::max(1, sheetWpx), std::max(1, sheetHpx), QImage::Format_ARGB32);
+    if (img.isNull()) {
+      LOG(message_group::Error, "Drawing export: cannot allocate a %1$d x %2$d px image.",
+          sheetWpx, sheetHpx);
+      return;
+    }
+    img.setDotsPerMeterX(qRound(dpi / 0.0254));
+    img.setDotsPerMeterY(qRound(dpi / 0.0254));
     img.fill(Qt::white);
     QPainter p(&img);
     paintSheet(p);
@@ -1876,7 +1955,8 @@ bool DrawingViewDock::exportDrawingSheet(const QList<OrthoViewData>& views,
                                          const QList<OrthoViewData>& sectionViews,
                                          const QList<OrthoViewData>& detailViews,
                                          const std::vector<bool>& selectedViews, double scale,
-                                         double gapMm, bool separateFiles, const QString& path)
+                                         double gapMm, bool separateFiles, const QString& path,
+                                         double dpi)
 {
   const double marginMm = 10.0, titleMm = 7.0;
   std::vector<bool> sel(kViewCount, false);
@@ -1894,7 +1974,7 @@ bool DrawingViewDock::exportDrawingSheet(const QList<OrthoViewData>& views,
       const QString slug = "_" + t.slug;
       if (dot >= 0) p.insert(dot, slug); else p += slug;
       renderSheetToFile({{t.v, marginMm, marginMm + titleMm, t.slug, t.drawScale}},
-                        w + 2 * marginMm, h + titleMm + 2 * marginMm, p);
+                        w + 2 * marginMm, h + titleMm + 2 * marginMm, p, dpi);
     }
   } else {
     // Composed first-angle sheet, laid out by the shared engine.
@@ -1903,24 +1983,26 @@ bool DrawingViewDock::exportDrawingSheet(const QList<OrthoViewData>& views,
     for (int i = 0; i < tiles.size(); ++i)
       places.push_back({tiles.at(i).v, lay.origins.at(i).x(), lay.origins.at(i).y(),
                         tiles.at(i).slug, tiles.at(i).drawScale});
-    renderSheetToFile(places, lay.wMm, lay.hMm, path);
+    renderSheetToFile(places, lay.wMm, lay.hMm, path, dpi);
   }
   return true;
 }
 
-bool DrawingViewDock::exportToPath(const QString& path)
+bool DrawingViewDock::exportToPath(const QString& path, double dpi)
 {
   bool any = false;
   for (int i = 0; i < this->views.size(); ++i)
     if (isViewSelected(i) && this->views.at(i).valid()) any = true;
   for (const auto& s : this->sectionViews)
     if (s.valid()) any = true;
+  for (const auto& d : this->detailViews)
+    if (d.valid()) any = true;
   if (!any || path.isEmpty()) return false;
 
   std::vector<bool> sel(kViewCount, false);
   for (int i = 0; i < kViewCount; ++i) sel[i] = isViewSelected(i);
   return exportDrawingSheet(this->views, this->sectionViews, this->detailViews, sel, exportScale(),
-                            sheetGap(), this->separateFilesCheck->isChecked(), path);
+                            sheetGap(), this->separateFilesCheck->isChecked(), path, dpi);
 }
 
 void DrawingViewDock::exportDrawing()

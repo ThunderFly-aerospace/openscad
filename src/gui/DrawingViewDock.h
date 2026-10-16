@@ -385,13 +385,15 @@ public:
                                  const QList<OrthoViewData>& sectionViews,
                                  const QList<OrthoViewData>& detailViews,
                                  const std::vector<bool>& selectedViews, double scale,
-                                 double gapMm, bool separateFiles, const QString& path);
+                                 double gapMm, bool separateFiles, const QString& path,
+                                 double dpi = 96.0);
 
   void setViews(const QList<OrthoViewData>& views, const QStringList& titles);
   // Export the dock's current drawing (its views/sections/details + sheet settings)
   // to `path` (format from extension), with no file dialog — for the CLI export
   // (Fáze 16B). Returns false if there is nothing to draw.
-  bool exportToPath(const QString& path);
+  // `dpi` is the raster resolution of a .png (vector formats ignore it).
+  bool exportToPath(const QString& path, double dpi = 96.0);
   // Forwarded to the sheet: bump when the mesh changed so the per-tile geometry
   // pixmap cache survives a dimension edit but drops on a real geometry change.
   void setGeometryVersion(int version);
